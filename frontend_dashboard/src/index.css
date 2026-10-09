@@ -1,0 +1,32 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* spec/03 §3 暗色工业大屏主题：整页禁止滚动条（仅卡片/告警区内部滚动） */
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background-color: #0b0e14;
+  color: #e6edf3;
+  font-family: 'Inter', 'HarmonyOS Sans SC', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+}
+
+/* 细滚动条，不抢视觉 */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: #0b0e14;
+}
+*::-webkit-scrollbar-thumb {
+  background: #1a2230;
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #2b3648;
+}

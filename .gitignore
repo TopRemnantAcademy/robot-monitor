@@ -1,6 +1,7 @@
-# 密钥与本地环境
+# 密钥与本地环境（.env.example 是模板，必须入库）
 .env
 .env.*
+!.env.example
 *.local
 
 # Python

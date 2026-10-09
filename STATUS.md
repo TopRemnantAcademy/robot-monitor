@@ -18,8 +18,8 @@
 | 02 | 模拟器 | spec/04 | orders/02-simulator.md | — | **已完成**（NPC 产出但推送失败丢失；主代理本地实现并实测通过，11/11） |
 | 03 | 后端采集存储 | spec/01 | orders/03-backend.md | — | **已实现（主代理）**，静态校验 13/13 通过；运行时未验（见 §七） |
 | 04 | 告警引擎 | spec/02 | orders/04-alert-engine.md | — | **已实现（主代理）**，规则逻辑 20/20 实测通过 |
-| 05 | 前端看板 | spec/03 | orders/05-frontend.md | 前端看板工程师 | 待实现 |
-| 06 | 联调压测 | spec/05 阶段六 | orders/06-integration.md | 测试 + 压测 | 待实现 |
+| 05 | 前端看板 | spec/03 | orders/05-frontend.md | 前端看板工程师 | **已实现（NPC CodeBuddy）**，`npm run build` RC=0；5 项集成验证全通过 |
+| 06 | 联调压测 | spec/05 阶段六 | orders/06-integration.md | 测试 + 压测 | 待实现（05 已就绪，可开工） |
 
 ## 二、开工前规划审计（已完成，10 项缺陷已修）
 
@@ -73,6 +73,15 @@ CAgg 内 `first()/last()`，本项目锁 2.13.1，合法。
 - **CI 配置必须在仓库根 `.cnb.yml`**，放 `.cnb/.yml` 时 `build-crontab-sync` 报 `CONFIG_YAML_EMPTY`。
 
 ## 七、验证边界（**未验证**事项，不得当作已通过）
+
+| 模块 | 已验证 | 未验证 |
+| :--- | :--- | :--- |
+| 05 前端 | ✅ `npm install` + `npm run build` **RC=0**（tsc --noEmit + vite build，638 modules）<br>✅ 5 项集成验证全通过（见下）：1000 msg/s 洪流下仅 **11 次** React 渲染、type 三分支、alert prepend、指数退避 1s→2s→4s→8s、REST history→ECharts 3 series、无数据 100 张离线占位卡<br>✅ 24 关节键名与 spec/00 §5.5 / 后端 telemetry.py **逐字逐序一致**<br>✅ 10 项颜色 token + 4 项字号/圆角与 spec/03 §3 **逐值相等**；组件内零硬编码色值<br>✅ 真实 Chromium 截图核对 100 卡墙/顶栏 KPI/告警流/Drawer | **真实后端未联调**：本地无 EMQX/TimescaleDB/Redis，WS 与 REST 均由假服务端提供（其 envelope 结构照 spec/00 §5.2/§5.3 构造）。真实 `backend_ingestion` 的 WS 行为、`/history` 聚合返回需在阶段六验证 |
+
+> 05 的集成验证脚本：`bash frontend_dashboard/.e2e/run_all.sh`（5 项）。
+> 发现并修复的真实缺陷 1 处：重连退避在 `onopen` 无条件重置，服务端抖动时退避永远停在 1s（已改为「稳定存活 5s 才重置」）。
+
+（**未验证**事项，不得当作已通过）
 
 | 模块 | 已验证 | 未验证 |
 | :--- | :--- | :--- |
