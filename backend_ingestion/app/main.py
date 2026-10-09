@@ -95,7 +95,11 @@ async def history(robot_id: str, minutes: int = 5, resolution: str = "10s"):
                last(battery_pct, time)        AS battery_pct,
                max(max_joint_temp)            AS max_joint_temp,
                last(joint_temperatures, time) AS joint_temperatures,
-               last(joint_torques, time)      AS joint_torques
+               last(joint_torques, time)      AS joint_torques,
+               -- joint_positions 必须返回：前端 Drawer 的第三条折线「角度(rad)」
+               -- 数据源就是 point.joint_positions[joint]（RobotDetailDrawer.tsx:93）。
+               -- 缺失时该曲线恒为 null，图上永远空白。
+               last(joint_positions, time)    AS joint_positions
         FROM robot_telemetry
         WHERE robot_id = $2
           AND time >= now() - (($3 || ' seconds')::interval)
@@ -123,6 +127,7 @@ async def history(robot_id: str, minutes: int = 5, resolution: str = "10s"):
                 "max_joint_temp": r["max_joint_temp"],
                 "joint_temperatures": _as_dict(r["joint_temperatures"]),
                 "joint_torques": _as_dict(r["joint_torques"]),
+                "joint_positions": _as_dict(r["joint_positions"]),
             }
             for r in rows
         ],
