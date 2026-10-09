@@ -4,11 +4,11 @@
 
 | # | 模块 | 规范 | 订单文件 | 状态 | 派工 Issue |
 | - | :--- | :--- | :--- | :--- | :--- |
-| 01 | 后端采集存储 | spec/01 | orders/01-backend.md | 待实现 | GitHub #1 ✅ |
-| 02 | 告警健康引擎 | spec/02 | orders/02-alert-engine.md | 待实现 | GitHub 待发（网络重试中）|
-| 03 | 前端看板 | spec/03 | orders/03-frontend.md | 待实现 | GitHub 待发 |
-| 04 | 模拟器压测 | spec/04 | orders/04-simulator.md | 待实现 | GitHub 待发 |
-| 05 | 联调集成 | spec/05 | orders/05-integration.md | 待实现 | GitHub 待发 |
+| 01 | 后端采集存储 | spec/01 | orders/01-backend.md | 待实现 | GitHub #1 |
+| 02 | 告警健康引擎 | spec/02 | orders/02-alert-engine.md | 待实现 | GitHub #2 |
+| 03 | 前端看板 | spec/03 | orders/03-frontend.md | 待实现 | GitHub #3 |
+| 04 | 模拟器压测 | spec/04 | orders/04-simulator.md | 待实现 | GitHub #4 |
+| 05 | 联调集成 | spec/05 | orders/05-integration.md | 待实现 | GitHub #5 |
 
 ## 当前阻塞
 - **CNB 仓库未创建**：CNB 令牌缺 `group-resource:rw`，`create-repo` 403。需用户网页建仓（cnb.cool/flow.237 → 新建 RobotMonitor）或重授权令牌。
