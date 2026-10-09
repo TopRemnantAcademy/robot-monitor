@@ -2,7 +2,13 @@ version: "3.8"
 
 services:
   emqx:
-    image: emqx:5.6
+    # 镜像全名必须为 emqx/emqx（EMQX 官方开源版）。
+    # 实证（2026-10-10）：裸名 emqx:5.6 会解析到 Docker Hub 上的同名第三方镜像，
+    #   两者 digest 完全不同 ——
+    #   emqx:5.6       -> sha256:06f2341d1bf4ec8350a37a029dc5f6590c2dc95f181bebf1493d0f8e3a727f8e (非 EMQX)
+    #   emqx/emqx:5.6  -> sha256:c5a4118b2dc3bc0e8b0ed877eb7c51b7d9a4a5a920c20e441d5316fa43611ce0 (官方)
+    #   参考源：external/mqtt-to-timescaledb/docker-compose.yml（EMQX 官方示例仓库）
+    image: emqx/emqx:5.6
     container_name: robot-monitor-emqx
     ports:
       - "1883:1883"      # MQTT
@@ -10,7 +16,8 @@ services:
     environment:
       EMQX_LOG__LEVEL: warning
     healthcheck:
-      test: ["CMD", "emqx", "ctl", "status"]
+      # 与官方示例保持一致（external/mqtt-to-timescaledb 使用 emqx ping）
+      test: ["CMD", "emqx", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
