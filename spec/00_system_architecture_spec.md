@@ -33,10 +33,12 @@
         │
         ▼
 [ 告警引擎 (alert_engine) ]
-        ├─ 滑动窗口电机过热 (>75°C) / 低电量 (<15%) / 离线检测
+        ├─ 滑动窗口四条规则：电机过热(>75°C) / 低电量(<15%) / 离线(>10s) / 关节卡死
         ├─ Redis 状态去重，避免重复告警
-        └─ 告警写入 TimescaleDB + 推送到前端告警流
+        └─ 告警写入 TimescaleDB + 经 Redis `robot:alerts` 由后端 WS 转发到前端告警流
 ```
+
+> 注意：告警引擎共有 **4 条**规则（与 `spec/02` 一致），`关节卡死` 不可遗漏。
 
 ## 3. 中间件与基础设施（docker-compose）
 
@@ -69,7 +71,8 @@ CREATE TABLE robot_telemetry (
     orient_w        DOUBLE PRECISION,
     orient_x        DOUBLE PRECISION,
     orient_y        DOUBLE PRECISION,
-    orient_z        DOUBLE PRECISION
+    orient_z        DOUBLE PRECISION,
+    PRIMARY KEY (time, robot_id)   -- 必须包含分区列 time（TimescaleDB 硬性要求）
 );
 -- 转为超表，按时间分块（7 天一块）
 SELECT create_hypertable('robot_telemetry', 'time', chunk_time_interval => INTERVAL '7 days');
@@ -113,11 +116,73 @@ SELECT add_continuous_aggregate_policy('robot_status_10s',
 > 预计算标量列 `max_joint_temp DOUBLE PRECISION`，连续聚合对 `max(max_joint_temp)` 取最大值。
 > 本文保留 JSONB 形态以兼容 schema，落地以预计算标量列为准。
 
-## 5. 通信协议（MQTT → WebSocket）
+## 5. 通信协议（MQTT → WebSocket / REST）
 
-- **机器人 → Broker**：MQTT `robots/{robot_id}/telemetry`，JSON payload（见 01 的 `telemetry.py` schema）。
-- **后端 → 前端**：WebSocket `ws://{server}:8000/ws/robots`，消息格式为「单台最新状态」或「批量 100 台快照」。
-- **后端内部**：Redis Pub/Sub `robot:stream:all`（全量）与 `robot:stream:{robot_id}`（单机），供水平扩展的 WS 服务订阅。
+### 5.1 机器人 → Broker
+
+MQTT topic `robots/{robot_id}/telemetry`，JSON payload（见 `spec/01` 的 `telemetry.py` schema）。
+
+### 5.2 后端 → 前端：WebSocket（**统一信封格式，强制**）
+
+端点 `ws://{server}:8000/ws/robots`。
+
+> **必须带 `type` 字段的信封**：早期版本只说「单台最新状态 / 批量快照」，导致前端无法区分
+> **遥测**与**告警**，告警流永远为空。现强制统一为以下信封：
+
+```jsonc
+// ① 首次连接：100 台全量快照
+{ "type": "snapshot", "data": { "robots": [ { /* RobotTelemetry */ }, ... ] } }
+
+// ② 增量遥测（单台，10Hz/台，经 100ms 节流后由前端批量消费）
+{ "type": "telemetry", "data": { /* RobotTelemetry */ } }
+
+// ③ 告警（由 alert_engine 产生，经 Redis `robot:alerts` 转发）
+{ "type": "alert", "data": { "robot_id": "...", "rule_id": "...", "severity": 3, "message": "...", "ts": 1712... } }
+```
+
+- 后端必须订阅 Redis `robot:alerts` 并以 `type:"alert"` 转发，否则前端告警流无数据源。
+- `RobotTelemetry` / `RobotAlert` 字段见 `spec/03 §7` 类型定义（本文档与之对齐）。
+
+### 5.3 后端 → 前端：REST（**单机历史，Drawer 依赖**）
+
+> `spec/03 §5.3` 的 Detail Drawer 需要「最近 5 分钟历史」画 ECharts 折线，
+> 但早期后端只定义了 WS，没有 REST → **Drawer 无法工作**。现补齐：
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| `GET` | `/robots/{robot_id}/history?minutes=5&resolution=10s` | 返回该机器人最近 N 分钟遥测（默认 5 分钟 / 10s 分辨率），供 Drawer 折线与热力图 |
+| `GET` | `/robots` | 返回 100 台机器人最新状态（WS 之外的兜底/首屏） |
+| `GET` | `/healthz` | 健康检查，返回 200 |
+
+`/history` 返回结构：
+
+```jsonc
+{ "robot_id": "humanoid-042",
+  "points": [ { "time": "...", "battery_pct": 88.1, "max_joint_temp": 51.2,
+                "joint_temperatures": { "...": 42.1 }, "joint_torques": { "...": 3.4 } } ] }
+```
+
+数据来源优先 `robot_status_10s` 连续聚合；聚合未就绪时回退查 `robot_telemetry` 原始表并做 `time_bucket`。
+
+### 5.4 后端内部
+
+Redis Pub/Sub `robot:stream:all`（全量遥测）与 `robot:stream:{robot_id}`（单机），
+以及 `robot:alerts`（告警），供水平扩展的 WS 服务订阅。
+
+### 5.5 关节命名（**唯一事实来源，三方必须一致**）
+
+24 自由度，左右各一套。模拟器生成、后端入库 JSONB 的键、前端热力图渲染必须**全部使用下列键名**：
+
+```
+left_shoulder_pitch,  left_shoulder_roll,  left_shoulder_yaw,  left_elbow_pitch,
+left_wrist_pitch,     left_wrist_roll,
+right_shoulder_pitch, right_shoulder_roll, right_shoulder_yaw, right_elbow_pitch,
+right_wrist_pitch,    right_wrist_roll,
+left_hip_yaw,   left_hip_roll,   left_hip_pitch,  left_knee_pitch,  left_ankle_pitch,  left_ankle_roll,
+right_hip_yaw,  right_hip_roll,  right_hip_pitch, right_knee_pitch, right_ankle_pitch, right_ankle_roll
+```
+
+共 24 个关节。`joint_temperatures` / `joint_positions` / `joint_torques` 三个 JSONB 必须使用同一套键。
 
 ## 6. 环境变量（`.env` 模板，禁止提交真实密钥）
 

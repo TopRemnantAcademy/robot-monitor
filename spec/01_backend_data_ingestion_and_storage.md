@@ -7,6 +7,7 @@
 
 ```
 backend_ingestion/
+├── __init__.py               # 必须存在：Docker CMD 用 `backend_ingestion.app.main:app` 导入本包
 ├── app/
 │   ├── __init__.py
 │   ├── main.py               # FastAPI 入口 + 生命周期钩子 + /ws/robots
@@ -82,11 +83,20 @@ SQLAlchemy 2.0 Async 模式：
 - **自动断线重连**：捕获 `aiomqtt.MqttError` 后指数退避重连（上限 30s）。
 - 收到消息 → Pydantic 校验 → 同时投递给 `state_cache` 与 `batch_writer` 队列。
 
-### 4.5 入口与 WebSocket (`app/main.py`)
+### 4.5 入口、WebSocket 与 REST (`app/main.py`)
 
-- FastAPI 生命周期：`startup` 启动 MQTT 订阅任务 + batch_writer 消费任务；`shutdown` 调 `graceful_shutdown()`。
-- WebSocket 路由 `/ws/robots`：新连接发送 100 台最新快照（从 Redis Hash 拉取），之后订阅 Redis `robot:stream:all` 转发增量。
-- 健康检查 `/healthz` 返回 200。
+- FastAPI 生命周期：`startup` 启动 MQTT 订阅任务 + batch_writer 消费任务 + Redis `robot:alerts` 订阅任务；
+  `shutdown` 调 `graceful_shutdown()`。
+- WebSocket 路由 `/ws/robots`：新连接发送 100 台最新快照（从 Redis Hash 拉取），之后订阅 Redis
+  `robot:stream:all` 转发增量。
+- **必须订阅 Redis `robot:alerts` 并以 `{"type":"alert","data":{...}}` 转发**（见 `spec/00 §5.2`），
+  否则前端告警流永远为空。
+- **REST 路由（Drawer 依赖，不可省略）**：
+  - `GET /robots/{robot_id}/history?minutes=5&resolution=10s` → 最近 N 分钟历史点（优先查
+    `robot_status_10s`，聚合未就绪时回退 `robot_telemetry` + `time_bucket`）。
+  - `GET /robots` → 100 台最新状态（WS 之外兜底）。
+  - `GET /healthz` → 200。
+- 所有 WS 出站消息必须是 `spec/00 §5.2` 定义的**带 `type` 的信封**（`snapshot` / `telemetry` / `alert`）。
 
 ## 5. 多阶段 Dockerfile（基于 `python:3.11-slim`）
 

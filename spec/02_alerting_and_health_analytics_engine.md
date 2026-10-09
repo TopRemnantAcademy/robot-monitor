@@ -46,11 +46,24 @@ SELECT create_hypertable('robot_alert', 'time');
 | :--- | :--- | :--- | :--- |
 | `motor_temp` | 任一关节温度 > **75°C**（持续 ≥ 3 个采样点） | 3 critical | 60s |
 | `battery_low` | `battery_pct` < **15%** | 2 warning | 120s |
-| `offline` | 距 `last_seen` > **10s**（Redis Hash TTL 过期即判定） | 3 critical | 30s |
+| `offline` | 距本进程记录的 `last_seen` > **10s** 无任何遥测 | 3 critical | 30s |
 | `joint_stuck` | 同一关节 `angle` 连续 **5s** 方差 ≈ 0 但 `torque` > 阈值 | 2 warning | 60s |
 
 - 滑动窗口在内存用 `collections.deque(maxlen=N)` 维护每台机器人最近 N 条状态。
 - 阈值与窗口全部从 `config.py` 读取，便于调参。
+
+### 3.1 `offline` 规则的判定方式（**必须按此实现**）
+
+> **禁止依赖 Redis Key 过期事件**：早期文档写「Redis Hash TTL 过期即判定」，但 Redis 的
+> keyspace notification（`notify-keyspace-events`）**默认关闭**，依赖过期事件会导致离线告警永不触发。
+> 且 TTL 过期后 `robot:state:{id}` 已被删除，引擎反而读不到 `last_seen`。
+
+正确实现：
+1. 引擎在收到每条 `robot:stream:all` 消息时，在内存字典里更新 `last_seen[robot_id] = now()`。
+2. 另起一个**独立的 ticker 协程**（建议每 1s 一轮），遍历全部 100 台机器人
+   （ID 列表来自 `robot_metadata`，已由 `init.sql` 预置 100 条），
+   若 `now() - last_seen[robot_id] > 10s` 则触发 `offline` 告警。
+3. 这样完全不依赖 Redis 配置，且机器人从未上线时也能正确判定为离线。
 
 ## 4. 去重器 (`deduplicator.py`)
 
