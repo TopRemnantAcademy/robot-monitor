@@ -1,0 +1,12 @@
+# 禁止把密钥/缓存/无关文件烘焙进镜像或提交上下文
+.env
+.env.*
+__pycache__/
+*.pyc
+.git/
+.gitignore
+node_modules/
+dist/
+build/
+*.log
+.DS_Store

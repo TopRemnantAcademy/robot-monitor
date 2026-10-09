@@ -1,0 +1,48 @@
+version: "3.8"
+
+services:
+  emqx:
+    image: emqx:5.6
+    container_name: robot-monitor-emqx
+    ports:
+      - "1883:1883"      # MQTT
+      - "18083:18083"    # Dashboard
+    environment:
+      EMQX_LOG__LEVEL: warning
+    healthcheck:
+      test: ["CMD", "emqx", "ctl", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  timescaledb:
+    image: timescale/timescaledb:2.13.1-pg16
+    container_name: robot-monitor-timescaledb
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: robot_monitor
+    volumes:
+      - tsdb-data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d robot_monitor"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: robot-monitor-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  tsdb-data:
