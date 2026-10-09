@@ -46,14 +46,10 @@ async def write_and_publish(t: Telemetry) -> None:
         pipe.expire(key, settings.state_ttl_seconds)
         await pipe.execute()
 
-        payload = json.dumps(
-            {k: (mapping[k] if k in ("robot_id", "status_code", "battery_pct",
-                                     "max_joint_temp", "joint_temperatures",
-                                     "joint_torques", "joint_positions", "error_code", "ts")
-                 else mapping[k])
-             for k in mapping},
-            separators=(",", ":"),
-        )
+        # 必须发布**还原类型后**的载荷：Redis Hash 只存字符串，
+        # 直接广播会让前端收到 status_code="1"(字符串) 而非 1(数字)，
+        # 违反 spec/03 §7 的 RobotTelemetry 类型，导致状态色与热力图判断全错。
+        payload = json.dumps(_decode(mapping), separators=(",", ":"))
         await r.publish(settings.chan_stream_all, payload)
         await r.publish(settings.chan_stream_one.format(robot_id=t.robot_id), payload)
     except Exception:

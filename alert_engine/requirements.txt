@@ -1,0 +1,4 @@
+asyncpg==0.29.0
+redis[hiredis]==5.0.3
+pydantic-settings==2.2.1
+pydantic==2.6.4

@@ -84,8 +84,15 @@ class BatchWriter:
 
     @staticmethod
     def _to_row(t: Telemetry) -> tuple:
+        # 优先用客户端时间戳（10Hz → 同一机器人相邻两条相差 100ms）。
+        # 若统一用刷盘时刻的 now()，同一批次里同一机器人的多条记录可能拿到**相同的微秒时间戳**，
+        # 而主键是 (time, robot_id)，会被 ON CONFLICT DO NOTHING **静默丢弃**——造成写入条数偏少。
+        if t.ts:
+            ts = datetime.fromtimestamp(t.ts / 1000.0, tz=timezone.utc)
+        else:
+            ts = datetime.now(timezone.utc)
         return (
-            datetime.now(timezone.utc),
+            ts,
             t.robot_id,
             t.status_code,
             t.error_code,

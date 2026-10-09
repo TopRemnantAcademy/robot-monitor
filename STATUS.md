@@ -17,7 +17,7 @@
 | 01 | 基础设施 | spec/00 §3/§4 | orders/01-infra.md | 时序数据库专家 | **已派工** (CNB Issue #1, build cnb-vvh-1k4guji0r) |
 | 02 | 模拟器 | spec/04 | orders/02-simulator.md | — | **已完成**（NPC 产出但推送失败丢失；主代理本地实现并实测通过，11/11） |
 | 03 | 后端采集存储 | spec/01 | orders/03-backend.md | — | **已实现（主代理）**，静态校验 13/13 通过；运行时未验（见 §七） |
-| 04 | 告警引擎 | spec/02 | orders/04-alert-engine.md | 告警引擎工程师 | 待实现 |
+| 04 | 告警引擎 | spec/02 | orders/04-alert-engine.md | — | **已实现（主代理）**，规则逻辑 20/20 实测通过 |
 | 05 | 前端看板 | spec/03 | orders/05-frontend.md | 前端看板工程师 | 待实现 |
 | 06 | 联调压测 | spec/05 阶段六 | orders/06-integration.md | 测试 + 压测 | 待实现 |
 
@@ -78,6 +78,7 @@ CAgg 内 `first()/last()`，本项目锁 2.13.1，合法。
 | :--- | :--- | :--- |
 | 02 模拟器 | ✅ 11/11 实测（关节键名、payload 契约、过热 82°C+、电量 0.05%/s、status_code） | MQTT 真实收发（本机无 broker） |
 | 03 后端 | ✅ 静态校验 13/13（跨模块关节键名一致、INSERT 列/占位符/元组三者=17 对齐、WS 三种 type、alert 转发、REST 路由、无占位符）；`py_compile` 全通过 | **运行时未验**：连库、批量落库吞吐、WS 端到端 |
+| 04 告警引擎 | ✅ **规则逻辑 20/20 实测**（4 条规则齐全且继承基类、去重窗口 60/120/30/60、severity 3/2/3/2、过热需连续 3 点且单点尖峰不误报、电量 15.0% 边界、离线含「从未上报」、卡死方差/扭矩/样本数三重判定）；`py_compile` 全通过 | **运行时未验**：Redis 订阅、去重幂等、落库与 `robot:alerts` 发布 |
 
 **为何 03 无法运行时验证**：本机 PyPI 被网络策略拦截（`403 Forbidden`），依赖装不上；
 且 `asyncpg==0.29.0` 在 Python 3.13 下源码编译失败（`_PyLong_AsByteArray` 签名变更）。
