@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.e2e/bundle.cjs
+.e2e/drawer.cjs
+*.log
+
+# 本地环境变量（.env.example 是模板，必须入库）
+.env
+.env.local
+.env.*.local
