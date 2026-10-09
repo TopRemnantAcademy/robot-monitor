@@ -15,7 +15,7 @@
 | # | 模块 | 规范 | 订单 | 派工角色 | 状态 |
 | - | :--- | :--- | :--- | :--- | :--- |
 | 01 | 基础设施 | spec/00 §3/§4 | orders/01-infra.md | 时序数据库专家 | **已派工** (CNB Issue #1, build cnb-vvh-1k4guji0r) |
-| 02 | 模拟器 | spec/04 | orders/02-simulator.md | 后端接入工程师 | **已派工** (CNB Issue #2, build cnb-1oc-1k4gujv5i) |
+| 02 | 模拟器 | spec/04 | orders/02-simulator.md | — | **已完成**（NPC 产出但推送失败丢失；主代理本地实现并实测通过，11/11） |
 | 03 | 后端采集存储 | spec/01 | orders/03-backend.md | 后端接入工程师 | **已派工** (CNB Issue #3, build cnb-lnp-1k4gukc9e) |
 | 04 | 告警引擎 | spec/02 | orders/04-alert-engine.md | 告警引擎工程师 | 待实现 |
 | 05 | 前端看板 | spec/03 | orders/05-frontend.md | 前端看板工程师 | 待实现 |
@@ -53,7 +53,20 @@ CAgg 内 `first()/last()`，本项目锁 2.13.1，合法。
 - **已派工 01/02/03**，NPC 构建均为 `event: issue.comment@npc`，状态 pending。
 - 待派工：04（告警引擎）、05（前端）、06（联调）—— 依序在 03 完成后派发。
 
-## 五、环境要点（排障记录）
+## 五、当前阻塞（需用户处理，非代码问题）
+
+| # | 阻塞 | 证据 | 需谁处理 |
+| - | :--- | :--- | :--- |
+| B1 | **AI 积分已用尽** | `[llm error] HTTP 402 [EXCEEDING_LIMIT] AI 积分已用尽，请联系根组织管理员提升配额` | 根组织管理员（提升配额） |
+| B2 | **NPC 无推送权限** | `remote: Your token does not have the repo-code:rw scope required to push` → 403 | 授予 `repo-code:rw` / 开启 NPC 工作模式 |
+| B3 | 派工时未带 `--work-mode` | 构建环境 `CNB_NPC_ENABLE_WORKMODE=false`、`workMode: false` | 已定位；下次派工补 `--work-mode` |
+
+**后果**：NPC 实际写出了可用代码（build 02 实测 1020 msg/s、82°C+ 过热注入生效，本地 commit `97e0e96`），
+但 push 403 失败 + 随后 402 断粮，CI 容器为临时环境 → **产出丢失**。
+
+**注**：主代理凭据**有**推送权限（Bearer 头方式已验证可用），故 02 已由主代理本地落地。
+
+## 六、环境要点（排障记录）
 - **git push 到 CNB 必须用 Bearer 头**：
   `git -c http.extraHeader="Authorization: Bearer ${TOKEN}" push https://cnb.cool/flow.237/RobotMonitor.git main`
   （URL 内嵌 token、`cnb git-credential` helper 均会挂起；helper 对 `cnb.cool` 返回 `unknown host`。）
