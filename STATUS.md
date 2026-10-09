@@ -14,9 +14,9 @@
 
 | # | 模块 | 规范 | 订单 | 派工角色 | 状态 |
 | - | :--- | :--- | :--- | :--- | :--- |
-| 01 | 基础设施 | spec/00 §3/§4 | orders/01-infra.md | 时序数据库专家 | 骨架已完成，待校验 |
-| 02 | 模拟器 | spec/04 | orders/02-simulator.md | 后端接入工程师 | 待实现 |
-| 03 | 后端采集存储 | spec/01 | orders/03-backend.md | 后端接入工程师 | 待实现 |
+| 01 | 基础设施 | spec/00 §3/§4 | orders/01-infra.md | 时序数据库专家 | **已派工** (CNB Issue #1, build cnb-vvh-1k4guji0r) |
+| 02 | 模拟器 | spec/04 | orders/02-simulator.md | 后端接入工程师 | **已派工** (CNB Issue #2, build cnb-1oc-1k4gujv5i) |
+| 03 | 后端采集存储 | spec/01 | orders/03-backend.md | 后端接入工程师 | **已派工** (CNB Issue #3, build cnb-lnp-1k4gukc9e) |
 | 04 | 告警引擎 | spec/02 | orders/04-alert-engine.md | 告警引擎工程师 | 待实现 |
 | 05 | 前端看板 | spec/03 | orders/05-frontend.md | 前端看板工程师 | 待实现 |
 | 06 | 联调压测 | spec/05 阶段六 | orders/06-integration.md | 测试 + 压测 | 待实现 |
@@ -47,5 +47,14 @@ CAgg 内 `first()/last()`，本项目锁 2.13.1，合法。
 `.cnb/.yml`：① Issue·PR 评论 `@flow.237/RobotMonitor(角色)` 派工 ② crontab `0 0,6,12,18 * * *` 7 段自主流水线
 
 ## 四、当前状态
-- CNB 仓库 `flow.237/RobotMonitor` 已确认存在。
+- CNB 仓库 `flow.237/RobotMonitor` 已确认存在，代码已推送（main @ `5c0eab2`）。
 - 平台开关：`auto_trigger_by_npc: true`、`cron_auto_trigger: true`（NPC 与 cron 均已开启）。
+- crontab 已显式注册（`cnb build build-crontab-sync --repo flow.237/RobotMonitor --branch main` → 同步成功）。
+- **已派工 01/02/03**，NPC 构建均为 `event: issue.comment@npc`，状态 pending。
+- 待派工：04（告警引擎）、05（前端）、06（联调）—— 依序在 03 完成后派发。
+
+## 五、环境要点（排障记录）
+- **git push 到 CNB 必须用 Bearer 头**：
+  `git -c http.extraHeader="Authorization: Bearer ${TOKEN}" push https://cnb.cool/flow.237/RobotMonitor.git main`
+  （URL 内嵌 token、`cnb git-credential` helper 均会挂起；helper 对 `cnb.cool` 返回 `unknown host`。）
+- **CI 配置必须在仓库根 `.cnb.yml`**，放 `.cnb/.yml` 时 `build-crontab-sync` 报 `CONFIG_YAML_EMPTY`。
