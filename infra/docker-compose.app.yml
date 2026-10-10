@@ -31,6 +31,12 @@ services:
       DATABASE_URL: postgresql://postgres:postgres@timescaledb:5432/robot_monitor
       BATCH_TRIGGER_COUNT: "500"
       BATCH_TRIGGER_SECONDS: "1.0"
+      # 认证密钥（订单 15）。**从宿主机 .env 透传，不写死在这** ——
+      # 写死等于把密钥烘焙进 compose 文件（AGENTS.md §5 禁止）。
+      # `${JWT_SECRET:?…}` 的 `:?` 让未设置时 compose 直接报错退出，
+      # 而不是起一个用空密钥签 token 的后端（那等于没有鉴权）。
+      JWT_SECRET: "${JWT_SECRET:?JWT_SECRET 未设置：请在宿主机 .env 里配置（openssl rand -hex 32）}"
+      JWT_LIFETIME_SECONDS: "${JWT_LIFETIME_SECONDS:-28800}"
     depends_on:
       emqx:
         condition: service_healthy

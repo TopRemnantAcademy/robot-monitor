@@ -11,6 +11,8 @@
 
 import { useEffect, useRef } from 'react';
 import { useRobotStore } from '../store/robotStore';
+import { getToken } from '../auth/session';
+import { useAuthStore } from '../auth/authStore';
 import type { RobotAlert, RobotTelemetry, WsEnvelope } from '../types/robot';
 
 /** 节流刷库间隔：100ms = 10Hz（spec/03 §6） */
@@ -25,20 +27,34 @@ export const RECONNECT_MIN_MS = 1_000;
  * 退化成固定 1s 高频重连，既压垮服务端也违背「指数退避」的设计意图。
  */
 export const RECONNECT_STABLE_MS = 5_000;
+/**
+ * WS close code 1008 = policy violation（RFC 6455 §7.4.1）。
+ * 订单 15：后端在 token 缺失/非法时用它关闭连接，前端据此区分
+ * "凭据被拒"（回登录页）与"网络断了"（退避重连）。
+ */
+export const WS_CLOSE_POLICY_VIOLATION = 1008;
 
 /**
  * 解析 WS 地址：ws://{VITE_WS_HOST}:8000/ws/robots
  * Vite 只暴露 VITE_ 前缀（orders/05 禁止项：不得使用 WS_HOST）。
+ *
+ * @param token JWT。订单 15：后端要求 `?token=<JWT>`，缺失/非法会以 close 1008 拒绝。
  */
-export function resolveWsUrl(): string {
+export function resolveWsUrl(token: string | null = getToken()): string {
   const host = import.meta.env.VITE_WS_HOST ?? 'localhost';
   const port = import.meta.env.VITE_WS_PORT ?? '8000';
+  let base: string;
   // 兼容传入带协议/带端口的 VITE_WS_HOST（如 ws://1.2.3.4:8000）
   if (host.startsWith('ws://') || host.startsWith('wss://')) {
     const trimmed = host.replace(/\/+$/, '');
-    return /:\d+$/.test(trimmed) ? `${trimmed}/ws/robots` : `${trimmed}:${port}/ws/robots`;
+    base = /:\d+$/.test(trimmed) ? `${trimmed}/ws/robots` : `${trimmed}:${port}/ws/robots`;
+  } else {
+    base = `ws://${host}:${port}/ws/robots`;
   }
-  return `ws://${host}:${port}/ws/robots`;
+  // 浏览器 WebSocket API 无法自定义请求头，凭据只能进 query。
+  // encodeURIComponent 必须加：JWT 虽是 base64url 但含 '.'，且未来换算法可能带 '+/='
+  // 这些字符在 query 里会被误解，进而导致服务端收到的 token 与签发的不是同一个。
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
 }
 
 export function useRobotWebSocket(): void {
@@ -144,7 +160,7 @@ export function useRobotWebSocket(): void {
         socket.close();
       };
 
-      socket.onclose = () => {
+      socket.onclose = (event: CloseEvent) => {
         if (closedByUnmountRef.current) return;
         // 未活到稳定阈值就断了 → 这次不算成功，取消重置
         if (stableTimerRef.current !== null) {
@@ -152,6 +168,15 @@ export function useRobotWebSocket(): void {
           stableTimerRef.current = null;
         }
         useRobotStore.getState().setWsStatus('closed'); // 连接点变红
+
+        // 订单 15：1008 = policy violation = 后端判 token 无效/过期。
+        // **不能退避重连**：token 不会因为多试几次就变有效，只会把日志刷满、
+        // 并把一个"该重新登录"的信号伪装成"网络抖动"。正确动作是回登录页。
+        if (event.code === WS_CLOSE_POLICY_VIOLATION) {
+          useAuthStore.getState().markAnonymous();
+          return;
+        }
+
         const delay = retryDelayRef.current;
         // 指数退避 1s→2s→4s→8s→10s（封顶）
         retryDelayRef.current = Math.min(delay * 2, RECONNECT_MAX_MS);

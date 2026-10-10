@@ -194,3 +194,34 @@ CREATE INDEX IF NOT EXISTS idx_telemetry_robot_time ON robot_telemetry (robot_id
 CREATE INDEX IF NOT EXISTS idx_alert_robot_time ON robot_alert (robot_id, time DESC);
 CREATE INDEX IF NOT EXISTS idx_alert_ack ON robot_alert (ack) WHERE ack = FALSE;
 
+
+-- 8. 认证用户表（订单 15：fastapi-users + 两级 RBAC）
+--
+-- 为什么单独建表而不是复用 robot_metadata：那是"被监控对象"的台账，
+-- 这是"操作人"的账号，两者生命周期与权限完全不同，混在一张表里
+-- 迟早会出现"某台机器人能不能登录"这种没有意义的问题。
+--
+-- 列与 backend_ingestion/app/auth/users.py:RobotUser 逐列对应（含列序）。
+-- 前五列是 fastapi-users 的契约列，最后两列是本项目追加的。
+-- 字符集/长度按框架契约取：email 320 是 RFC 5321 的地址上限，
+-- hashed_password 1024 是 bcrypt(60) 之外给未来换算法留的余量。
+--
+-- ⚠️ 提权方式：本单**不提供**管理端点，把用户改成管理员由运维直接改库：
+--     UPDATE robot_user SET role = 'admin' WHERE email = 'ops@example.com';
+-- 自助注册只能得到 viewer（见 app/auth/manager.py:on_after_register）。
+CREATE TABLE IF NOT EXISTS robot_user (
+    id              BIGSERIAL    PRIMARY KEY,
+    email           VARCHAR(320) NOT NULL UNIQUE,
+    hashed_password VARCHAR(1024) NOT NULL,
+    is_active       BOOLEAN      NOT NULL DEFAULT TRUE,
+    is_superuser    BOOLEAN      NOT NULL DEFAULT FALSE,
+    is_verified     BOOLEAN      NOT NULL DEFAULT FALSE,
+    -- 两级 RBAC：viewer（只读）/ admin（只读 + 告警确认）。
+    -- CHECK 而非 ENUM：角色集合就两个，加新值时改 CHECK 比 ENUM 迁移省事；
+    -- 应用侧的真值源仍是 app/auth/roles.py 的 Role 枚举，这里只做兜底。
+    role            VARCHAR(16)  NOT NULL DEFAULT 'viewer'
+                    CHECK (role IN ('viewer', 'admin')),
+    created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+-- email 的唯一约束已由 UNIQUE 隐式建索引；登录按 email 查，故不必另建索引。

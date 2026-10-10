@@ -15,6 +15,8 @@ import { COLORS, FONT, STATUS_COLOR, STATUS_LABEL } from '../theme/tokens';
 import { useRobotStore } from '../store/robotStore';
 import { JOINT_NAMES } from '../types/robot';
 import type { HistoryPoint, RobotHistoryResponse } from '../types/robot';
+import { notifyUnauthorized } from '../auth/api';
+import { authHeaders } from '../auth/session';
 
 /** REST 基址：Vite 只暴露 VITE_ 前缀（orders/05 禁止项） */
 export const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
@@ -63,8 +65,16 @@ export default function RobotDetailDrawer() {
     setLoading(true);
     setError(null);
 
-    fetch(url, { signal: controller.signal })
+    // 订单 15：这是全仓唯一的 REST 调用点，改漏就是全漏 ——
+    // 必须带 Authorization: Bearer <token>（禁止用 query 传 token，会进访问日志）。
+    fetch(url, { signal: controller.signal, headers: authHeaders() })
       .then((res) => {
+        if (res.status === 401) {
+          // token 过期/被吊销：走全局出口清 token 回登录页，
+          // 而不是把"HTTP 401"当一次普通加载失败显示在 Drawer 里。
+          notifyUnauthorized();
+          throw new Error('登录已过期，请重新登录');
+        }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json() as Promise<RobotHistoryResponse>;
       })

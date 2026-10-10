@@ -1,15 +1,31 @@
 # backend_ingestion 验证脚本
 
-本目录存放**按需运行**的验证脚本 —— 都是**独立脚本，不是 pytest 用例**
-（跑法见下，退出码 0 = 全部通过）。分两类：
+本目录有两类东西：
 
-| 脚本 | 依赖 | 何时跑 |
-|---|---|---|
-| `verify_batch_writer.py` | 零依赖（读源码 AST） | 每次改动 `batch_writer.py` / 连接池后 |
-| `verify_db_integration.py` | 真实 PostgreSQL | 有可写 PG 且已执行 `infra/init.sql` 的纯 PG 部分时 |
+| 文件 | 类型 | 依赖 | 跑法 |
+|---|---|---|---|
+| `test_auth.py` | **pytest 用例** | 装了 `backend_ingestion/requirements.txt` | `pytest backend_ingestion/tests/` |
+| `verify_batch_writer.py` | 独立脚本 | 零依赖（读源码 AST） | `python3 …/verify_batch_writer.py` |
+| `verify_db_integration.py` | 独立脚本 | 真实 PostgreSQL | 见下 |
 
-> ⚠️ **不要用 `pytest` 跑本目录**：两个文件都没有 `test_*` 函数，
-> pytest 会收集到 **0 tests** 并静默"通过"，制造假的安全感。
+## `test_auth.py`（订单 15）
+
+覆盖认证与 RBAC 的行为契约：免鉴权白名单恰好是 `/healthz` 与 `/metrics`、
+无 token 一律 401（不是 403）、WS 只验签不查库、注册不能指定 `role`、
+角色包含关系（admin ⊃ viewer）。16 个用例，不需要 PG/Redis/MQTT。
+
+> ⚠️ **必须单独跑，不要从仓库根连跑**：
+> 本仓有两个同名顶层包 `app`（`backend_ingestion/app` 与 `alert_engine/app`），
+> 一个 pytest 进程里 `sys.modules["app"]` 只有一个位置，同时收集两套必然互相踩。
+> 所以 `pytest.ini` 的 `testpaths` 刻意不含本目录。
+>
+> ```bash
+> pytest backend_ingestion/tests/      # backend 侧
+> pytest                               # 根：tests/ + alert_engine/tests/
+> ```
+
+> ⚠️ 下面两个 `verify_*.py` **不是 pytest 用例**（没有 `test_*` 函数），
+> 用 pytest 跑它们会收集到 **0 tests** 并静默"通过"，制造假的安全感。
 > `verify_db_integration.py` 原名 `test_db_integration.py` 正是因此改名。
 
 ## `verify_batch_writer.py`

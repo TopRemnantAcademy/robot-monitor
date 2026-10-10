@@ -6,6 +6,14 @@
 - REST `GET /robots`                     —— 100 台最新状态（WS 之外兜底）
 - REST `GET /robots/{id}/history`        —— Drawer 的 ECharts 折线与关节热力图数据源
 - REST `GET /healthz`                    —— 健康检查
+- REST `GET /metrics`                    —— Prometheus 抓取（**必须免鉴权**）
+
+鉴权边界（订单 15）：
+- 免鉴权白名单只有两个：`/healthz`（存活探针）与 `/metrics`（Prometheus **pull**）。
+  给探针加鉴权会打挂容器编排；给 `/metrics` 加鉴权等于监控静默失效。
+- 其余 REST 走 `Authorization: Bearer <JWT>`（**不接受** query 传 token，
+  否则 token 会进 nginx/网关的访问日志）；
+- `/ws/robots` 走 `?token=`（浏览器 WebSocket API 无法自定义请求头，只能走 query）。
 """
 
 from __future__ import annotations
@@ -15,10 +23,13 @@ import json
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, Response
 
 from app import metrics
+from app.auth.deps import authenticate_ws_token, current_active_user
+from app.auth.router import router as auth_router
+from app.auth.users import RobotUser, close_engine
 from app.config import settings
 from app.db.redis import close_redis, get_redis
 from app.db.session import close_pool, ping
@@ -56,10 +67,17 @@ async def lifespan(app: FastAPI):
     await asyncio.gather(writer_task, return_exceptions=True)
     await close_pool()
     await close_redis()
+    # auth 的 ORM engine 是独立于 asyncpg 业务池的（fastapi-users 要 SQLAlchemy 会话），
+    # 同样要在收尾时释放，否则容器退出时连接会挂到服务端超时为止。
+    await close_engine()
     log.info("backend stopped")
 
 
 app = FastAPI(title="RobotMonitor Ingestion", lifespan=lifespan)
+
+# 认证路由（/auth/register、/auth/jwt/login、/auth/jwt/logout、/users/me）。
+# 它们**不加**任何鉴权依赖 —— 登录端点自己再要求 token 就成了死循环。
+app.include_router(auth_router)
 
 
 # ------------------------------------------------------------------ REST
@@ -130,12 +148,18 @@ async def prometheus_metrics():
 
 
 @app.get("/robots")
-async def list_robots():
+async def list_robots(_user: RobotUser = Depends(current_active_user)):
+    """100 台最新状态。只读端点：viewer 起可访问，返回体与加鉴权前逐字段一致。"""
     return {"robots": await state_cache.snapshot(settings.robot_ids)}
 
 
 @app.get("/robots/{robot_id}/history")
-async def history(robot_id: str, minutes: int = 5, resolution: str = "10s"):
+async def history(
+    robot_id: str,
+    minutes: int = 5,
+    resolution: str = "10s",
+    _user: RobotUser = Depends(current_active_user),
+):
     """最近 N 分钟历史（供 Drawer 折线 + 关节热力图）。
 
     说明：spec/00 §4.3 的连续聚合 `robot_status_10s` **不含 JSONB 关节列**，
@@ -224,8 +248,33 @@ def _as_dict(v) -> dict:
 # ------------------------------------------------------------------ WebSocket
 
 @app.websocket("/ws/robots")
-async def ws_robots(ws: WebSocket):
+async def ws_robots(ws: WebSocket, token: str | None = Query(default=None)):
+    """实时流。鉴权走 query 参数 `?token=<JWT>`。
+
+    为什么是 query 而不是头：浏览器 `WebSocket` 构造函数**无法自定义请求头**
+    （`new WebSocket(url, protocols)` 里没有 headers 位），只能把凭据放 URL。
+    代价是 token 会进服务端访问日志 —— 这是标准权衡，故 REST 侧**禁止**这么传
+    （见订单 15 禁止项 10），只有 WS 开这个口子。
+
+    拒绝顺序（**这里踩过一个坑，记录在此避免回退**）：
+    直觉写法是"先校验、失败就 close"，但 ASGI 语义下 **accept 之前发的
+    `websocket.close` 会被协议层翻译成 HTTP 403 拒绝握手**，客户端拿到的是
+    `InvalidStatusCode: HTTP 403`，而不是订单要求的 close code 1008
+    （本机实测 websockets 12.0 客户端：`CLOSED:1008` 拿不到，只有 HTTP 403）。
+    因此顺序必须是：**先 `accept()`，紧接着 `close(1008)`，中间不 send 任何业务帧**。
+    这样既满足"以 1008 关闭"，又满足"不得先发 snapshot" —— 两者并不矛盾，
+    矛盾的是"accept 前 close"。
+    """
+    sub = await authenticate_ws_token(token)
     await ws.accept()
+    if sub is None:
+        # 1008 = policy violation（RFC 6455 §7.4.1），前端据此区分"被拒"与"网络断"。
+        # ⚠️ 此处与下一条语句之间**禁止**插入任何 send_json / send_text：
+        # 那是未授权者拿到 snapshot 的唯一窗口。
+        await ws.close(code=1008)
+        log.warning("ws rejected: missing or invalid token")
+        return
+
     r = await get_redis()
 
     # ① 首帧：100 台全量快照

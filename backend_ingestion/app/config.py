@@ -54,6 +54,15 @@ class Settings(BaseSettings):
     ws_host: str = "0.0.0.0"
     ws_port: int = 8000
 
+    # ---- 认证 / RBAC（订单 15）----
+    # JWT 签名密钥。**必须**由 .env 注入，不设默认值 —— 有空默认值等于库里带着
+    # 一个人人可签的密钥，任何拿到源码的人都能伪造 admin token（AGENTS.md §5）。
+    # 未配置时 AppSettings 构造即抛错，宁可起不来也不要静默降级成"谁都能进"。
+    jwt_secret: str
+    # token 有效期：8 小时 = 一个班次。大屏是 7×24 公共终端，
+    # 过期后由前端 401 拦截清 token 回登录页，由当班人重新登录。
+    jwt_lifetime_seconds: int = 8 * 3600
+
     # ---- Redis 频道（spec/00 §5.2/§5.4）----
     chan_stream_all: str = "robot:stream:all"
     chan_stream_one: str = "robot:stream:{robot_id}"
