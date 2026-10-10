@@ -211,7 +211,7 @@ git -c http.extraHeader="Authorization: Bearer ${TOKEN}" push cnb main
 | 10 告警抑制（I-5） | #13 | — | ✅ 已回收验证 | `alert_engine` 11/11 tests passed |
 | 12 CNB 自行下载上游源 | #15 | — | ✅ 已回收 | 推翻了我的 I-1 结论，见 `external/ORDER12-VERIFICATION.md` |
 | 13 可观测性接线 + 6 分支收敛 | #33 | `cnb-f0b-1k4j8osuu` | ✅ 已回收验证 | 产出 `feat/order-13` @ `911b667`；按路径回收，其 alert `main.py`/`config.py` 判为回退已弃；补了 NPC 漏掉的 `alerts_suppressed` |
-| 19 `robot_alert` 身份 + ack 字段 | #34 | `cnb-38h-1k4jdbsm4` | ⏳ pending | 基线 `main@5b7b496`；workMode=true 已核验 |
+| 19 `robot_alert` 身份 + ack 字段 | #34 | `cnb-38h-1k4jdbsm4` | ✅ 已回收并反向验证 | 产出 `auto/alert-identity-759f` @ `d27b972`；测试 25→29；NPC 发现 SQLAlchemy 会把 BIGSERIAL 排到复合 PK 最前，已用 `PrimaryKeyConstraint` 显式定序 |
 
 > ⚠️ **Issue 号与订单号不对齐，且跳跃极大**：#6=06、**#8=07、#9=08、#10=09、#13=10、
 > #15=12、#33=13、#34=19**。中间号被其他 issue 占用。**派单后务必记录实际号**，
@@ -348,8 +348,24 @@ PY
 
 # ② 确认仓库有 pytest 配置，否则根跑 pytest 会去收集 external/ 的第三方源码
 #    （本仓此前实测 61 个 collection error 并中断，本仓自身结果完全看不见）
-python -m pytest -q        # 有 pytest.ini 后：25 passed
+python -m pytest -q        # 有 pytest.ini 后：29 passed
+
+# ③ 外部源"下载完了吗"不能靠仓库断言 —— external/* 被 .gitignore 排除，
+#    源码根本不入库，"已下载 22 个"这种结论在仓库里查不出来。
+#    必须拿 fetch-sources.sh 的声明清单与磁盘实存比对：
+python - <<'PY'
+import re, pathlib
+block = re.search(r'SOURCES=\((.*?)\)',
+    pathlib.Path("external/fetch-sources.sh").read_text(encoding="utf-8"), re.S).group(1)
+declared = set(re.findall(r'^\s*"([A-Za-z0-9._-]+)\|', block, re.M)) | {"alertmanager"}
+actual = {p.name for p in pathlib.Path("external").iterdir() if (p/".git").exists()}
+print("缺失:", sorted(declared - actual), " 多余:", sorted(actual - declared))
+PY
+#    实测（2026-10-11）：声明 22 / 实存 14，缺 8 个 —— 此前"已下载 22 个"的说法是错的。
 ```
+
+⚠️ **正则陷阱**：用 `"([^|]+)\|` 会把前一条的结尾引号一起吃进去，
+产出 `'\n  "aiomqtt'` 这种脏名字。必须用 `^\s*"([A-Za-z0-9._-]+)\|` 加 `re.M`。
 
 ---
 

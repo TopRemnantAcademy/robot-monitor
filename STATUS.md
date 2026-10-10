@@ -36,9 +36,10 @@
 | 可观测性（Prometheus/Grafana） | ✅ **已接线并实跑验证** | 后端 `:8011/metrics` → 200 `text/plain; version=0.0.4`；告警 `:8012/metrics` → 200，实测 `robot_alert_emitted_total{rule_id="motor_temp"} 3.0`、`robot_alert_suppressed_total{rule_id="battery_low"} 2.0`、`robot_alert_robots_online 97.0` |
 | 13 可观测性接线 + 6 分支收敛 | ✅ **已回收验证** | 产出 `feat/order-13` @ `911b667`；其 alert `main.py`/`config.py` 因基线过旧判为回退已弃；主代理补上 NPC 漏掉的 `alerts_suppressed` 计数 |
 | MQTT 计数器接线 | ✅ **已回收验证** | `metrics.py:41,46` 定义了 `mqtt_received`/`mqtt_dropped` 却从未被引用（恒为 0）；喂坏 payload 实测 `robot_backend_mqtt_dropped_total` 由 0 → 1.0 |
-| 19 `robot_alert` 身份 + ack 字段 | ⏳ **CNB 执行中** | issue **#34** / `cnb-38h-1k4jdbsm4`，基线 `main@5b7b496`，workMode=true 已核验 |
+| 19 `robot_alert` 身份 + ack 字段 | ✅ **已回收并反向验证** | 产出 `auto/alert-identity-759f` @ `d27b972`；ORM DDL 与 `init.sql` 逐字同为 `PRIMARY KEY (time, alert_id)`；测试 25 → **29 passed**；注入缺陷实测会红 |
+| 上游参考源下载 | ✅ **22/22 齐备**（此前只有 14） | `external/fetch-sources.sh` 声明 22 个，磁盘实存 22 个，缺失/多余均为 0；`external/` 现 **123 MB**。此前「已下载 22 个」的说法**是错的** |
 
-本地 HEAD = CNB `main` = **`5b7b496`**（已推送同步）。
+本地 HEAD = CNB `main` = **`058c4c0`**（已推送同步）。
 远端 **22 个分支**已全部对账完毕（第二轮），实际有价值的独有贡献仅 5 处，均已落地。
 
 > **第二轮对账结论**：用 `git diff main...cnb/$b`（三点）逐支取证后，
@@ -191,7 +192,8 @@
 | 13 | `test_db_integration.py` **收集 0 个用例却静默通过** | `backend_ingestion/tests/` | 假覆盖（断言在 `t1..t6` 里，由 `main()` 驱动） | 改名 `verify_db_integration.py` + 修正 README；全仓扫描现为 0 个假覆盖文件 |
 | 14 | 仓库**无 pytest 配置** | 全仓 | 根跑 `pytest` 会收集 `external/`（58 MB 第三方源码），实测 **61 个 collection error 并中断** | 新增 `pytest.ini`（`testpaths` + `norecursedirs`）→ 25 passed |
 | 15 | `.gitignore` 挡不住 `.venv-ci` | `.gitignore:10` | 只写 `.venv/`，`fix/issue19-p0-gaps` 因此**整包误提交虚拟环境** | 补 `.venv*/`；`check-ignore` 实测命中 |
-| 16 | `robot_alert` 主键靠 `__mapper_args__` 权宜之计 | `backend_ingestion/app/db/models.py:78-86` | ORM 身份 `(time, robot_id)` 与「同 tick 可命中多条规则」**语义冲突**；且 ORM DDL 与 `init.sql` 永远不一致 | 整理为**订单 19** 派给 CNB（加 `alert_id BIGSERIAL` + 真实主键） |
+| 16 | `robot_alert` 主键靠 `__mapper_args__` 权宜之计 | `backend_ingestion/app/db/models.py:78-86` | ORM 身份 `(time, robot_id)` 与「同 tick 可命中多条规则」**语义冲突**；且 ORM DDL 与 `init.sql` 永远不一致 | 已由订单 19 落地为真实主键 `(time, alert_id)` |
+| 17 | 「外部源已下载 22 个」**是错的** | `external/` | `external/*` 被 `.gitignore` 排除、源码不入库，该结论**在仓库里根本无法核对** | 对照 `fetch-sources.sh` 实测：声明 22 / 实存 **14**，缺 8 个；已补齐至 **22/22**（123 MB） |
 
 ---
 
