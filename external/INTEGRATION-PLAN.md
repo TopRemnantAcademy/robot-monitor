@@ -41,12 +41,17 @@
 
 ## 1. 已完成的套用（本次实证后落地）
 
-### I-0 ✅ EMQX 镜像名修正（已提交）
+### I-0 ⚠️ EMQX 镜像（原「修正」已撤稿，2026-10-10 复核）
 
-- 套用点：`infra/docker-compose.yml`
+- 套用点：`infra/docker-compose.yml`（镜像保持 `emqx/emqx:5.6`，**改动只在注释与 healthcheck**）
 - 源：`external/mqtt-to-timescaledb/docker-compose.yml`
-- 证据：`emqx:5.6` → `sha256:06f2341d…`（非 EMQX）；`emqx/emqx:5.6` → `sha256:c5a4118b…`（官方）
-- 详见 `external/SOURCES.md`
+- **原结论作废**：此前写「`emqx:5.6` 是非 EMQX 镜像」是**对比方法错误**造成的误判 ——
+  拿 `library/emqx` 的**子 manifest** digest 去比 `emqx/emqx` 的 **index** digest。
+  两者本就是同一镜像（`library/emqx` 由 `emqx/emqx-docker` 构建）的两个发布通道。
+- **保留 `emqx/emqx:5.6` 的真实理由**：`library/emqx` 当前只维护 5.7/5.8，
+  5.6 档上 `emqx/emqx:5.6` 才是持续发布的可追溯来源。
+- 本次实际改动：healthcheck 补 `start_period: 60s`（EMQX 首次启动慢，R-07 §1 强调过假失败风险）。
+- 完整实证与撤稿说明见 `external/SOURCES.md` §1.1
 
 ---
 
@@ -321,7 +326,7 @@ mkdir -p external && cd external
 git clone --depth 1 https://github.com/emqx/mqtt-to-timescaledb.git
 git clone --depth 1 https://github.com/timescale/tsbs.git
 git clone --depth 1 https://github.com/emqx/emqtt-bench.git
-git clone --depth 1 https://github.com/empicano/aiomqtt.git
+git clone --depth 1 --branch v2.5.1 https://github.com/empicano/aiomqtt.git
 git clone --depth 1 https://github.com/pmndrs/zustand.git
 git clone --depth 1 https://github.com/redis/redis-py.git
 git clone --depth 1 https://github.com/fastapi/full-stack-fastapi-template.git
@@ -363,6 +368,16 @@ git clone --depth 1 https://github.com/prometheus/node_exporter.git
 | locust 官方内置 MQTT（`contrib/mqtt.py`） | ✅ 实测（`contrib/mqtt.py:72,516`、`examples/mqtt/locustfile.py`） |
 | TimescaleDB 官方镜像支持 `TS_TUNE_*` env | ✅ 实测（`timescaledb-docker/README.md:56,68,74`） |
 | `uvicorn`/`websockets`/`sqlalchemy`/`pydantic-settings` 上游版本号 | ✅ 实测（各自源码版本文件） |
+
+### ⭐ 2026-10-10 追加实测：`external/aiomqtt` 必须钉 v2.5.1 标签
+
+裸 `git clone --depth 1 https://github.com/empicano/aiomqtt.git` 当前拉到的是
+**`3.0.0-alpha.1`**（v3 重写线，弃用 paho-mqtt、`MqttError` 被替换、参数全 keyword-only），
+`docs/reconnection.md` 在该 HEAD 上**已不存在** —— 会导致本文 I-1/I-2 的 file:line 证据失效。
+
+已处置：`external/aiomqtt` 显式 `git checkout v2.5.1`（HEAD `c8f8248`），
+切回后 `docs/reconnection.md:5` 的「reusable (but not reentrant)」原文与本计划一致。
+复现命令已改为 `--branch v2.5.1`。详见 `external/SOURCES.md` §5。
 
 ### ⭐ 2026-10-10 追加实测：本机验证通道已打通
 

@@ -2,12 +2,17 @@ version: "3.8"
 
 services:
   emqx:
-    # 镜像全名必须为 emqx/emqx（EMQX 官方开源版）。
-    # 实证（2026-10-10）：裸名 emqx:5.6 会解析到 Docker Hub 上的同名第三方镜像，
-    #   两者 digest 完全不同 ——
-    #   emqx:5.6       -> sha256:06f2341d1bf4ec8350a37a029dc5f6590c2dc95f181bebf1493d0f8e3a727f8e (非 EMQX)
-    #   emqx/emqx:5.6  -> sha256:c5a4118b2dc3bc0e8b0ed877eb7c51b7d9a4a5a920c20e441d5316fa43611ce0 (官方)
-    #   参考源：external/mqtt-to-timescaledb/docker-compose.yml（EMQX 官方示例仓库）
+    # 镜像选型（2026-10-10 复核，此前结论已纠正，见 external/SOURCES.md §1.1）：
+    #   emqx/emqx 与 emqx(=library/emqx) 是【同一个镜像的两个发布通道】——
+    #   Docker Official Images 的 library/emqx 就是由 https://github.com/emqx/emqx-docker
+    #   构建的（official-images/library/emqx 明文写着 GitRepo: emqx/emqx-docker）。
+    #   两者 index digest 不同属正常（构建方不同），不代表其中一个是"非 EMQX"。
+    #   实测 library/emqx:5.6 config.Env 含 EMQX_VERSION=5.6.1，
+    #   Entrypoint=/usr/bin/docker-entrypoint.sh，与 emqx-docker/5.6/Dockerfile 逐行吻合。
+    #
+    # 仍选 emqx/emqx 而非 library/emqx 的真实理由：5.6 这一档只在 emqx/emqx 持续发布，
+    #   Docker Official Images 当前只维护 5.7 / 5.8（实证 official-images/library/emqx
+    #   的 Tags 只有这两个）；emqx/emqx:5.6 才是 5.6.x 的可追溯来源。
     image: emqx/emqx:5.6
     container_name: robot-monitor-emqx
     ports:
@@ -23,11 +28,17 @@ services:
       # Prometheus 直接抓 /api/v5/prometheus/stats 即可 —— 见 ops/prometheus/prometheus.yml ①。
       EMQX_PROMETHEUS__ENABLE: "true"
     healthcheck:
-      # 与官方示例保持一致（external/mqtt-to-timescaledb 使用 emqx ping）
+      # `emqx ping` 是 EMQX 官方示例（external/mqtt-to-timescaledb/docker-compose.yml）用法，
+      # 其可用的前提是 emqx-docker 的 Dockerfile 做了
+      #   `ln -s /opt/emqx/bin/* /usr/local/bin/`（实证 emqx-docker/5.6/Dockerfile），
+      # 故 PATH 上存在 emqx 可执行文件。
+      # start_period 必须给足：EMQX 首次启动需展开 Erlang 运行时，明显慢于 DB/Redis
+      # （R-07 §1 已强调「只等 DB 就开跑模拟器 → 连不上 Broker → 写入 0 条」的假失败）。
       test: ["CMD", "emqx", "ping"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 12
+      start_period: 60s
 
   timescaledb:
     image: timescale/timescaledb:2.13.1-pg16

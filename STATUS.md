@@ -108,7 +108,9 @@
 | 前后端 24 关节键名 | ✅ `telemetry.py:13-22` ↔ `types/robot.ts:8-17` **逐字一致** |
 | WS 契约 | ✅ `/ws/robots` + `snapshot/telemetry/alert` 三分支一致 |
 | aiomqtt 2.5.1 兼容性 | ✅ `app.main` 导入成功；`Client.__init__` 参数实测 `['self','hostname','port','username']` |
-| EMQX 镜像名 | ✅ digest 级验证：`emqx:5.6` ≠ `emqx/emqx:5.6`（前者非 EMQX） |
+| EMQX 镜像同源 | ✅ 实证：`library/emqx` 由 `emqx/emqx-docker` 构建（official-images `GitRepo` 字段），与 `emqx/emqx` 同源；此前「`emqx:5.6` 非 EMQX」的结论**已撤稿**（对比粒度错误） |
+| Schema 契约（init.sql ↔ ORM） | ✅ `tests/test_schema_contract.py` **4/4 通过**；并做过**反向验证**（注入历史缺陷后测试确实 FAIL） |
+| `test_integration.sh` health 解析器 | ✅ 8 个用例实测通过（含旧版数组式输出、垃圾输入、字段缺失） |
 
 本机验证环境（已打通）：Python **3.13.14** 隔离 venv，
 `aiomqtt 2.5.1 / asyncpg 0.32.0 / fastapi 0.143.0 / redis 8.1.0 / pydantic 2.14.0`。
@@ -127,7 +129,7 @@
 
 | # | 缺陷 | 位置 | 后果 |
 |---|---|---|---|
-| 1 | EMQX 镜像名缺 org 前缀 | `infra/docker-compose.yml` | 拉起**非 EMQX** 的容器（digest 实证） |
+| 1 | ~~EMQX 镜像名缺 org 前缀~~ **（撤稿）** | `infra/docker-compose.yml` | 原判据（跨发布通道比 digest）不成立；`emqx:5.6` 与 `emqx/emqx:5.6` 都是 EMQX 5.6.1。本轮改为修正 healthcheck `start_period` 缺失 |
 | 2 | `/history` 不返回 `joint_positions` | `backend_ingestion/app/main.py` | Drawer 第三条折线「角度(rad)」**恒空** |
 | 3 | Redis Hash 值被字符串化 | `backend_ingestion/app/services/state_cache.py` | 前端收到 `status_code:"1"`，状态色全错 |
 | 4 | 批量写入用 flush 时刻 `now()` | `backend_ingestion/app/services/batch_writer.py` | PK `(time,robot_id)` 冲突 → `ON CONFLICT DO NOTHING` **静默丢行** |
@@ -142,6 +144,24 @@
 另：`npm install` 曾把 `package-lock.json` 的 42 行 `libc`/`musl` 平台标记删掉
 （会导致 Linux CI 上 lock 不完整）—— 已恢复原始跨平台版本。
 
+### 第二轮细节复核（2026-10-10，本轮）
+
+用户反馈「细节完全没有达标」，遂做了一轮**逐文件对照审计**（不依赖记忆，全程实际执行）。
+结果分两类：**自己此前写错的结论**，和**一直存在的契约漂移**。
+
+| # | 问题 | 位置 | 性质 | 处置 |
+|---|---|---|---|---|
+| 6 | 「`emqx:5.6` 是非 EMQX 镜像」**结论本身错了** | `external/SOURCES.md` §1 / `STATUS` / `orders/06` | **撤稿**（拿子 manifest digest 比 index digest，粒度错误） | 重写证据链，见 `external/SOURCES.md` §1.1 |
+| 7 | `robot_alert` 的 ORM 凭空多出复合主键 `(time, robot_id)` | `backend_ingestion/app/db/models.py:52` | **真契约漂移**（init.sql 无此 PK） | 已对齐 + 加回归测试 |
+| 8 | `test_integration.sh` 用 `docker exec` 判就绪，**绕开 compose healthcheck** | `test_integration.sh` | 判据与被测对象不一致 | 改读 `docker compose ps` 真实健康态 |
+| 9 | EMQX healthcheck 缺 `start_period` | `infra/docker-compose.yml` | R-07 §1 强调过的假失败风险 | 补 `start_period: 60s` |
+| 10 | 审计脚本自身把 `robot_metadata` 主键报成不一致 | 审计脚本 | **工具不可信** | 修脚本后复验：三表**列名 + 主键全一致** |
+| 11 | 仓库**零自动化测试**，R-08 矩阵全靠人工肉眼 | 全仓 | 契约漂移无人拦 | 新增 `tests/test_schema_contract.py`（含**反向验证**） |
+
+> 关于 #6：本轮最重要的不是修了什么，而是承认**上一轮写进文档的「实证」是错的**。
+> digest 只能回答「字节是否相同」，不能回答「是不是同一个项目」。
+> 跨发布通道比 digest 之前，必须先确认构建来源。
+
 ---
 
 ## 七、文档索引
@@ -154,5 +174,6 @@
 | `external/SOURCES.md` | **22 个**下载源的 provenance 与取舍理由（第四批 8 个见 §5） |
 | `orders/NN-dispatch.md` | 各单派工正文 |
 | `docs/requirements/R-*.md` | 验收规格（R-01 前端 / R-02 WS 节流 / R-03 API 契约 / R-07 联调压测 / R-08 验收矩阵） |
+| `tests/` | 可重复运行的契约测试（`test_schema_contract.py`：init.sql ↔ ORM 逐列比对，纯标准库） |
 | `AGENTS.md` | NPC 每次运行自动注入的工程纪律 |
 | `.cnb.yml` / `.cnb/settings.yml` | CI 流水线 / 10 个 NPC 角色 |
