@@ -8,6 +8,10 @@
 __pycache__/
 *.pyc
 .venv/
+# `.venv*/` 覆盖 `.venv-ci` 等 CI 侧虚拟环境目录：
+# `fix/issue19-p0-gaps` 曾把 `.venv-ci/` 整包误提交进仓（symlink + pyvenv.cfg），
+# 只写 `.venv/` 挡不住它。实测 `git check-ignore .venv-ci/pyvenv.cfg` 命中此行。
+.venv*/
 venv/
 .pytest_cache/
 
@@ -23,9 +27,14 @@ build/
 external/*
 !external/SOURCES.md
 !external/INTEGRATION-PLAN.md
+!external/fetch-sources.sh
+!external/ORDER12-VERIFICATION.md
 
 # OS
 .DS_Store
+
+# Redis 本地快照（本机验证时由 redis-server 生成，不进仓）
+dump.rdb
 
 # 运维层本地状态（Grafana 新建的看板不入库；供给源是 infra/ops/grafana/dashboards）
 infra/ops/grafana/data/

@@ -465,3 +465,138 @@ docker compose -f infra/docker-compose.yml --profile ops up -d
 | pgBackRest | `timescale/timescaledb:2.13.1-pg16` 镜像内**不含** pgbackrest 二进制 | 换镜像或起边车，并先 `docker manifest inspect` 核镜像（EMQX 镜像名的教训） |
 | G-4 告警落库失败告警 | 需要「告警的告警」机制 | 用 postgres_exporter 的 `pg_stat` 指标 + Prometheus 规则；本批已铺好 exporter |
 | G-6 `robot_metadata` 未更新 | 涉 `offline` 规则的 last_seen 语义 | 单独订单 |
+
+## 8. 第五批套用计划（I-11 ~ I-20）—— 2026-10-10 从零重扫
+
+> 上游来源与取舍见 `SOURCES.md` §5。本节只回答**套到哪一行、按什么顺序连**。
+> 判据沿用本仓纪律：**无幻觉（只引实证 API）**、**实证优先（file:line）**、
+> **性能护栏（先算峰值）**。
+
+### 8.0 一张图：现在的缺口 → 装什么
+
+```
+审计缺口                          装什么                        可直连?
+─────────────────────────────────────────────────────────────
+护栏无度量(#无metrics)   ──→  postgres_exporter + redis_exporter   ✅ 官方镜像
+                                 + otel-collector (统一转发)
+前端无观测(黑盒)         ──→  opentelemetry-js (RUM/trace)        ✅ npm
+压测不可判定(R-07)       ──→  k6 + xk6-mqtt                       ✅ 官方镜像
+认证零命中               ──→  fastapi-users (同栈)                ✅ pip
+告警不落地到人(#27)      ──→  keep 或 prom2teams                 ✅ docker-compose
+告警无确认闭环(#11)      ──→  keep (事件管理)                    ✅ docker-compose
+契约靠人肉(24关节)       ──→  datamodel-code-generator           ✅ pip
+                                 + openapi-typescript            ✅ npm
+数字不可重复(#18/#19)    ──→  pytest + vitest + playwright       ✅ pip/npm
+磁盘一周必满(#7)         ──→  timescaledb 保留/压缩策略         ⚙️ SQL 策略
+数据丢了怎么办(#28)      ──→  pgbackrest 或 wal-g               ✅ 官方镜像
+```
+
+### 8.1 I-11 🔴 `infra/docker-compose.yml` 补 TimescaleDB 调优 env
+
+- **缺口**：compose 里 **一个 `TS_TUNE_*` 都没设** → 压测基线不可复现（危害 R-08 C1 的 ±10%）
+- **源**：`external/timescaledb-tune`（前轮已下）+ `timescaledb` 官方镜像 README
+- **套用点**：`infra/docker-compose.yml` 的 `timescaledb` service `environment`
+- **状态**：**未验证**（需真实容器比对压测吞吐）
+
+### 8.2 I-12 🔴 观测三件套接进容器网络（**替换前轮「下了没接」**）
+
+- **缺口**：`prometheus/client_python` 下了但 `grep -rn prometheus backend_ingestion` 无输出
+- **源**：`postgres_exporter`（`README.md:252`）、`redis_exporter`（`README.md:197,216`）
+- **套用点**：新建 `infra/observability/docker-compose.observability.yml`，加两个 exporter service
+- **关键约束**：exporter 必须与 `backend`/`redis`/`timescaledb` **同网络**，
+  否则 `DATA_SOURCE_NAME` 解析不到（前轮 §二第 3 点同一个坑）
+- **状态**：**未验证**（无 Docker）
+
+### 8.3 I-13 🟡 `fastapi-users` 上认证与 RBAC（对应审计 #5 硬门槛）
+
+- **源**：`external/fastapi-users`（**v15.0.5**，实证 `fastapi_users/__init__.py`）
+- **兼容性实证**：`pyproject.toml:133` → `fastapi >=0.65.2`，我们锁 `0.110.0` ✅ 在区间内
+- **套用点**：`backend_ingestion/app/main.py:78`（REST）、`:168`（WebSocket）
+- **范围**：viewer/admin 两级 + WS 拒连；**不是**上 Keycloak（单厂 100 台，运维成本不划算）
+- **风险**：`fastapi-users-db-sqlalchemy >=7.0.0` 会带进 SQLAlchemy —— 但写路径是 `asyncpg`
+  原生池（前轮已澄清），**认证库自己用 SQLAlchemy 不冲突**
+- **状态**：**未验证**（未与 `fastapi==0.110.0` 实跑联调）
+
+### 8.4 I-14 🔴 告警落地到人 + 确认闭环
+
+- **源**：`external/keep`（活的，`providers/` 含 `slack/teams/telegram/webhook/ntfy`）
+  或轻量路线 `external/prom2teams`（仅 Teams webhook）
+- **套用点**：`alert_engine/app/main.py:53-58` 的 `emit()` 出口 → 加通知 sink
+- **注意**：
+  - ⚠️ **`grafana/oncall` 已归档**（`README.md:3`），前轮若推荐过必须撤回
+  - 仓库里**没有 DingTalk/WeCom provider**（实证：`ls providers/ | grep -i ding` 空）
+    → 若工厂用钉钉/企微，走通用 `webhook_provider` 自己写转发（或 prom2teams 改造）
+- **状态**：**未验证**（未起容器）
+
+### 8.5 I-15 🔴 契约即代码（防「人肉比对 24 关节」再翻车）
+
+- **缺口**：`STATUS.md §六 #2` 记着同类翻车（`/history` 漏 `joint_positions` → 折线恒空）
+- **源**：`datamodel-code-generator`（`README.md:327`）+ `openapi-typescript`
+- **套用点**：
+  - FastAPI 自身导出的 `/openapi.json` → `datamodel-codegen` → `backend` pydantic 模型
+  - 同一 `openapi.json` → `openapi-typescript` → `frontend_dashboard/src/types/robot.ts`
+- **判据**：契约漂移时 CI 变红（对齐订单 14 的判据）
+- **状态**：**未验证**（工具未实跑）
+
+### 8.6 I-16 🟡 可判定的压测（**替换 Erlang emqtt-bench 的「只吐数字」**）
+
+- **源**：`k6`（`go.mod` → `go.k6.io/k6/v2`）+ `xk6-mqtt` 扩展
+- **替换理由**：`emqtt-bench` 要 OTP 27.2+ 编译且难以写通过判定；
+  k6 用 JS 直接写 `check()` 断言 → 正合 R-07/R-08 要「可判定」
+- **注意**：`mock_fleet.py` **不替换**（24 关节真实 payload 只有自研能产生，I-4 判断不变）
+- **状态**：**未验证**（`xk6-mqtt` 需 Go 编译，未跑）
+
+### 8.7 I-17 🟡 数据生命周期（对应审计 #7：每天 ~130 GB）
+
+- **源**：`timescaledb` 官方 + `timescaledb-toolkit`
+- **套用点**：`infra/init.sql`（**须与 init.sql 同步**，AGENTS.md §4）
+- **动作**：
+  ```sql
+  SELECT add_compression_policy('robot_telemetry', INTERVAL '1 day');
+  SELECT add_retention_policy('robot_telemetry', INTERVAL '30 days');
+  ```
+- **决策待定**：保留窗口 30 天 vs 90 天（成本差 ~3 倍）—— 需用户拍板
+- **状态**：**未验证**（未在真实 TimescaleDB 跑 policy）
+
+### 8.8 I-18 🟡 测试框架落地（对应审计 #18/#19：「11/11」「20/20」不可重复）
+
+- **源**：`pytest` + `vitest` + `playwright` + `testing-library` + `msw`
+- **套用点**：新建 `backend_ingestion/tests/`、`alert_engine/tests/`、
+  `frontend_dashboard/src/**/*.test.tsx`；`.cnb.yml` 加 `test` job
+- **判据**：把 `STATUS.md` 里手跑的「11/11」「20/20」变成 CI 可复现数字
+- **状态**：**未验证**（未建目录）
+
+### 8.9 I-19 🟢 灾备（对应审计 #28）
+
+- **源**：`pgbackrest` 或 `wal-g`
+- **判据**：`RPO/RTO` 量化 + 恢复演练记录
+- **状态**：**未验证**
+
+### 8.10 I-20 🟢 前端健壮性（对应审计 #23/#24）
+
+- **源**：`react-error-boundary`（2.4 MB，小成本）+ `tanstack/query`（服务端状态/重试）
+- **套用点**：`frontend_dashboard/src/App.tsx` 外层包 `ErrorBoundary`；
+  Drawer 的 `/history` 请求交给 query 管缓存与重试
+- **注意**：**不替换 `zustand`** —— query 管服务端缓存，zustand 管 WS 节流后的客户端状态，
+  **两者互补**（前轮「zustand 不升 v5」决策不变）
+- **状态**：**未验证**（未实装）
+
+### 8.11 连接顺序（谁先谁后，避免半套状态）
+
+```
+① I-17 数据生命周期 ──→ 最紧急（磁盘一周必满），且只动 init.sql，风险最低
+② I-12 观测 exporter ──→ 有度量才能验证后面所有改动
+③ I-15 契约即代码   ──→ 先把契约锁死，后面改代码才有类型保护
+④ I-13 认证         ──→ 改 main.py，需在契约锁定后
+⑤ I-14 告警落地     ──→ 依赖 ④ 的身份（谁被通知），故在 ④ 后
+⑥ I-16 压测         ──→ 依赖 ② 的 metrics 做对照
+⑦ I-18 测试框架     ──→ 贯穿；建议每单带上，不单独立项
+⑧ I-19 / I-20       ──→ 增值，收口后做
+```
+
+### 8.12 本轮**不能做**的事（诚实边界）
+
+- **无 Docker** → I-11/I-12/I-14/I-16/I-17 都只有「配置语义」结论，**没有运行时证据**
+- **未实装 fastapi-users** → I-13 的兼容性只有**声明期**证据（`pyproject.toml`）
+- **`xk6-mqtt` 未编译** → I-16 与 k6 v2 线的兼容性**未验证**
+- 本轮**只下载源码 + 写归因文档，没动任何业务代码**

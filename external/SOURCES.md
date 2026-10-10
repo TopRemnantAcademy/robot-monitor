@@ -280,3 +280,139 @@ HEAD 变为 `c8f8248`）。切回后 `docs/reconnection.md` 与
 | `starlette` | `starlette/websockets.py` | ✅ 存在 |
 | `paho.mqtt.python` | `src/paho/mqtt/client.py` | ✅ 存在 |
 | `echarts-for-react` / `zustand` / `redis-py` / `alembic` / `full-stack-fastapi-template` | `package.json` / `redis/asyncio/client.py` / `setup.cfg` / `README.md` | ✅ 存在 |
+
+## 6. 第五批：从零重扫（含「完全替换」候选）—— 2026-10-10
+
+> **本轮方法变了**。前四批是「看名字猜需求」，本轮按 **32 项审计**里
+> 每一条**尚未有参考源的需求点**逐条回溯上游，并且**主动找更完美的替代品**
+> （不是补缺，是问「现在选的这个是不是最好的」）。
+>
+> 判定口径：①需求点是否真的存在（有 `file:line` 或审计编号支撑）
+> ②仓库是否活跃（`pushed_at`）③是否有官方发布镜像/可直接跑（决定「下载」还是「装服务」）
+> ④是否有更优替代（可替换现有依赖）。
+
+### 6.1 本轮新增 20 个源（全部 `git clone --depth 1`，实测可达）
+
+| # | 需求点（对应审计/缺口） | 仓库 | 体积 | HEAD | 关键实证 |
+|---|---|---|---|---|---|
+| N1 | MQTT 缺口→OTel 采集管线（#32 数据新鲜度 / 统一遥测） | `open-telemetry/opentelemetry-python` | 12 MB | `c4d8ff6` | `opentelemetry-sdk/` 存在 |
+| N2 | 前端 RUM/追踪（审计「前端无观测」） | `open-telemetry/opentelemetry-js` | 22 MB | `e5db961` | `api/`、`e2e-tests/` |
+| N3 | 采集器/边缘转发（统一 metrics+logs+trace） | `open-telemetry/opentelemetry-collector` | 22 MB | `e85aabc` | 官方 collector |
+| N4 | 采集器发行版（配置化 pipeline，含 Docker） | `grafana/alloy` | 69 MB | `eabe529` | `collector/README.md`、`docs/` |
+| N5 | **PG 指标**（护栏「无 metrics 出口」的直接解） | `prometheus-community/postgres_exporter` | 1.4 MB | `fb6be9d` | `README.md:252` `DATA_SOURCE_NAME` |
+| N6 | **Redis 指标**（Redis 是单点，必须可观测） | `oliver006/redis_exporter` | 1.2 MB | `6de1e8b` | `README.md:197` `REDIS_ADDR`、`:216` `/metrics` |
+| N7 | **可写断言的压测**（R-07/R-08「可判定」） | `grafana/k6` | 75 MB | `b408672` | `go.mod` `go.k6.io/k6/v2` |
+| N8 | k6 的 MQTT 扩展（补上「MQTT 能压」） | `pmalhaire/xk6-mqtt` | 312 KB | — | 312 KB，`git ls-remote` 17 refs |
+| N9 | **认证/RBAC**（审计「grep auth 零命中」） | `fastapi-users/fastapi-users` | 1.2 MB | `e9c57ff` | `__init__.py` `15.0.5`；`pyproject.toml:133` `fastapi>=0.65.2` |
+| N10 | 企业级 SSO（预留，非默认） | `keycloak/keycloak` | 205 MB | `eb6d2dde` | Java，官方镜像 |
+| N11 | 轻量 SSO（单厂更划算） | `casdoor/casdoor` | 38 MB | `43a6aab` | Go+Vue |
+| N12 | **事件/告警闭环**（ack + 升级 + 值班） | `keephq/keep` | 133 MB | — | `providers/` 含 `slack/teams/telegram/webhook/ntfy` |
+| N13 | Alertmanager 本体（抑制/静默真实现） | `prometheus/alertmanager` | 7.1 MB | `e7a4afd` | `docs/configuration.md` `inhibit_rules` |
+| N14 | 告警 → 企业 IM 桥（Python，可裁剪） | `idealista/prom2teams` | 1.0 MB | `aaecfd5` | Teams webhook 转发 |
+| N15 | 状态页/公告（运维对外） | `openstatusHQ/openstatus` | 218 MB | — | `docker-compose.yaml` |
+| N16 | **Pydantic 契约生成**（防 24 关节人肉比对） | `koxudaxi/datamodel-code-generator` | 99 MB | `7ae9017` | `README.md:327` `--url ... --output model.py` |
+| N17 | **TS 契约生成**（同一 OpenAPI → `types/robot.ts`） | `openapi-ts/openapi-typescript` | 90 MB | `d46a319` | 生成 `types`/`openapi-fetch` |
+| N18 | 单测框架（审计 #18「数字不可重复」） | `pytest-dev/pytest` | 12 MB | `4fa645f` | 官方 |
+| N19 | 前端测试（E2E 真跑大屏） | `microsoft/playwright` | 108 MB | `d9f2fd3` | 官方 |
+| N20 | 组件测试 + Mock（审计 #23/#31） | `vitest-dev/vitest`、`testing-library/react-testing-library`、`mswjs/msw` | 70/1.4/6.9 MB | — | 官方 |
+
+### 6.2 数据生命周期与灾备（补齐审计 #7/#28）
+
+| # | 需求点 | 仓库 | 体积 | 关键实证 |
+|---|---|---|---|---|
+| N21 | 保留/压缩/连续聚合（每天 ~130 GB 定时炸弹） | `timescale/timescaledb` | 64 MB | `add_retention_policy` / `add_compression_policy` 主体 |
+| N22 | 高级时序函数（gapfill 等，看板可用） | `timescale/timescaledb-toolkit` | 3.9 MB | 扩展 SQL 函数 |
+| N23 | PG 备份 | `pgbackrest/pgbackrest` | 22 MB | 官方 |
+| N24 | WAL 归档备份（云对象存储） | `wal-g/wal-g` | 35 MB | 官方 |
+
+### 6.3 替代评估（**「即使完全替换也要找到更完美的」**）
+
+| 现有选择 | 候选替代 | 结论 | 依据 |
+|---|---|---|---|
+| `emqtt-bench`（Erlang，只吐数字、难写断言） | **`k6` + `xk6-mqtt`** | ✅ **建议替换/并列采用** | k6 是 Go 自带 JS 断言 + 官方发布；`emqtt-bench` 需 OTP 27.2+ 编译。R-07 要「可判定」，k6 直接满足 |
+| `mock_fleet.py` 纯自研 | `k6` 亦可生成负载 | ➖ **保留自研** | 24 关节真实 payload 只有自研能精确产生（I-4 判断不变） |
+| `grafana/oncall`（前轮已推荐） | — | ❌ **撤回** | **实证：`README.md:3` 原文 "entered maintenance mode on 2025-03-11 and was archived on 2026-03-24"** |
+| 无值班/升级机制 | `keephq/keep` | ✅ 新引入 | 活的、多 provider、docker-compose 可直跑 |
+| `zustand`（已决定不升） | `tanstack/query` | ➖ **补充而非替换** | query 管服务端状态/缓存/重试，与 zustand 管客户端状态互补，不互相替代 |
+| 无错误边界（审计 #23） | `react-error-boundary` | ✅ 小成本直用 | 2.4 MB，官方推荐姿势 |
+| `alert_engine` 自研规则引擎 | `prometheus/prometheus` 规则 | ❌ **不替换** | 规则引擎要判「机器人」，Prometheus 判「平台」。**同名不同层**（前轮已结论） |
+| 自研 `deduplicator.py` | Alertmanager `inhibit_rules` | ➖ 学语义不换实现 | 已按 I-5 抄语义；引 Alertmanager 实例反而多一层运维 |
+
+### 6.4 本轮**发现的陷阱**（实证，不是推测）
+
+1. **`victoriametrics/victoria-metrics` 是 404**（`curl -sI` → `HTTP/2 404`）。
+   前轮 `INTEGRATION-PLAN.md` 已注明「ls-remote 失败已划掉」，**本轮复核确认死链**，非临时网络问题。
+   正确仓库是 `VictoriaMetrics/VictoriaMetrics`（1777 refs）—— 但我们**不引入**（判：与 Prometheus 功能重叠，见 §5.5）。
+2. **Grafana OnCall OSS 已归档**（见 §5.3）。
+3. `git ls-remote` 遇大仓偶发 `refs=0`（如 `grafana/loki` 首次），**必须复核**，
+   否则会把活仓误判为死仓 —— 这是「可达性核对」本身的坑。
+
+### 6.5 搜索过但**明确不下载**（本轮新增，附理由）
+
+| 仓库 | 体积 | 不下的理由 |
+|---|---|---|
+| `thingsboard/thingsboard` | 404 MB | **整平台（替代方案）**，非依赖；引入即推翻现有四层架构 |
+| `openremote/openremote` | 106 MB | 同上；已下载仅作**架构对照**（多租户/fleet 模型），不套用 |
+| `apache/bifromq` | 17 MB | 分布式 MQTT broker，**替代 EMQX**；100 台规模用不上分布式 |
+| `nanomq/nanomq` | 33 MB | 边缘 broker，**替代 EMQX**；EMQX 生态（Dashboard/Rule）更全 |
+| `illacloud/illa-builder` | 52 MB | 低代码看板，**替代自研大屏**；交付物就是自研 2D 看板，不用 |
+| `grafana/grafana` | 2064 MB | 前轮已判不下，本轮**维持** |
+| `grafana/loki` + `vectordotdev/vector` + `fluent/fluent-bit` | 442+73+243 MB | 日志栈。**价值真实**（审计 #27/#19 要「有日志可查」），但 700+ MB 换一份「怎么配」的文档不划算 —— **改为记录推荐配置**，需要时按官方镜像起服务 |
+| `openstatusHQ/openstatus` | 218 MB | 状态页是**对外**产品需求，本项目是对内大屏，属「增值」非「必需」—— 已下载留档，列为 P3 |
+| `chakra-ui/ark` | 134 MB | 无头 UI 原语，**替代手写组件**；当前 Tailwind 手写已过 tsc，收益 < 回归风险 |
+| `goauthentik/authentik` | 157 MB | SSO，与 Keycloak/Casdoor 三者取一已够，选更轻的 |
+
+> ⚠️ **本轮自纠**：初扫时下了 `ark-ui`/`fluent-bit`/`loki`/`authentik` 共 ~1 GB，
+> 复核后**按本仓既有原则（不把体量致命/替代方案引入）删除**，只留归因结论。
+> 已下载 ≠ 该下载，这条对 NPC 同样适用。
+
+---
+
+## 复现命令（第五批增量）
+
+```bash
+cd external
+# 可观测性
+git clone --depth 1 https://github.com/grafana/alloy.git
+git clone --depth 1 https://github.com/open-telemetry/opentelemetry-collector.git
+git clone --depth 1 https://github.com/open-telemetry/opentelemetry-python.git
+git clone --depth 1 https://github.com/open-telemetry/opentelemetry-js.git
+git clone --depth 1 https://github.com/prometheus-community/postgres_exporter.git
+git clone --depth 1 https://github.com/oliver006/redis_exporter.git
+git clone --depth 1 https://github.com/grafana/k6.git
+git clone --depth 1 https://github.com/pmalhaire/xk6-mqtt.git
+# 认证 / 告警闭环
+git clone --depth 1 https://github.com/fastapi-users/fastapi-users.git
+git clone --depth 1 https://github.com/keycloak/keycloak.git
+git clone --depth 1 https://github.com/casdoor/casdoor.git
+git clone --depth 1 https://github.com/keephq/keep.git
+git clone --depth 1 https://github.com/prometheus/alertmanager.git
+git clone --depth 1 https://github.com/idealista/prom2teams.git
+# 契约即代码
+git clone --depth 1 https://github.com/koxudaxi/datamodel-code-generator.git
+git clone --depth 1 https://github.com/openapi-ts/openapi-typescript.git
+# 测试与质量
+git clone --depth 1 https://github.com/pytest-dev/pytest.git
+git clone --depth 1 https://github.com/microsoft/playwright.git
+git clone --depth 1 https://github.com/vitest-dev/vitest.git
+git clone --depth 1 https://github.com/testing-library/react-testing-library.git
+git clone --depth 1 https://github.com/mswjs/msw.git
+# 数据生命周期 / 灾备
+git clone --depth 1 https://github.com/timescale/timescaledb.git
+git clone --depth 1 https://github.com/timescale/timescaledb-toolkit.git
+git clone --depth 1 https://github.com/pgbackrest/pgbackrest.git
+git clone --depth 1 https://github.com/wal-g/wal-g.git
+```
+
+### 本轮验证边界（诚实标注）
+
+| 结论 | 状态 |
+|---|---|
+| 20+ 仓库 `git clone` 成功（实测体积/HEAD 见 §5.1） | ✅ 实测 |
+| `DATA_SOURCE_NAME` / `REDIS_ADDR` / `/metrics` 行号 | ✅ 实测（`grep -n`） |
+| `fastapi-users 15.0.5` 与 `fastapi>=0.65.2` 兼容区间 | ✅ 实测（源码） |
+| Grafana OnCall 已归档 | ✅ 实测（`README.md:3` 原文） |
+| `victoriametrics/victoria-metrics` 404 | ✅ 实测（`curl -sI`） |
+| **未跑通任何新源的服务** | ❌ 无 Docker 环境，未起 k6/keep/OTel |
+| **未实装 fastapi-users** | ❌ 未与 `fastapi==0.110.0` 做运行时联调 |
+| `xk6-mqtt` 是否兼容 k6 v2 线 | ❌ 未编译（需 Go） |

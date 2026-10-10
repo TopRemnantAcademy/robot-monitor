@@ -3,7 +3,12 @@
 跑法（需要可写的 PostgreSQL + 已执行 infra/init.sql 的纯 PG 部分）：
 
     export TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:55432/robot_monitor
-    cd backend_ingestion && python -m tests.test_db_integration
+    cd backend_ingestion && python -m tests.verify_db_integration
+
+⚠️ 本文件**不是** pytest 用例，原名 `test_db_integration.py` 已被改掉：
+断言全部写在 `t1..t6` 里、由 `main()` 驱动，pytest 收集结果为 **0 tests** ——
+名字带 `test_` 会造成「有测试在跑」的假象（与 alert_engine 的 `test_notifier.py`
+同一类假覆盖缺陷）。它是**按需运行的独立脚本**，退出码 0 = 全部通过。
 
 覆盖（每条都对应本轮修掉的一个真实缺陷，不是凑数的断言）：
   T1 COPY 路径写入真实 JSONB 表，且 jsonb 列类型未被破坏

@@ -1,6 +1,16 @@
 # backend_ingestion 验证脚本
 
-本目录存放**零外部依赖**的可复现验证脚本（不依赖 pytest，纯标准库可跑）。
+本目录存放**按需运行**的验证脚本 —— 都是**独立脚本，不是 pytest 用例**
+（跑法见下，退出码 0 = 全部通过）。分两类：
+
+| 脚本 | 依赖 | 何时跑 |
+|---|---|---|
+| `verify_batch_writer.py` | 零依赖（读源码 AST） | 每次改动 `batch_writer.py` / 连接池后 |
+| `verify_db_integration.py` | 真实 PostgreSQL | 有可写 PG 且已执行 `infra/init.sql` 的纯 PG 部分时 |
+
+> ⚠️ **不要用 `pytest` 跑本目录**：两个文件都没有 `test_*` 函数，
+> pytest 会收集到 **0 tests** 并静默"通过"，制造假的安全感。
+> `verify_db_integration.py` 原名 `test_db_integration.py` 正是因此改名。
 
 ## `verify_batch_writer.py`
 
@@ -28,10 +38,18 @@ python3 backend_ingestion/tests/verify_batch_writer.py
 > （main 保留的是三级降级链 + `_to_row`）。即该脚本 import 即
 > `AttributeError`，是一份**跑不起来的交付物**。本轮换成验证 main 真实存在的逻辑。
 
-## `test_db_integration.py`
+## `verify_db_integration.py`
 
-需要真实 TimescaleDB，按需运行（`pytest`）：
+需要**真实 PostgreSQL**（TimescaleDB 专属语句不在其覆盖范围，见文件头注释）：
 
 ```bash
-python -m pytest backend_ingestion/tests/test_db_integration.py -q
+export TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:55432/robot_monitor
+cd backend_ingestion && python -m tests.verify_db_integration
 ```
+
+未设 `TEST_DATABASE_URL` 时打印「跳过」并退出 0 —— 所以它**永远不该**被当成
+CI 门禁，只作为有 DB 时的人工复核手段。
+
+覆盖 6 组场景（T1 COPY 写真实 JSONB / T2 幂等 / T3 降级链 L1→L2 / T4 坏行隔离 /
+T5 吞吐冗余 / T6 ORM DDL 与 `infra/init.sql` 列类型一致），
+每组都对应一个**已修掉的真实缺陷**。

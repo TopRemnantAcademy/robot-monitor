@@ -15,6 +15,7 @@ import logging
 import aiomqtt
 from pydantic import ValidationError
 
+from app import metrics
 from app.config import settings
 from app.schemas.telemetry import Telemetry
 from app.services import state_cache
@@ -63,8 +64,12 @@ async def _handle(raw: bytes, writer) -> None:
         t = Telemetry.model_validate_json(raw)
     except (ValidationError, json.JSONDecodeError) as exc:
         dropped += 1
+        # 导出到 Prometheus：进程内计数 `dropped` 抓不到，只有这里能让
+        # `robot_backend_mqtt_dropped_total` 真正动起来（>0 = payload 契约被破坏）。
+        metrics.mqtt_dropped.inc()
         log.debug("invalid payload dropped: %s", exc)
         return
     received += 1
+    metrics.mqtt_received.inc()
     await state_cache.write_and_publish(t)   # 最新状态 + 广播
     await writer.put(t)                      # 批量落库队列
