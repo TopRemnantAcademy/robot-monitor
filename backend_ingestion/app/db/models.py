@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, Double, Integer, Text, TIMESTAMP
+from sqlalchemy import BigInteger, Boolean, Double, Integer, PrimaryKeyConstraint, Text, TIMESTAMP
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -59,28 +59,34 @@ class RobotMetadata(Base):
 
 
 class RobotAlert(Base):
+    """告警表（hypertable）。主键真实存在，与 init.sql:75-88 逐列一致。
+
+    身份语义：`(time, alert_id)`。
+    - 主键必须含分区列 time（TimescaleDB 硬性要求），故顺序为 (time, alert_id)。
+    - alert_id 是列级真实主键（BIGSERIAL，库侧自增），唯一标识「同机器人同时刻的
+      哪一条」告警：一轮 tick 内 motor_temp / battery_low / joint_stuck 各有独立
+      去重窗口，同一 (time, robot_id) 可合法对应多条不同规则告警。
+    - 因此**不再需要**映射级 `__mapper_args__` 权宜之计：ORM 身份与 DDL 同源，
+      `metadata.create_all()` 不会与 init.sql 漂移。
+    - ack_at / ack_by 本轮仅建字段；ack 接口属订单 17（告警闭环）范围。
+    """
+
     __tablename__ = "robot_alert"
 
-    # ⚠️ robot_alert 是 hypertable，init.sql **没有声明任何主键** ——
-    #   它靠 create_hypertable('robot_alert', 'time') 分区，而非靠 PK。
-    #
-    # 两种错法（均已实测排除）：
-    #   ① 在列上写 primary_key=True → metadata.create_all() 会凭空造出 init.sql
-    #      不存在的复合主键，语义变成「同一机器人同一毫秒只能有一条告警」，
-    #      与 dedup_window_s 去重窗口内可存在多条不同规则告警相冲突。
-    #   ② 完全不标主键 → SQLAlchemy 直接抛
-    #      ArgumentError: could not assemble any primary key columns（实测）。
-    #
-    # 正解：列上只标 index=True 表达「按此组合查询」，主键通过 **映射级**
-    #   __mapper_args__ 声明。实测：configure_mappers() 通过，且
-    #   CreateTable(...).compile(postgresql) 产出的 DDL **不含 PRIMARY KEY**，
-    #   与 init.sql 完全一致 —— ORM 拿到身份标识，DDL 不产生多余约束。
-    time: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, index=True)
+    time: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), primary_key=True)
+    alert_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     robot_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     rule_id: Mapped[str] = mapped_column(Text, nullable=False)
     severity: Mapped[int] = mapped_column(Integer, nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     detail: Mapped[dict | None] = mapped_column(JSONB)
-    ack: Mapped[bool] = mapped_column(Boolean, default=False)
+    ack: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    ack_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    ack_by: Mapped[str | None] = mapped_column(Text)
 
-    __mapper_args__ = {"primary_key": [time, robot_id]}
+    # 显式声明 PK 列顺序 (time, alert_id)，与 init.sql 逐字一致。
+    # 必要性（已实测）：SQLAlchemy 生成复合 PK 时会把 BIGSERIAL 列排到最前，
+    # 只靠 primary_key=True 会编译出 PRIMARY KEY (alert_id, time)，
+    # 与 init.sql 的 (time, alert_id) 不同序 —— 契约测试会（且应当）报错。
+    # 列声明顺序也与 init.sql 的物理列顺序一致。
+    __table_args__ = (PrimaryKeyConstraint("time", "alert_id"),)

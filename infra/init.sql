@@ -52,14 +52,38 @@ FROM generate_series(1, 100) AS g
 ON CONFLICT (robot_id) DO NOTHING;
 
 -- 4. 告警表
+--
+-- 身份语义（订单 19）：`alert_id BIGSERIAL` + `PRIMARY KEY (time, alert_id)`。
+--   - 主键必须含分区列 time（TimescaleDB 硬性要求），故顺序为 (time, alert_id)。
+--   - alert_id 单调自增，唯一标识「同机器人同时刻的哪一条」告警：
+--     alert_engine 的一轮 tick 内，motor_temp / battery_low / joint_stuck 各有独立
+--     去重窗口（alert_engine/app/main.py 的 DEDUP_WINDOW），同一 (time, robot_id)
+--     可以合法对应多条不同规则告警 —— 旧语义「(time, robot_id) 即身份」是错的。
+--   - ack_at / ack_by 用于把「已确认」落到具体某一条并记录确认时间/人；
+--     本轮仅建字段，ack 接口属订单 17（告警闭环）范围。
+--
+-- ⚠️ 存量库迁移不在本单范围：本文件是**初始化**脚本（首次启动由
+--    /docker-entrypoint-initdb.d/ 执行），对已存在的库不会重建表。
+--    已有数据的库需手工执行：
+--      ALTER TABLE robot_alert ADD COLUMN alert_id BIGSERIAL;
+--      ALTER TABLE robot_alert ADD COLUMN ack_at TIMESTAMPTZ;
+--      ALTER TABLE robot_alert ADD COLUMN ack_by TEXT;
+--      ALTER TABLE robot_alert ADD PRIMARY KEY (time, alert_id);
+--    （TimescaleDB 侧上述语句未在本机验证，见文件尾部说明。）
 CREATE TABLE IF NOT EXISTS robot_alert (
     time      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- alert_id 紧跟分区列 time：列序与 ORM 声明序、PK 序三者一致，便于逐列比对。
+    alert_id  BIGSERIAL NOT NULL,
     robot_id  TEXT        NOT NULL,
     rule_id   TEXT        NOT NULL,   -- motor_temp | battery_low | offline | joint_stuck
     severity  INTEGER     NOT NULL,   -- 1 info / 2 warning / 3 critical
     message   TEXT        NOT NULL,
     detail    JSONB,
-    ack       BOOLEAN DEFAULT FALSE
+    ack       BOOLEAN     NOT NULL DEFAULT FALSE,
+    ack_at    TIMESTAMPTZ,
+    ack_by    TEXT,
+    -- 主键必须含分区列 time（TimescaleDB 硬性要求）
+    PRIMARY KEY (time, alert_id)
 );
 
 SELECT create_hypertable('robot_alert', 'time', if_not_exists => TRUE, chunk_time_interval => INTERVAL '7 days');
