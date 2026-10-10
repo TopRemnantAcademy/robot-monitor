@@ -46,9 +46,12 @@ async def run(writer) -> None:
         except aiomqtt.MqttError as exc:
             # 指数退避 1→30s（非官方示例的固定 5s）：100 台 × 10Hz = 1000 msg/s
             # 场景下，broker 抖动时固定高频重连会加剧拥塞。
-            # 必须 aiomqtt>=2.5.0：2.0.1 的 __aexit__ 在重连场景下存在不抛异常的分支，
-            # 会绕过本 except 而直接空转重连（无退避）。
-            # CHANGELOG 2.5.0: "Let exceptions bubble up in Client.__aexit__ instead of suppressing them"
+            # 必须 aiomqtt>=2.5.0 的原因（已用源码+运行时复核，见
+            # external/ORDER12-VERIFICATION.md §2）：2.5.0 删除 `__aexit__` 中
+            # 对断开异常的多余 re-raise，改由 MessagesIterator 单点抛出 MqttError；
+            # 2.0.1 会在 `async for` 已抛 MqttError 后于 `async with` 退出时再抛一次
+            # （重复抛出/掩盖真实栈）。重连本身两条路径都会进本 except。
+            # 参考 CHANGELOG 2.5.0: "Let exceptions bubble up in Client.__aexit__ ..."
             log.warning("mqtt error (%s), reconnect in %.1fs", exc, delay)
             await asyncio.sleep(delay)
             delay = min(delay * 2, 30.0)

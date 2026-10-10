@@ -61,13 +61,26 @@ class RobotMetadata(Base):
 class RobotAlert(Base):
     __tablename__ = "robot_alert"
 
-    # 注意：init.sql 里 robot_alert **没有主键**（只有 time 分区列 + DEFAULT NOW()）。
-    # 这里标 primary_key 仅为 ORM 需要一个主键才能映射；与库内真实约束不一致的部分
-    # 以 init.sql 为准（写入走 store.py 的原生 INSERT，不经过 ORM 的 INSERT）。
-    time: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), primary_key=True)
-    robot_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    # ⚠️ robot_alert 是 hypertable，init.sql **没有声明任何主键** ——
+    #   它靠 create_hypertable('robot_alert', 'time') 分区，而非靠 PK。
+    #
+    # 两种错法（均已实测排除）：
+    #   ① 在列上写 primary_key=True → metadata.create_all() 会凭空造出 init.sql
+    #      不存在的复合主键，语义变成「同一机器人同一毫秒只能有一条告警」，
+    #      与 dedup_window_s 去重窗口内可存在多条不同规则告警相冲突。
+    #   ② 完全不标主键 → SQLAlchemy 直接抛
+    #      ArgumentError: could not assemble any primary key columns（实测）。
+    #
+    # 正解：列上只标 index=True 表达「按此组合查询」，主键通过 **映射级**
+    #   __mapper_args__ 声明。实测：configure_mappers() 通过，且
+    #   CreateTable(...).compile(postgresql) 产出的 DDL **不含 PRIMARY KEY**，
+    #   与 init.sql 完全一致 —— ORM 拿到身份标识，DDL 不产生多余约束。
+    time: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, index=True)
+    robot_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     rule_id: Mapped[str] = mapped_column(Text, nullable=False)
     severity: Mapped[int] = mapped_column(Integer, nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     detail: Mapped[dict | None] = mapped_column(JSONB)
     ack: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    __mapper_args__ = {"primary_key": [time, robot_id]}
