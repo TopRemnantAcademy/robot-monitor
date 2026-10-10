@@ -6,6 +6,19 @@ include:
   - https://cnb.cool/Bring/Agents/Agent/-/blob/main/npc.yml
 
 $:
+  # 【临时】订单 18 环境探针：验证 node:20 是否自带 python3/pip，以及 $ 下的
+  # 非 NPC 事件在本仓库能否被调度。验证完删除。
+  api_trigger:
+    probe-env:
+      docker:
+        image: node:20
+      stages:
+        - name: probe
+          script: |
+            set -euo pipefail
+            echo "node: $(node -v)"
+            echo "python3: $(python3 --version 2>&1 || echo MISSING)"
+            echo "pip: $(python3 -m pip --version 2>&1 || echo MISSING)"
   issue:
     comment@npc:
       image: cnbcool/default-npc:latest
