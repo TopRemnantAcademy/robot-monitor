@@ -15,28 +15,68 @@
 - 体积：1.1 MB ｜ 关键文件：`create-table.sql`、`docker-compose.yml`、`emqx/cluster.hocon`
 - License：随仓库保留
 
-### 对照结论（已据此修正本仓库）
+### 对照结论
 
-| 项 | 官方写法 | 本仓库修正前 | 判定 |
+| 项 | 官方写法 | 本仓库 | 判定 |
 |---|---|---|---|
-| EMQX 镜像名 | `emqx/emqx-enterprise:5.0.3`（企业版）<br>开源版对应 `emqx/emqx` | `emqx:5.6`（**缺 org 前缀**） | ❌ **缺陷，已修** |
+| EMQX 镜像 | `emqx/emqx-enterprise:5.0.3`（企业版）<br>开源版为 `emqx/emqx` | `emqx/emqx:5.6` | ✅ 等价，保留 |
 
-**实证过程（2026-10-10，digest 级验证）**
+### 1.1 ⚠️ 撤稿：此前「`emqx:5.6` 是非 EMQX 镜像」的结论是**错的**
+
+2026-10-10 曾按 digest 差异判定「裸名 `emqx:5.6` 解析到非 EMQX 镜像」。
+**该结论已作废**，原因是**对比方法本身有误**，与镜像无关：
+
+**错误 1 —— 拿「子 manifest 的 digest」当「镜像 id」，再跨仓库比**
 
 ```
-$ docker manifest inspect emqx:5.6
-  digest: sha256:06f2341d1bf4ec8350a37a029dc5f6590c2dc95f181bebf1493d0f8e3a727f8e
-          mediaType: application/vnd.oci.image.index.v1+json
-$ docker manifest inspect emqx/emqx:5.6
-  digest: sha256:c5a4118b2dc3bc0e8b0ed877eb7c51b7d9a4a5a920c20e441d5316fa43611ce0
-          mediaType: application/vnd.docker.distribution.manifest.list.v2+json
-$ curl https://hub.docker.com/v2/repositories/emqx/emqx/tags/5.6
-  -> sha256:c5a4118b2dc3bc0e8b0ed877eb7c51b7d9a4a5a920c20e441d5316fa43611ce0  (与官方一致)
+library/emqx:5.6  index digest              = sha256:4cbb5792d0fd17e02f3003cda571aeca343d954f05215f8ab20a5a3b21603755
+  └─ amd64 子 manifest digest               = sha256:06f2341d1bf4ec8350a37a029dc5f6590c2dc95f181bebf1493d0f8e3a727f8e
+emqx/emqx:5.6     index digest              = sha256:b14a3c6d04f680869e3ca181b552c9338b7cd20c2d43d8af6c1e3b8aec48a0cc
 ```
 
-两个 digest **完全不同** → 裸名 `emqx:5.6` 解析到 Docker Hub 上的**同名非 EMQX 镜像**。
-照修正前的 compose 启动会拉起一个根本不是 MQTT broker 的容器。
-已修正为 `emqx/emqx:5.6`（`infra/docker-compose.yml`）。
+文档里被写成「`emqx:5.6` → `06f2341d…`」的，其实是 `library/emqx` 的**子 manifest**digest，
+却被拿去和 `emqx/emqx` 的 **index** digest 比。粒度不同，必然"对不上"。
+
+**错误 2 —— 忽略了「同一镜像两个发布通道」这一事实**
+
+`library/emqx` **就是**由 `emqx/emqx-docker` 构建的（Docker Official Images）：
+
+```
+$ curl https://raw.githubusercontent.com/docker-library/official-images/master/library/emqx
+  Maintainers: Rory Z (@rory-z), Ivan Dyachkov (@id)
+  GitRepo: https://github.com/emqx/emqx-docker.git     ← 与 emqx/emqx 同源
+  Tags: 5.7.2, 5.7      Directory: 5.7
+  Tags: 5.8.8, 5.8, 5, latest   Directory: 5.8
+```
+
+两个通道的 index digest 不同是**构造方式不同导致的必然结果**（bashbrew 重新构建 vs 官方 CI）。
+EMQX 官方 README 也把 `emqx/emqx` 与 `emqx`(=library/emqx) 并列推荐。
+
+**正面证据：`library/emqx:5.6` 确实是 EMQX 5.6.1**
+
+```
+$ curl -H "Authorization: Bearer $T"     https://registry-1.docker.io/v2/library/emqx/blobs/sha256:3a5ff702742d32ef92978cc8fe0122f1a127f136e7c006de0a807b0c7f7324b9
+  config.Env        = ["...", "EMQX_VERSION=5.6.1", "AMD64_SHA256=a5be376…", ...]
+  config.Entrypoint = ["/usr/bin/docker-entrypoint.sh"]
+  config.Cmd        = ["/opt/emqx/bin/emqx", "foreground"]
+  config.WorkingDir = "/opt/emqx"
+  config.ExposedPorts = 1883 / 8883 / 18083 / 4370 / 5369 / 8083 / 8084
+```
+
+与 `emqx/emqx-docker` 5.6 分支 `Dockerfile`（`ENV EMQX_VERSION=5.6.1`、同 Entrypoint/Cmd、
+同 EXPOSE 列表）**逐行吻合**。
+
+**那为什么本仓库仍保留 `emqx/emqx:5.6`？**（此判断有依据，非因循守旧）
+
+`library/emqx` 当前**只维护 5.7 / 5.8**（上方 official-images 文件的 Tags 段实证）。
+`library/emqx:5.6` 是 Docker Hub 上遗留的**非受管 tag**，仍在但不会再获得
+安全更新，也不会随 official-images 流程重新发布。
+在 5.6 这一档上，`emqx/emqx:5.6` 才是持续发布的**可追溯来源**。
+
+> 教训：digest 只能用来判断「字节是否相同」，**不能**用来判断「是不是同一个项目」。
+> 跨发布通道比 digest 之前，先确认两者的**构建来源**是否同一。
+
+**未采纳的官方写法（有意为之，非疏漏）**
 
 **未采纳的官方写法（有意为之，非疏漏）**
 

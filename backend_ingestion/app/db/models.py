@@ -50,10 +50,22 @@ class RobotMetadata(Base):
 
 
 class RobotAlert(Base):
+    """映射 `robot_alert`（读路径用；写路径在 alert_engine）。
+
+    ⚠️ 契约要点（`infra/init.sql` 为准）：
+    `robot_alert` 是 **hypertable**，但原表**没有声明任何主键** ——
+    它靠 `create_hypertable('robot_alert', 'time')` 建立分区，而不是靠 PK。
+    此前此处把 `(time, robot_id)` 标成 `primary_key=True`，与 init.sql 不符：
+    若哪天真的用 `metadata.create_all()` 建表，会凭空造出一个 init.sql 不存在的
+    复合主键，导致「同一机器人同一毫秒只能有一条告警」——
+    而去重窗口（`dedup_window_s`）内的多条不同规则告警会撞 PK 被拒。
+    故此处只标注 `index=True` 表达「按此组合查询」，不宣称主键。
+    """
+
     __tablename__ = "robot_alert"
 
-    time: Mapped[str] = mapped_column(TIMESTAMP(timezone=True), primary_key=True)
-    robot_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    time: Mapped[str] = mapped_column(TIMESTAMP(timezone=True), nullable=False, index=True)
+    robot_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     rule_id: Mapped[str] = mapped_column(Text, nullable=False)
     severity: Mapped[int] = mapped_column(Integer, nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)

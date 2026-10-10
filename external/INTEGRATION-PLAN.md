@@ -41,12 +41,17 @@
 
 ## 1. 已完成的套用（本次实证后落地）
 
-### I-0 ✅ EMQX 镜像名修正（已提交）
+### I-0 ⚠️ EMQX 镜像（原「修正」已撤稿，2026-10-10 复核）
 
-- 套用点：`infra/docker-compose.yml`
+- 套用点：`infra/docker-compose.yml`（镜像保持 `emqx/emqx:5.6`，**改动只在注释与 healthcheck**）
 - 源：`external/mqtt-to-timescaledb/docker-compose.yml`
-- 证据：`emqx:5.6` → `sha256:06f2341d…`（非 EMQX）；`emqx/emqx:5.6` → `sha256:c5a4118b…`（官方）
-- 详见 `external/SOURCES.md`
+- **原结论作废**：此前写「`emqx:5.6` 是非 EMQX 镜像」是**对比方法错误**造成的误判 ——
+  拿 `library/emqx` 的**子 manifest** digest 去比 `emqx/emqx` 的 **index** digest。
+  两者本就是同一镜像（`library/emqx` 由 `emqx/emqx-docker` 构建）的两个发布通道。
+- **保留 `emqx/emqx:5.6` 的真实理由**：`library/emqx` 当前只维护 5.7/5.8，
+  5.6 档上 `emqx/emqx:5.6` 才是持续发布的可追溯来源。
+- 本次实际改动：healthcheck 补 `start_period: 60s`（EMQX 首次启动慢，R-07 §1 强调过假失败风险）。
+- 完整实证与撤稿说明见 `external/SOURCES.md` §1.1
 
 ---
 

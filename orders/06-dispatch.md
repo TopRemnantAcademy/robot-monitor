@@ -22,8 +22,10 @@
 
 **主代理在本次收口前已修复 3 个已确认缺陷，请勿回退：**
 
-1. `infra/docker-compose.yml`：EMQX 镜像名由 `emqx:5.6` 修正为 `emqx/emqx:5.6`。
-   实测两个名字 digest 不同，裸名会拉到**非 EMQX 的同名镜像**。（证据见 `external/SOURCES.md`）
+1. `infra/docker-compose.yml`：EMQX 镜像为 `emqx/emqx:5.6`。
+   ⚠️ **不要引用「`emqx:5.6` 是非 EMQX 镜像」这个旧结论 —— 它已于 2026-10-10 撤稿**
+   （跨发布通道比 digest，粒度错误）。两个名字都是 EMQX 5.6.1，
+   选 `emqx/emqx` 的理由是 5.6 档只有它在持续发布。详见 `external/SOURCES.md` §1.1。
 2. `backend_ingestion/app/main.py`：`/robots/{id}/history` 增加 `joint_positions` 字段。
    缺失时前端 Drawer 第三条折线「角度(rad)」恒为 null、图上永远空白
    （`frontend_dashboard/src/components/RobotDetailDrawer.tsx:93`）。
