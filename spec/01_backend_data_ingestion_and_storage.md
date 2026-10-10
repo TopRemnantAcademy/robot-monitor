@@ -37,13 +37,17 @@ fastapi==0.110.0
 uvicorn[standard]==0.28.0
 pydantic==2.6.4
 pydantic-settings==2.2.1
-asyncpg==0.29.0
+asyncpg==0.32.0
 sqlalchemy[asyncio]==2.0.28
 redis[hiredis]==5.0.3
-aiomqtt==2.0.1
+aiomqtt==2.5.1
 uvloop==0.19.0; sys_platform != 'win32'
 websockets==12.0
+prometheus-client==0.21.1
 ```
+
+> `prometheus-client` 由订单 13 接线（`GET /metrics`）。规范里的版本清单必须与
+> `backend_ingestion/requirements.txt` 逐行一致，否则又是一次「文档与契约漂移」。
 
 ## 3. 数据校验 Schema (`app/schemas/telemetry.py`)
 
@@ -95,7 +99,11 @@ SQLAlchemy 2.0 Async 模式：
   - `GET /robots/{robot_id}/history?minutes=5&resolution=10s` → 最近 N 分钟历史点（优先查
     `robot_status_10s`，聚合未就绪时回退 `robot_telemetry` + `time_bucket`）。
   - `GET /robots` → 100 台最新状态（WS 之外兜底）。
-  - `GET /healthz` → 200。
+  - `GET /healthz` → 200。`status` 反映依赖可达性（`ok`/`degraded`），
+    并暴露 `db` / `retries` / `rejected` 与丢行三元组
+    `rows_submitted` / `rows_written` / `rows_skipped`（最后一项是
+    `ON CONFLICT DO NOTHING` 静默丢弃的行数，即「收到的数据没全部入库」的直接证据）。
+  - `GET /metrics` → 200，`text/plain; version=0.0.4`（Prometheus exposition format）。
 - 所有 WS 出站消息必须是 `spec/00 §5.2` 定义的**带 `type` 的信封**（`snapshot` / `telemetry` / `alert`）。
 
 ## 5. 多阶段 Dockerfile（基于 `python:3.11-slim`）

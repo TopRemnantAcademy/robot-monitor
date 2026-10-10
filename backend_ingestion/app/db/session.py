@@ -11,29 +11,38 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import asyncpg
 
 from app.config import settings
 
 _pool: asyncpg.Pool | None = None
+# 同 alert_engine/app/db.py：`_pool is None` 是 check-then-act，而 `create_pool()`
+# 会 await。并发调用方会各建一个池，把 `max_connections` 打爆。
+# 本服务的并发入口是 `/healthz` 探活 + `batch_writer._flush`，两者都可能同时到达。
+_pool_lock = asyncio.Lock()
 
 
 async def get_pool() -> asyncpg.Pool:
     global _pool
-    if _pool is None:
-        _pool = await asyncpg.create_pool(
-            dsn=settings.database_url,
-            min_size=settings.db_pool_min_size,
-            max_size=settings.db_pool_max_size,
-            command_timeout=settings.db_command_timeout_s,
-            # 显式关掉 prepared statement 缓存：本项目批量路径用 COPY / executemany，
-            # 基本用不到服务端缓存；而 statement_cache 在 PgBouncer(transaction 模式)
-            # 之类连接池后面会报 "prepared statement already exists"。
-            # 关掉换来的是**可移植性**，代价对本项目可忽略。
-            statement_cache_size=0,
-            # 回收前先 ping，避免拿到被数据库/中间件静默掐断的死连接。
-            max_inactive_connection_lifetime=settings.db_max_idle_s,
-        )
+    if _pool is not None:
+        return _pool
+    async with _pool_lock:
+        if _pool is None:
+            _pool = await asyncpg.create_pool(
+                dsn=settings.database_url,
+                min_size=settings.db_pool_min_size,
+                max_size=settings.db_pool_max_size,
+                command_timeout=settings.db_command_timeout_s,
+                # 显式关掉 prepared statement 缓存：本项目批量路径用 COPY / executemany，
+                # 基本用不到服务端缓存；而 statement_cache 在 PgBouncer(transaction 模式)
+                # 之类连接池后面会报 "prepared statement already exists"。
+                # 关掉换来的是**可移植性**，代价对本项目可忽略。
+                statement_cache_size=0,
+                # 回收前先 ping，避免拿到被数据库/中间件静默掐断的死连接。
+                max_inactive_connection_lifetime=settings.db_max_idle_s,
+            )
     return _pool
 
 

@@ -16,8 +16,9 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
+from app import metrics
 from app.config import settings
 from app.db.redis import close_redis, get_redis
 from app.db.session import close_pool, ping
@@ -84,6 +85,12 @@ async def healthz():
         "queue_depth": writer.queue.qsize(),
         "mqtt_received": mqtt_subscriber.received,
         "mqtt_dropped": mqtt_subscriber.dropped,
+        # 丢行三元组（ISSUE #19 G2）：submitted 是交给落库的行数，
+        # written 是真正入库的，skipped 是 ON CONFLICT DO NOTHING 静默丢弃的。
+        # 三者与 rejected（降级链判定不可写的坏行）合起来才是"收到多少 / 入库多少"的完整答案。
+        "rows_submitted": writer.rows_submitted,
+        "rows_written": writer.written,
+        "rows_skipped": writer.rows_skipped,
     }
 
 
@@ -103,6 +110,23 @@ async def _db_healthy() -> bool:
     ok = await ping()
     _db_probe = (now, ok)
     return ok
+
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Prometheus 抓取端点（`infra/observability/prometheus.yml` 的 `robot_backend` job）。
+
+    与 `/healthz` 的区别是**模型**而不是内容：`/healthz` 回瞬时快照，
+    抓取端拿到的永远是"上一次写入那一刻"的值；这里的 Counter 是单调累加的，
+    Prometheus 才能算出 `rate()` / `increase()`，让 1000 msg/s 有历史曲线。
+
+    函数名**不能叫 `metrics`** —— 那会遮蔽模块名 `app.metrics`（`from app import metrics`）。
+    """
+    # 瞬时量（Gauge）必须在暴露前刷新：拉模型下没人替我们定期 set，
+    # 不刷新的话 queue_depth 会停在最后一次写入的时刻，抓到的永远是过期值。
+    metrics.queue_depth.set(writer.queue.qsize())
+    body, ctype = metrics.render()
+    return Response(content=body, media_type=ctype)
 
 
 @app.get("/robots")

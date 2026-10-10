@@ -26,6 +26,7 @@ from app.rules.joint_stuck import JointStuckRule
 from app.rules.motor_temp import MotorTempRule
 from app.rules.offline import OfflineRule
 from app.rules.base import Alert
+from app import metrics
 from app.notifiers import build_notifier
 from app.store import save, update_online
 
@@ -85,12 +86,16 @@ def is_inhibited(alert: Alert) -> bool:
 
 async def emit(alert: Alert) -> None:
     if is_inhibited(alert):
+        # 抑制计数必须单独埋：否则 `alerts_emitted` 的**下降**无法归因 ——
+        # 到底是机器人真的健康了，还是被抑制层挡掉了。二者运维含义完全不同。
+        metrics.alerts_suppressed.labels(rule_id=alert.rule_id).inc()
         log.debug("alert inhibited: %s %s (robot offline)", alert.robot_id,
                   alert.rule_id)
         return
     window = DEDUP_WINDOW.get(alert.rule_id, 60)
     if await should_emit(alert, window):
         await save(alert)
+        metrics.alerts_emitted.labels(rule_id=alert.rule_id).inc()
         log.info("alert: %s %s sev=%d %s", alert.robot_id, alert.rule_id,
                  alert.severity, alert.message)
         # 推到工厂侧群机器人（钉钉/企微/通用）。
@@ -155,6 +160,10 @@ async def ticker() -> None:
                 online_state[rid] = online
                 spawn(update_online(rid, online))
 
+        # 拉模型下 Gauge 必须在每轮刷新：没人替我们定期 set，
+        # 不刷新则抓到的永远是"上一次状态变化那一刻"的过期值。
+        metrics.robots_online.set(sum(1 for v in online_state.values() if v))
+
 
 async def amain() -> None:
     try:
@@ -167,10 +176,16 @@ async def amain() -> None:
 
 
 def main() -> None:
+    # 先起 metrics HTTP 服务（独立线程，标准库 http.server），
+    # 保证 Prometheus 无论何时抓取都拿得到 up=1，而不是等 asyncio 循环先跑起来。
+    # 本服务不是 FastAPI，没有路由可挂 /metrics，故只能独立起端口。
+    server = metrics.start(settings.metrics_port)
     try:
         asyncio.run(amain())
     except KeyboardInterrupt:
         log.info("alert_engine stopped")
+    finally:
+        server.shutdown()
 
 
 if __name__ == "__main__":

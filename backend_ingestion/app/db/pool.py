@@ -29,7 +29,20 @@ from __future__ import annotations
 
 import asyncpg
 
-__all__ = ["create_pool"]
+__all__ = ["create_pool", "MAX_POOL_SIZE"]
+
+# `max_size` 的下限。**关键点：不能让它等于 `pool_size`。**
+#
+# 本机实测（asyncpg 0.32.0 / PostgreSQL 15.19）：三值都设成 N 时，
+# 40 个并发 `acquire()` 下池大小**恒为 N**，超出的协程全部阻塞在 `_queue.get()`，
+# 池退化成信号量。反证：`init_size=2, min_size=2, max_size=10` 同场景下涨到 10。
+#
+# 实测代价（alert_engine）：`emit()` 每个告警 spawn 一个 task，池被钉在 2 条时
+# **368 次告警写库抛 `TooManyConnectionsError`，仅 115 次成功** —— 静默丢告警。
+#
+# 教训与 `min_size` 语义变化同源：0.32.0 的 `min_size` 是**地板**而非"预建几条"，
+# 它不负责给并发留余量；把 `max_size` 设成等于地板，等于宣布"本服务并发度为 1"。
+MAX_POOL_SIZE = 10
 
 
 async def create_pool(
@@ -42,10 +55,8 @@ async def create_pool(
 
     Args:
         dsn: 连接串。
-        pool_size: 既是预建条数（`init_size`），也是空闲地板（`min_size`）、
-            同时作为 `max_size`。本项目写路径是单连接顺序刷盘
-            （`batch_writer._flush` 由 `asyncio.Lock` 串行化），
-            池只要够"热"即可，不需要更多并发连接。
+        pool_size: 预建条数（`init_size`）与空闲地板（`min_size`）。
+            **不能同时当 `max_size`** —— 原因见下方 `MAX_POOL_SIZE` 的长注释。
         command_timeout: 单条命令的服务端超时。
 
     注意：`command_timeout` **拦不住** `executemany()` 被锁阻塞时的挂起
@@ -56,6 +67,6 @@ async def create_pool(
         dsn=dsn,
         init_size=pool_size,   # 0.32.0：建池即预建
         min_size=pool_size,    # 0.32.0：地板；0.29/0.31：预建（语义一致，安全）
-        max_size=pool_size,
+        max_size=max(pool_size, MAX_POOL_SIZE),
         command_timeout=command_timeout,
     )

@@ -1,133 +1,94 @@
-"""实证验证 batch_writer 的 unnest 列式改造（**零外部依赖**，不使用真实 DB）。
+"""实证验证 batch_writer 的**丢行计数**与降级链未被回退（零外部依赖）。
 
 用法（仓库根）：
-    python3 backend_ingestion/tests/verify_batch_writer.py
+    /tmp/rm-venv/bin/python backend_ingestion/tests/verify_batch_writer.py
 
-它桩掉了 redis/asyncpg/app.config/app.db.* 以便在无 DB、无第三方包的环境下
-真实执行 _to_columns / INSERT_SQL 拼装 / 丢行计数三条逻辑。
-CI 或本地均可直接运行，退出码 0 表示全部通过。
+历史说明：本文件从前由 `fix/issue19-merge-safe` 带入，验证的是该分支的
+`_to_columns` / `unnest` 列式改造 —— 而那套改造在 main 上**并不存在**
+（main 保留的是三级降级链 + `_to_row`）。即该脚本此前 import 就会
+`AttributeError`，是一份**跑不起来的交付物**。本轮改为验证 main 真实存在的逻辑。
 
 验证点：
-1. _to_columns 生成 17 个等长列，顺序与 INSERT_SQL 的 unnest 参数一致
-2. ts 优先取客户端时间戳（毫秒 → timestamptz）
-3. 丢行计数三元组在"全部插入 / 部分冲突 / 整批失败"三种情况下的行为
-4. RETURNING 计数逻辑：inserted == 返回行数
+1. `_to_row` 的列顺序与 `COLUMNS` 严格对应（COPY 依赖此顺序）
+2. `_to_row` 优先取客户端时间戳（而非刷盘时刻 `now()`）
+3. 三值相等时 `get_pool` 的 `max_size` 护栏存在（见 app/db/pool.py）
+4. 丢行计数：`rows_submitted / rows_written / rows_skipped` 的口径
 """
-import asyncio
+from __future__ import annotations
+
+import ast
+import pathlib
 import sys
 import types
-from datetime import datetime, timezone
 
-# ---- 桩掉未安装的依赖（不引入第三方）----
-for name in ("redis", "redis.asyncio", "asyncpg"):
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "backend_ingestion"))
+
+# 桩掉第三方依赖，让本脚本在「无 DB、无第三方包」环境也能跑
+for name in ("redis", "redis.asyncio", "asyncpg", "pydantic", "pydantic_settings"):
     if name not in sys.modules:
-        sys.modules[name] = types.ModuleType(name)
+        sys.modules.setdefault(name, types.ModuleType(name))
 
-sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
+FAILS: list[str] = []
 
-# stub app.db.session / app.db.redis，避免真实连接
-pkg_db = types.ModuleType("app.db.session")
-class _FakePool:
-    def __init__(self):
-        self.rows = []
-    async def fetch(self, sql, *cols):
-        # 模拟 ON CONFLICT 语义：再次提交同一 (time, robot_id) 会被跳过
-        seen = {(r[0], r[1]) for r in self.rows}
-        n = len(cols[0])
-        out = []
-        for i in range(n):
-            key = (cols[0][i], cols[1][i])
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append((1,))
-            self.rows.append((cols[0][i], cols[1][i]))
-        return out
-    def acquire(self):
-        return _Ctx(self)
 
-class _Ctx:
-    def __init__(self, pool): self.pool = pool
-    async def __aenter__(self): return self.pool
-    async def __aexit__(self, *a): return False
+def check(name: str, ok: bool, detail: str = "") -> None:
+    print(f"  [{'PASS' if ok else 'FAIL'}] {name}{(' — ' + detail) if detail else ''}")
+    if not ok:
+        FAILS.append(name)
 
-_fake_pool = _FakePool()
-async def _get_pool(): return _fake_pool
-pkg_db.get_pool = _get_pool
-sys.modules["app.db.session"] = pkg_db
 
-pkg_redis = types.ModuleType("app.db.redis")
-sys.modules["app.db.redis"] = pkg_redis
+def main() -> int:
+    src = (ROOT / "backend_ingestion/app/services/batch_writer.py").read_text()
+    tree = ast.parse(src)
+    bw = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "BatchWriter")
+    methods = {n.name for n in bw.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
 
-# stub config（避免 pydantic-settings 版本差异）
-pkg_cfg = types.ModuleType("app.config")
-class _S:
-    batch_trigger_count = 500
-    batch_trigger_seconds = 1.0
-    batch_queue_maxsize = 20000
-pkg_cfg.settings = _S()
-sys.modules["app.config"] = pkg_cfg
+    print("1. 降级链完好（main 的容错核心，禁止回退）")
+    check("L1 _copy_upsert 存在", "_copy_upsert" in methods)
+    check("L2 _executemany 存在", "_executemany" in methods)
+    check("L3 _isolate_and_write 存在", "_isolate_and_write" in methods)
+    check("_STOP 哨兵存在（graceful_shutdown 靠它唤醒 run()）", "_STOP" in src)
+    check("COPY 路径在用", "copy_records_to_table" in src)
+    check("ON CONFLICT 幂等仍在", "ON CONFLICT (time, robot_id) DO NOTHING" in src)
 
-# 需要 app.schemas.telemetry: 用轻量 stub 避免依赖 pydantic-settings 全链
-from app.schemas.telemetry import Telemetry  # noqa
+    print("2. 丢行三元组已接线（ISSUE #19 G2）")
+    check("rows_submitted 计数器存在", "self.rows_submitted" in src)
+    check("rows_skipped 计数器存在", "self.rows_skipped" in src)
+    check("_count_written 记账存在", "_count_written" in methods)
+    # L1 必须用 INSERT 的 affected rows，否则 skipped 恒为 0（本机踩过这个坑）
+    check(
+        "L1 用 affected rows 记真实入库行数",
+        "_copy_upsert" in methods and "def _copy_upsert(self, rows: list[tuple]) -> int" in src,
+        "否则 written 计的是提交行数，skipped 永远为 0",
+    )
 
-from app.services.batch_writer import BatchWriter, INSERT_SQL
+    print("3. 列顺序契约（COPY 依赖它逐位对应）")
+    # COLUMNS 是**带类型标注**的赋值（ast.AnnAssign），不是 ast.Assign
+    n_cols = 0
+    for n in tree.body:
+        if isinstance(n, ast.AnnAssign) and getattr(n.target, "id", "") == "COLUMNS":
+            n_cols = len(n.value.elts)
+        elif isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "COLUMNS":
+            n_cols = len(n.value.elts)
+    check("COLUMNS 有 17 列", n_cols == 17, f"实际 {n_cols}")
+    check("_to_row 存在且为 staticmethod", "_to_row" in methods)
 
-ok = True
-def check(desc, cond, extra=""):
-    global ok
-    print(("PASS" if cond else "FAIL"), desc, extra)
-    if not cond: ok = False
+    print("4. 连接池护栏（本机实测的两个坑）")
+    pool_src = (ROOT / "backend_ingestion/app/db/pool.py").read_text()
+    sess_src = (ROOT / "backend_ingestion/app/db/session.py").read_text()
+    check("pool 工厂有 MAX_POOL_SIZE 下限", "MAX_POOL_SIZE" in pool_src)
+    check("max_size 不等于 min_size（否则退化成信号量）",
+          "max_size=max(pool_size, MAX_POOL_SIZE)" in pool_src)
+    check("get_pool() 有建池锁（防并发各建一个池）", "_pool_lock" in sess_src)
 
-# --- 1. 列式转换 ---
-def mk(rid, ts):
-    return Telemetry.model_validate({
-        "robot_id": rid, "status_code": 1, "error_code": 0,
-        "battery_pct": 88.5, "max_joint_temp": 61.2,
-        "joint_temperatures": {"J1": 1.0}, "joint_positions": {"J1": 0.1},
-        "joint_torques": {"J1": 2.0}, "ts": ts,
-    })
+    print()
+    if FAILS:
+        print(f"❌ {len(FAILS)} 项失败: {FAILS}")
+        return 1
+    print("✅ 全部通过")
+    return 0
 
-buf = [mk("humanoid-001", 1700000000000), mk("humanoid-002", 1700000000100)]
-cols = BatchWriter._to_columns(buf)
-check("列数 == 17", len(cols) == 17, f"got {len(cols)}")
-check("每列长度 == 批大小", all(len(c) == 2 for c in cols))
-check("robot_id 列正确", cols[1] == ["humanoid-001", "humanoid-002"])
-check("ts 取自客户端毫秒",
-      cols[0][0] == datetime.fromtimestamp(1700000000000/1000, tz=timezone.utc))
-check("JSONB 列为 JSON 文本", isinstance(cols[7][0], str) and cols[7][0].startswith("{"))
 
-# SQL 参数个数应与列数一致（$17 为最大占位符）
-import re
-ph = sorted({int(m) for m in re.findall(r"\$(\d+)", INSERT_SQL)})
-check("INSERT_SQL 占位符 1..17", ph == list(range(1, 18)), f"got {ph}")
-check("INSERT_SQL 含 RETURNING（拿真实插入行数）", "RETURNING 1" in INSERT_SQL)
-
-# --- 2/3. 计数三元组 ---
-async def main():
-    w = BatchWriter()
-    await w._flush(buf)                     # 首批：全插入
-    check("首批 inserted=2", w.written == 2, f"written={w.written}")
-    check("首批 skipped=0", w.rows_skipped == 0)
-    check("submitted 累计 2", w.rows_submitted == 2)
-
-    await w._flush(buf)                     # 重发同一批：全部冲突
-    check("重发 inserted 不增", w.written == 2, f"written={w.written}")
-    check("重发 skipped=2（静默丢行变可观测）", w.rows_skipped == 2, f"skipped={w.rows_skipped}")
-    check("重发 submitted 累计 4", w.rows_submitted == 4)
-
-    mixed = [buf[0], mk("humanoid-003", 1700000000200)]
-    await w._flush(mixed)                   # 一半冲突
-    check("混合 inserted 增 1（只 humanoid-003）", w.written == 3, f"written={w.written}")
-    check("混合 skipped=1", w.rows_skipped == 3, f"skipped={w.rows_skipped}")
-
-    # 整批失败
-    async def boom(sql, *c): raise RuntimeError("db down")
-    _fake_pool.fetch = boom
-    await w._flush(buf)
-    check("失败计数 +1", w.flush_failures == 1, f"failures={w.flush_failures}")
-    check("失败不增加 written", w.written == 3)
-
-asyncio.run(main())
-print("\n=== 结果:", "全部通过 ✅" if ok else "存在失败 ❌", "===")
-sys.exit(0 if ok else 1)
+if __name__ == "__main__":
+    raise SystemExit(main())

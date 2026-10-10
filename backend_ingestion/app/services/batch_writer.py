@@ -36,6 +36,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
+from app import metrics
 from app.config import settings
 from app.db.session import get_pool
 from app.schemas.telemetry import Telemetry
@@ -85,6 +86,13 @@ class BatchWriter:
         self.flushes = 0
         self.retries = 0        # 观察项：重试次数持续增长说明 DB 不稳
         self.rejected = 0       # 坏行计数：被 L3 判定为不可写而丢弃
+        # 丢行三元组（ISSUE #19 G2）。此前只有 `written`，而 `written += len(rows)`
+        # 计的是**提交行数**，ON CONFLICT DO NOTHING 静默丢弃的行完全不可见 ——
+        # 行数偏少时只能猜。这里把"提交 / 入库 / 跳过"三者分开记。
+        # 注：不引 RETURNING（那会改动降级链的写入路径），走**增量计数**；
+        # 代价是 `rows_skipped` 记的是"提交减入库"，对同一批内重复行同样成立。
+        self.rows_submitted = 0
+        self.rows_skipped = 0
         self._draining = False
         # run() 排空并退出后置位；graceful_shutdown() 靠它确认落库完成
         self._drained = asyncio.Event()
@@ -155,6 +163,18 @@ class BatchWriter:
                 self.rejected += len(rows)
                 log.exception("batch flush gave up, %d rows dropped", len(rows))
 
+    def _count_written(self, submitted: list[tuple], written: int) -> None:
+        """一次成功写入的记账（含 Prometheus 指标）。
+
+        `submitted - written` 即被 `ON CONFLICT DO NOTHING` 静默丢弃的行数
+        （ISSUE #19 G2 的直接证据）。降级链三条路径都只经由此处记账：
+        这里刻意**不改写入语义**（不引 RETURNING、不改批量策略），只加计数器。
+        """
+        self.rows_submitted += len(submitted)
+        self.rows_skipped += len(submitted) - written
+        metrics.telemetry_written.inc(written)
+        metrics.batch_flushes.inc()
+
     async def _write_with_retry(self, rows: list[tuple]) -> None:
         """重试 + 降级链。重试的是**同一条路径**，路径切换只在第一次失败后发生。
 
@@ -166,9 +186,10 @@ class BatchWriter:
 
         for attempt in range(1, settings.batch_flush_max_retries + 1):
             try:
-                await self._copy_upsert(rows)
-                self.written += len(rows)
+                inserted = await self._copy_upsert(rows)
+                self.written += inserted
                 self.flushes += 1
+                self._count_written(rows, inserted)
                 return
             except Exception as exc:
                 last = exc
@@ -183,9 +204,10 @@ class BatchWriter:
                     settings.batch_flush_max_retries, last)
 
         try:
-            await self._executemany(rows)
-            self.written += len(rows)
+            written = await self._executemany(rows)
+            self.written += written
             self.flushes += 1
+            self._count_written(rows, written)
             return
         except Exception as exc:
             self.retries += 1
@@ -194,7 +216,13 @@ class BatchWriter:
         await self._isolate_and_write(rows)
 
     # ---- L1：COPY → 临时表 → upsert ----
-    async def _copy_upsert(self, rows: list[tuple]) -> None:
+    async def _copy_upsert(self, rows: list[tuple]) -> int:
+        """返回**真实入库行数**（非提交行数）。
+
+        `INSERT ... SELECT ... ON CONFLICT DO NOTHING` 的 status 形如
+        `INSERT 0 7`，第 3 段就是实际插入的行数；被冲突跳过的行不计入。
+        这正是「收到的数据没全部入库」的量化依据（ISSUE #19 G2）。
+        """
         pool = await get_pool()
         async with pool.acquire() as conn:
             async with conn.transaction():
@@ -202,14 +230,28 @@ class BatchWriter:
                 await conn.execute(STAGING_TRUNCATE)
                 # copy_records_to_table 不支持 ON CONFLICT，幂等靠中转表的 upsert 实现。
                 await conn.copy_records_to_table("telemetry_stg", records=rows, columns=list(COLUMNS))
-                await conn.execute(STAGING_UPSERT)
+                status = await conn.execute(STAGING_UPSERT)
+        try:
+            inserted = int(status.split()[-1])
+        except (IndexError, ValueError):        # 兜底：状态串格式意外变化时不误报丢行
+            log.warning("unexpected upsert status %r, assuming all rows written", status)
+            inserted = len(rows)
+        return inserted
 
     # ---- L2：executemany ----
-    async def _executemany(self, rows: list[tuple]) -> None:
+    async def _executemany(self, rows: list[tuple]) -> int:
+        """返回提交行数。
+
+        asyncpg 的 `executemany` **不回传逐行 affected rows**，故这里无法区分
+        「插入」与「被 `ON CONFLICT` 跳过」。这是本路径已知的可观测缺口：
+        走 L2 时 `rows_skipped` 恒为 0。量化"静默丢行"以 L1 的 `INSERT 0 N` 为准，
+        L2 只在 L1 连续失败后才启用（罕见），此时更重要的是"别丢数据"而非精确计数。
+        """
         pool = await get_pool()
         async with pool.acquire() as conn:
             async with conn.transaction():
                 await conn.executemany(INSERT_SQL, rows)
+        return len(rows)
 
     # ---- L3：二分隔离坏行，保住好数据 ----
     async def _isolate_and_write(self, rows: list[tuple], _depth: int = 0) -> None:
@@ -236,9 +278,10 @@ class BatchWriter:
         mid = len(rows) // 2
         for half in (rows[:mid], rows[mid:]):
             try:
-                await self._executemany(half)
-                self.written += len(half)
+                written = await self._executemany(half)
+                self.written += written
                 self.flushes += 1
+                self._count_written(half, written)
             except Exception:
                 await self._isolate_and_write(half, _depth + 1)
 
@@ -281,8 +324,10 @@ class BatchWriter:
         """
         await self.queue.put(_STOP)          # 唤醒可能阻塞在 queue.get() 的 run()
         await self._drained.wait()           # 等 run() 把 queue 排空并落库
-        log.info("batch_writer stopped: written=%d flushes=%d retries=%d rejected=%d",
-                 self.written, self.flushes, self.retries, self.rejected)
+        log.info("batch_writer stopped: written=%d flushes=%d retries=%d rejected=%d "
+                 "submitted=%d skipped=%d",
+                 self.written, self.flushes, self.retries, self.rejected,
+                 self.rows_submitted, self.rows_skipped)
 
     @property
     def stats(self) -> dict:
@@ -291,5 +336,7 @@ class BatchWriter:
             "flushes": self.flushes,
             "retries": self.retries,
             "rejected": self.rejected,
+            "rows_submitted": self.rows_submitted,
+            "rows_skipped": self.rows_skipped,
             "queue_depth": self.queue.qsize(),
         }

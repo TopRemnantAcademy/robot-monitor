@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     batch_isolation_max_depth: int = 8
 
     # ---- asyncpg 连接池 ----
+    # 空闲地板条数（asyncpg 0.32 语义，见 app/db/pool.py）。写路径是单连接顺序刷盘，
+    # 2 条足矣；`db_pool_max_size` 留出并发余量（/healthz 探活 + 读路径会同时到达）。
+    # 注：不采用订单 08 分支那套「DB_POOL_SIZE 同时当 init_size/min_size/max_size」的写法，
+    # 三值相等会把池退化成信号量（本机实测见 app/db/pool.py 的 MAX_POOL_SIZE 注释）。
     db_pool_min_size: int = 2
     db_pool_max_size: int = 10
     db_command_timeout_s: float = 30.0

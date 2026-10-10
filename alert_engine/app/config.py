@@ -55,6 +55,12 @@ class Settings(BaseSettings):
     # 推送门槛：默认 3 —— 只推 critical，防「低电量风暴」刷屏
     alert_webhook_min_severity: int = 3
 
+    # ---- Prometheus ----
+    # 告警引擎不是 FastAPI 应用，没有 HTTP 路由可挂 /metrics，
+    # 故由 app/metrics.py:start() 在独立端口起一个 http.server（顺序 13 接线）。
+    # 与后端 ingestion 服务端口分离，避免抓取目标冲突。
+    metrics_port: int = 8001
+
     @property
     def robot_ids(self) -> list[str]:
         return [f"humanoid-{i:03d}" for i in range(1, 101)]
