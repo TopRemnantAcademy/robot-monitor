@@ -196,6 +196,14 @@ git -c http.extraHeader="Authorization: Bearer ${TOKEN}" push cnb main
 4. **不为通过而放宽阈值**：如 30,000 行不得改成 300
 5. **区分环境错误与代码错误**：见 `docs/requirements/R-07-integration-and-stress.md` §4
 6. **NPC 产出必须主代理验收**：合并后至少做一次编译/导入验证
+7. **派单前必须复验派工单本身**（2026-10-11 订单 15 实测）：
+   派工单写完后若隔了几轮才派，里面的 `file:line`、依赖订单号、列名都会腐烂。
+   本次复验发现 4 处过期 —— 行号整体后移（`/metrics` 接线后）、
+   引用了换号前的订单号（13→17）、审计列名写成不存在的 `operator`、
+   以及**漏掉 `/metrics` 免鉴权**（照原稿做会把 Prometheus 拉取挡在门外，
+   刚接线的可观测性整套失效）。
+   → **复验清单**：①行号 ②订单号/换号表 ③列名是否存在 ④有无"派单后才新增的端点"
+     需要纳入约束（尤其是免鉴权白名单）。
 
 ---
 
@@ -212,6 +220,7 @@ git -c http.extraHeader="Authorization: Bearer ${TOKEN}" push cnb main
 | 12 CNB 自行下载上游源 | #15 | — | ✅ 已回收 | 推翻了我的 I-1 结论，见 `external/ORDER12-VERIFICATION.md` |
 | 13 可观测性接线 + 6 分支收敛 | #33 | `cnb-f0b-1k4j8osuu` | ✅ 已回收验证 | 产出 `feat/order-13` @ `911b667`；按路径回收，其 alert `main.py`/`config.py` 判为回退已弃；补了 NPC 漏掉的 `alerts_suppressed` |
 | 19 `robot_alert` 身份 + ack 字段 | #34 | `cnb-38h-1k4jdbsm4` | ✅ 已回收并反向验证 | 产出 `auto/alert-identity-759f` @ `d27b972`；测试 25→29；NPC 发现 SQLAlchemy 会把 BIGSERIAL 排到复合 PK 最前，已用 `PrimaryKeyConstraint` 显式定序 |
+| 15 认证与 RBAC（fastapi-users） | #36 | `cnb-e2k-1k4jf5tfo` | ⏳ pending | 基线 `main@58bafb5`；workMode=true 已核验。**派前修正**：原稿行号过期、订单号未换号、审计列名写错（`operator`→实际 `ack_by`）、漏了 `/metrics` 免鉴权 |
 
 > ⚠️ **Issue 号与订单号不对齐，且跳跃极大**：#6=06、**#8=07、#9=08、#10=09、#13=10、
 > #15=12、#33=13、#34=19**。中间号被其他 issue 占用。**派单后务必记录实际号**，

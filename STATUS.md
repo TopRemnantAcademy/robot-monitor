@@ -38,8 +38,9 @@
 | MQTT 计数器接线 | ✅ **已回收验证** | `metrics.py:41,46` 定义了 `mqtt_received`/`mqtt_dropped` 却从未被引用（恒为 0）；喂坏 payload 实测 `robot_backend_mqtt_dropped_total` 由 0 → 1.0 |
 | 19 `robot_alert` 身份 + ack 字段 | ✅ **已回收并反向验证** | 产出 `auto/alert-identity-759f` @ `d27b972`；ORM DDL 与 `init.sql` 逐字同为 `PRIMARY KEY (time, alert_id)`；测试 25 → **29 passed**；注入缺陷实测会红 |
 | 上游参考源下载 | ✅ **22/22 齐备**（此前只有 14） | `external/fetch-sources.sh` 声明 22 个，磁盘实存 22 个，缺失/多余均为 0；`external/` 现 **123 MB**。此前「已下载 22 个」的说法**是错的** |
+| 15 认证与 RBAC | ⏳ **CNB 执行中** | issue **#36** / `cnb-e2k-1k4jf5tfo`，基线 `main@58bafb5`，workMode=true 已核验。派前复验修正 4 处过期表述 |
 
-本地 HEAD = CNB `main` = **`058c4c0`**（已推送同步）。
+本地 HEAD = CNB `main` = **`58bafb5`**（已推送同步）。
 远端 **22 个分支**已全部对账完毕（第二轮），实际有价值的独有贡献仅 5 处，均已落地。
 
 > **第二轮对账结论**：用 `git diff main...cnb/$b`（三点）逐支取证后，
