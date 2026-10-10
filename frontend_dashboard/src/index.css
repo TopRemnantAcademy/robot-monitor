@@ -30,3 +30,25 @@ body,
 *::-webkit-scrollbar-thumb:hover {
   background: #2b3648;
 }
+
+/* 键盘可达性：大屏也会被键盘驱动（值班台无鼠标），必须有可见焦点环。
+   颜色取自 tokens.ts 的 accent #3B82F6，禁止自创色相。 */
+:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 1px;
+}
+
+/* 卡片/告警行是按钮，默认字体会被浏览器改成系统 UI 字体，强制继承 */
+button {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+}
+
+/* 尊重系统「减少动态效果」偏好（spec/03 未强制动画，这里只做兜底） */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

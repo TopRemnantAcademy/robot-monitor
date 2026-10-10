@@ -67,7 +67,12 @@ const RobotCard = memo(function RobotCard({ robot, selected, onOpen }: RobotCard
   );
 });
 
-export default function FleetOverviewCards() {
+/**
+ * 100 卡网格本体。用 memo 包一层：父级 App 在绘制 Drawer（选中态变化）时，
+ * 该子树 props 完全未变，memo 命中即可整块跳过 —— 不必为 100 张卡逐个 diff。
+ * 网格自身只在 robots / selectedRobotId 引用变化时重渲染（即 100ms 刷库帧）。
+ */
+const RobotGrid = memo(function RobotGrid() {
   // 只订阅 robots 这一个字段；100ms 批量刷库时本组件最多 10 次/秒重渲染
   const robots = useRobotStore((s) => s.robots);
   const selectedRobotId = useRobotStore((s) => s.selectedRobotId);
@@ -89,4 +94,6 @@ export default function FleetOverviewCards() {
       </div>
     </div>
   );
-}
+});
+
+export default RobotGrid;
