@@ -154,7 +154,7 @@ mkdir -p external && cd external
 git clone --depth 1 https://github.com/emqx/mqtt-to-timescaledb.git
 git clone --depth 1 https://github.com/timescale/tsbs.git
 git clone --depth 1 https://github.com/emqx/emqtt-bench.git
-git clone --depth 1 https://github.com/empicano/aiomqtt.git
+git clone --depth 1 --branch v2.5.1 https://github.com/empicano/aiomqtt.git
 git clone --depth 1 https://github.com/pmndrs/zustand.git
 git clone --depth 1 https://github.com/redis/redis-py.git
 git clone --depth 1 https://github.com/fastapi/full-stack-fastapi-template.git
@@ -184,3 +184,59 @@ git clone --depth 1 https://github.com/eclipse-paho/paho.mqtt.python.git
 
 > 原则：宁可少下载，也不把低质量代码当作「参考」引入。
 > 参考源必须是**官方组织仓库**或经 digest/stars 实证的高质量仓库。
+
+---
+
+## 5. 第四批：全量执行下载 + 版本漂移实证（2026-10-10 复扫）
+
+按 §1–§4 清单**全量执行** `git clone --depth 1`，14/14 全部成功。
+体积与 stars 预期一致，无一个失败。实测清单（`git rev-parse --short HEAD`）：
+
+| 仓库 | 体积 | HEAD | 远程 |
+|---|---|---|---|
+| `emqx/mqtt-to-timescaledb` | 1.2 MB | `ee24974` | emqx/mqtt-to-timescaledb |
+| `timescale/tsbs` | 2.9 MB | `8323e59` | timescale/tsbs |
+| `emqx/emqtt-bench` | 388 KB | `cb86b18` | emqx/emqtt-bench |
+| `empicano/aiomqtt` | 872 KB | `c8f8248` (v2.5.1) | empicano/aiomqtt |
+| `pmndrs/zustand` | 3.6 MB | `d7a5583` | pmndrs/zustand |
+| `redis/redis-py` | 18 MB | `22d47b5` | redis/redis-py |
+| `fastapi/full-stack-fastapi-template` | 3.6 MB | `7257e60` | fastapi/full-stack-fastapi-template |
+| `prometheus/alertmanager`（sparse docs） | 892 KB | `e7a4afd` | prometheus/alertmanager |
+| `prometheus/client_python` | 14 MB | `9cd073c` | prometheus/client_python |
+| `MagicStack/asyncpg` | 2.0 MB | `13b0191` | MagicStack/asyncpg |
+| `hustcc/echarts-for-react` | 372 KB | `2346edc` | hustcc/echarts-for-react |
+| `Kludex/starlette` | 7.1 MB | `96d5023` | Kludex/starlette |
+| `sqlalchemy/alembic` | 4.1 MB | `1bc21b8` | sqlalchemy/alembic |
+| `eclipse-paho/paho.mqtt.python` | 1.4 MB | `b48baee` | eclipse-paho/paho.mqtt.python |
+
+### ⚠️ 实证发现：`aiomqtt` 的 `--depth 1` 已漂移到 v3.0.0-alpha.1
+
+| 项 | 事实 | 证据 |
+|---|---|---|
+| 裸 `--depth 1` 拉到的 HEAD | **`3.0.0-alpha.1`**（v3 重写线） | `pyproject.toml` `version = "3.0.0-alpha.1"` |
+| v3 的破坏性变更 | 弃用 paho-mqtt 改 `mqtt5`；`Client` 参数全 keyword-only；`MqttError` 被 `ConnectError` 等替代；`reconnect=True` 成为内建能力 | `CHANGELOG.md` `## [3.0.0-alpha.1]` 段 |
+| 本项目锁定版本 | **`2.5.1`**（`backend_ingestion/requirements.txt`） | `==` 锁死 |
+| `INTEGRATION-PLAN.md` 的 I-1/I-2 证据 | 引 `docs/reconnection.md`（v2.5.1 路径） | 裸 clone **找不到该文件** |
+
+**处置**：已将 `external/aiomqtt` 显式 checkout 到 `v2.5.1` 标签
+（`git fetch --depth 1 origin refs/tags/v2.5.1:refs/tags/v2.5.1 && git checkout v2.5.1`，
+HEAD 变为 `c8f8248`）。切回后 `docs/reconnection.md` 与
+`docs/alongside-fastapi-and-co.md` **均存在**，I-2 引用的
+「reusable (but not reentrant)」原文落在 `docs/reconnection.md:5` —— 与计划一致。
+
+> 教训：`--depth 1` 只钉住"当下 HEAD"，不钉住版本。参考源若被用于核对某个
+> **锁定版本**的 API，必须 `checkout <tag>`，否则下次复扫会静默拿到新主线的
+> 破坏性变更，导致 file:line 证据失效。
+
+### 其余仓库的关键文件抽验（全部命中）
+
+| 仓库 | 抽验文件 | 结果 |
+|---|---|---|
+| `mqtt-to-timescaledb` | `create-table.sql`、`docker-compose.yml`、`emqx/cluster.hocon` | ✅ 存在 |
+| `tsbs` | `README.md`、`cmd/`、`docs/` | ✅ 存在 |
+| `emqtt-bench` | `README.md` 含 `--prometheus` | ✅ `README.md:101` |
+| `alertmanager` | `docs/configuration.md` 含 `inhibit_rules` | ✅ `:165-167` |
+| `asyncpg` | `pyproject.toml` classifiers 含 3.13/3.14 | ✅ `:26-27` |
+| `starlette` | `starlette/websockets.py` | ✅ 存在 |
+| `paho.mqtt.python` | `src/paho/mqtt/client.py` | ✅ 存在 |
+| `echarts-for-react` / `zustand` / `redis-py` / `alembic` / `full-stack-fastapi-template` | `package.json` / `redis/asyncio/client.py` / `setup.cfg` / `README.md` | ✅ 存在 |

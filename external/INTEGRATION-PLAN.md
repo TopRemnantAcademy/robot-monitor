@@ -209,7 +209,7 @@ mkdir -p external && cd external
 git clone --depth 1 https://github.com/emqx/mqtt-to-timescaledb.git
 git clone --depth 1 https://github.com/timescale/tsbs.git
 git clone --depth 1 https://github.com/emqx/emqtt-bench.git
-git clone --depth 1 https://github.com/empicano/aiomqtt.git
+git clone --depth 1 --branch v2.5.1 https://github.com/empicano/aiomqtt.git
 git clone --depth 1 https://github.com/pmndrs/zustand.git
 git clone --depth 1 https://github.com/redis/redis-py.git
 git clone --depth 1 https://github.com/fastapi/full-stack-fastapi-template.git
@@ -233,6 +233,16 @@ cd alertmanager && git sparse-checkout set docs && cd ..
 | 官方 `Client` reusable 表述 | ✅ 实测（reconnection.md） |
 | asyncpg 0.30+ 支持 Python 3.13 | ✅ 实测（release notes + `pyproject.toml` classifiers） |
 | 各仓库 stars/size | ✅ 实测（GitHub API） |
+
+### ⭐ 2026-10-10 追加实测：`external/aiomqtt` 必须钉 v2.5.1 标签
+
+裸 `git clone --depth 1 https://github.com/empicano/aiomqtt.git` 当前拉到的是
+**`3.0.0-alpha.1`**（v3 重写线，弃用 paho-mqtt、`MqttError` 被替换、参数全 keyword-only），
+`docs/reconnection.md` 在该 HEAD 上**已不存在** —— 会导致本文 I-1/I-2 的 file:line 证据失效。
+
+已处置：`external/aiomqtt` 显式 `git checkout v2.5.1`（HEAD `c8f8248`），
+切回后 `docs/reconnection.md:5` 的「reusable (but not reentrant)」原文与本计划一致。
+复现命令已改为 `--branch v2.5.1`。详见 `external/SOURCES.md` §5。
 
 ### ⭐ 2026-10-10 追加实测：本机验证通道已打通
 
