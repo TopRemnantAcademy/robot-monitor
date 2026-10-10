@@ -9,8 +9,8 @@
 
 | 事实 | 证据（file:line） |
 |---|---|
-| `robot_alert.ack` 列已建，默认 FALSE | `infra/init.sql:62` |
-| 专门为未确认告警建了部分索引 | `infra/init.sql:92`（`idx_alert_ack ... WHERE ack = FALSE`） |
+| `robot_alert.ack` 列已建，默认 FALSE | `infra/init.sql:82` |
+| 专门为未确认告警建了部分索引 | `infra/init.sql:195`（`idx_alert_ack ... WHERE ack = FALSE`） |
 | **全仓无任何代码读写 `ack`** | `grep -rn "ack" backend_ingestion/app/ alert_engine/app/ frontend_dashboard/src/` → 无业务命中 |
 | severity 只有 2/3 级常量，**无升级** | `alert_engine/app/rules/*.py` |
 | 无静默机制 | 无对应代码 |
@@ -23,18 +23,17 @@
 ## 1. 任务
 
 ### T1 — 告警确认（ack）
-- 后端新增（**需 `admin` 角色，见订单 11 的 RBAC**）：
+- 后端新增（**需 `admin` 角色，见订单 15 的 RBAC**）：
   - `POST /alerts/{alert_id}/ack`：置 `ack=TRUE`，记 `ack_by`（从 JWT `sub` 取）、`ack_at`
   - `POST /alerts/{alert_id}/unack`：撤回
   - `GET /alerts?ack=false&limit=50&offset=0`：**分页**查询（解 H5）
-- `infra/init.sql` 需补列 `ack_by VARCHAR(64)`、`ack_at TIMESTAMPTZ`，
-  **同时**更新 `robot_alert` 对应的 ORM 模型（AGENTS.md §4 要求两处同步）
-- ⚠️ **已核对的硬事实**：`robot_alert` **没有主键、也没有 ID 列**
-  （`infra/init.sql:55-64`，列只有 `time/robot_id/rule_id/severity/message/detail/ack`；
-  对比 `robot_telemetry` 有 `PRIMARY KEY (time, robot_id)`，见 `init.sql:27`）。
-  因此**无法用 ID 寻址单条告警** —— 必须先加 ID 列（推荐 `BIGSERIAL`，
-  或 `(time, robot_id, rule_id)` 复合定位）并写清对已部署库的迁移方式。
-  这是本单的**第一个 blocker**，不得跳过。
+- ⚠️ **DB 结构前提已由订单 19 满足，本单禁止重复加列**：`robot_alert` 现已含
+  `alert_id BIGSERIAL` 主键（`PRIMARY KEY (time, alert_id)`，见 `infra/init.sql:76/86`），
+  `ack_by` / `ack_at` 两列也已建（init.sql:83-84），对应 ORM 模型
+  `backend_ingestion/app/db/models.py` 的 `RobotAlert` 已含这些字段。
+  本单只需**新增 ack/unack 端点与 GET 分页**，不要再 `ALTER TABLE` 加列。
+- ⚠️ **已核对（订单 19 已解决旧 blocker）**：早期 `robot_alert` 无主键、无法用 ID 寻址；
+  现 `alert_id` 已可作单条寻址键，旧文档「必须先加 ID 列」的结论已作废，不要重复该步骤。
 
 ### T2 — 升级（escalation）
 对齐 Alertmanager 的 `repeat_interval` 语义（源：`external/alertmanager`）：
@@ -60,7 +59,7 @@
 
 ## 2. 验收标准
 
-- [ ] `POST /alerts/{id}/ack` 后，DB 中 `ack=TRUE` 且 `ack_by`/`ack_at` 有值（**贴真实 SQL 查询结果**）
+- [ ] `POST /alerts/{alert_id}/ack` 后，DB 中 `ack=TRUE` 且 `ack_by`/`ack_at` 有值（**贴真实 SQL 查询结果**）
 - [ ] 重复 ack **幂等**（不报错、不重复写）
 - [ ] `GET /alerts?ack=false` 返回分页结果，`offset` 生效
 - [ ] `severity=3` 未确认 5 分钟 → `escalated` 变 TRUE 且再次发布
@@ -85,4 +84,4 @@
 - 与订单 10（已在进行）同改 `alert_engine/app/main.py:53` 的 `emit()`。
   **本单以此为准**：`emit()` 入口顺序 = silence → inhibition → dedup。
   合并时订单 10 的 `is False` 判定（不可用 falsy）必须保留。
-- 与订单 11 共享 RBAC：`admin` 角色名必须一致。
+- 与订单 15 共享 RBAC：`admin` 角色名必须一致。
