@@ -86,40 +86,87 @@ SELECT add_continuous_aggregate_policy('robot_status_10s',
     schedule_interval => INTERVAL '1 minute',
     if_not_exists => TRUE);
 
--- 6. 常用索引
+-- 6. 数据生命周期：压缩 + 保留（I-17）
+--
+-- 为什么必须有：chunk_time_interval = 7 天，不设保留策略磁盘只增不减。
+-- 容量估算（逐列行宽 + 行头 24B + 页开销 1.3x）：
+--   100 台 × 10Hz = 1000 row/s = 86,400,000 行/天 ≈ 1.34 KB/行 ≈ **116 GB/天**。
+--   30 天原始 ≈ 3.5 TB；压缩（数值列典型 10x）后 ≈ **350 GB**，单机 SSD 可容纳。
+--   90 天压缩后 ≈ 1.0 TB 起，需额外卷规划与备份窗口，复盘收益不明显。
+-- 决策：**原始遥测保留 30 天，告警保留 180 天**（依据见 docs/DECISIONS-issue19.md）。
+--
+-- ⚠️ 幂等实现（替代旧的 `if_not_exists => TRUE` 写法）：
+--    `add_retention_policy` / `add_compression_policy` 的 `if_not_exists` 参数
+--    **未在本仓验证过**（本机无 TimescaleDB 环境；external/timescaledb 的
+--    retention/sql.py 与 compression/sql.py 均未暴露该参数）。
+--    旧写法一旦参数名不成立，init.sql 会**整段失败**；故改用
+--    `timescaledb_information.jobs` 存在性判断做幂等，重跑安全。
+--    视图名与列名实证：external/timescaledb/retention/sql.py:47-58。
+-- ⚠️ 顺序不能反：必须先 ALTER TABLE 开启压缩，再 add_compression_policy，
+--    否则 policy job 会因 hypertable 未启用压缩而失败。
+--    语法实证：external/timescaledb/compression/sql.py:60-77。
+--
+-- 保留 30 天 > 连续聚合的 start_offset(1h)，不会出现「原始表已删、聚合还在拉」的空洞。
+-- 本段**未在本机验证**（本环境无 TimescaleDB，PG15 无该扩展）。
+
+-- 6.1 遥测压缩：1 天前的 chunk 转列式（近 1 天保持热数据，实时查询不走解压路径）
+ALTER TABLE robot_telemetry SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'robot_id',
+    timescaledb.compress_orderby   = 'time DESC'
+);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM timescaledb_information.jobs
+        WHERE proc_name = 'policy_compression'
+          AND hypertable_name = 'robot_telemetry'
+    ) THEN
+        PERFORM add_compression_policy('robot_telemetry', INTERVAL '1 day');
+    END IF;
+END $$;
+
+-- 6.2 遥测保留：30 天后整块丢弃（retention 以 chunk 为粒度，即 7 天一个块）
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM timescaledb_information.jobs
+        WHERE proc_name = 'policy_retention'
+          AND hypertable_name = 'robot_telemetry'
+    ) THEN
+        PERFORM add_retention_policy('robot_telemetry', INTERVAL '30 days');
+    END IF;
+END $$;
+
+-- 6.3 告警表：同属超表，低频但同样需要护栏。
+--     保留 180 天（合规/复盘需要，且体量极小：即便每天 1 万条也只有百万级）。
+ALTER TABLE robot_alert SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'robot_id',
+    timescaledb.compress_orderby   = 'time DESC'
+);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM timescaledb_information.jobs
+        WHERE proc_name = 'policy_compression'
+          AND hypertable_name = 'robot_alert'
+    ) THEN
+        PERFORM add_compression_policy('robot_alert', INTERVAL '7 days');
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM timescaledb_information.jobs
+        WHERE proc_name = 'policy_retention'
+          AND hypertable_name = 'robot_alert'
+    ) THEN
+        PERFORM add_retention_policy('robot_alert', INTERVAL '180 days');
+    END IF;
+END $$;
+
+-- 7. 常用索引
 CREATE INDEX IF NOT EXISTS idx_telemetry_robot_time ON robot_telemetry (robot_id, time DESC);
 CREATE INDEX IF NOT EXISTS idx_alert_robot_time ON robot_alert (robot_id, time DESC);
 CREATE INDEX IF NOT EXISTS idx_alert_ack ON robot_alert (ack) WHERE ack = FALSE;
-
--- 7. 数据保留（TimescaleDB retention policy）
--- 为什么必须有：chunk_time_interval 是 7 天，若不设保留策略，磁盘只增不减。
--- 100 台 × 10Hz ≈ 8.64M 行/天，按本机实测（PG15，含索引约 12KB/千行量级）估算，
--- 30 天原始表就是数百 GB 量级 —— 工厂看板不需要无限期保留原始高频点。
---
--- 保留 30 天原始数据 + 连续聚合按 chunk 自动级联删除。
--- 注意：add_retention_policy 会级联删除同一时间范围内的连续聚合物化数据，
--- 因此 30 天 > 聚合的 start_offset(1h)，不会出现「原始表已删、聚合还在拉」的空洞。
---
--- 本语句**未在本机验证**（本环境无 Docker/TimescaleDB，PG15 无 timescaledb 扩展）。
--- 依据：TimescaleDB 2.x 官方 API `add_retention_policy(hypertable, drop_after)`。
-SELECT add_retention_policy('robot_telemetry',
-    drop_after => INTERVAL '30 days',
-    if_not_exists => TRUE);
-
--- 告警保留更久（合规/复盘需要），90 天
-SELECT add_retention_policy('robot_alert',
-    drop_after => INTERVAL '90 days',
-    if_not_exists => TRUE);
-
--- 8. 压缩策略（可选）：把 7 天前的 chunk 按 robot_id 分段列式压缩，
---    压缩率通常 10x 以上，同时保留查询能力（透明解压）。
---    未验证：需 TimescaleDB 2.13 环境实测压缩率后再决定是否启用，故此处先注释掉，
---    避免「写了却没验证过」的策略悄悄生效。启用前请跑 EXPLAIN 确认查询计划未劣化。
---
--- ALTER TABLE robot_telemetry SET (
---     timescaledb.compress,
---     timescaledb.compress_segmentby = 'robot_id',
---     timescaledb.compress_orderby = 'time DESC'
--- );
--- SELECT add_compression_policy('robot_telemetry', INTERVAL '7 days', if_not_exists => TRUE);
 

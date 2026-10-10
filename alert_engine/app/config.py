@@ -46,6 +46,15 @@ class Settings(BaseSettings):
     tick_interval_s: float = 1.0        # 离线 ticker 间隔
     window_maxlen: int = 100            # 每台机器人滑动窗口容量（10Hz → 约 10s）
 
+    # ---- 告警通知（I-14）----
+    # 工厂侧机器人 webhook：留空则整条通知链路静默跳过（默认关闭，避免误配刷屏）。
+    # URL 含 token，**只从环境变量注入，禁止写进仓库**。
+    alert_webhook_url: str = ""
+    # dingtalk | wecom | generic（通用 JSON，交工厂自建转发加工）
+    alert_webhook_kind: str = "generic"
+    # 推送门槛：默认 3 —— 只推 critical，防「低电量风暴」刷屏
+    alert_webhook_min_severity: int = 3
+
     @property
     def robot_ids(self) -> list[str]:
         return [f"humanoid-{i:03d}" for i in range(1, 101)]

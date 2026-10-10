@@ -26,6 +26,7 @@ from app.rules.joint_stuck import JointStuckRule
 from app.rules.motor_temp import MotorTempRule
 from app.rules.offline import OfflineRule
 from app.rules.base import Alert
+from app.notifiers import build_notifier
 from app.store import save, update_online
 
 logging.basicConfig(level=logging.INFO,
@@ -46,6 +47,11 @@ last_seen: dict[str, float] = {}
 online_state: dict[str, bool] = {}
 
 _tasks: set[asyncio.Task] = set()
+
+# 通知器：未配置 URL 时为 None（整条链路静默跳过）。
+# 在模块级装配属刻意的 fail-fast：kind 拼错时进程起不来，
+# 好过配置写错却在运行时静默不通知。
+_notifier = build_notifier(settings)
 
 
 def spawn(coro) -> None:
@@ -87,6 +93,11 @@ async def emit(alert: Alert) -> None:
         await save(alert)
         log.info("alert: %s %s sev=%d %s", alert.robot_id, alert.rule_id,
                  alert.severity, alert.message)
+        # 推到工厂侧群机器人（钉钉/企微/通用）。
+        # 放在 save 之后：先落库保证审计，再通知；通知失败只在通知器内部记日志，
+        # 不影响主链路。被抑制的告警在上面已 return，不会走到这里。
+        if _notifier is not None:
+            await _notifier.send(alert)
 
 
 # ---------------------------------------------------------------- 消费线
