@@ -100,17 +100,3 @@ class HealthResponse(BaseModel):
     rows_submitted: int
     rows_written: int
     rows_skipped: int
-
-
-# --------------------------------------------------------------- /metrics
-
-class MetricsResponse(BaseModel):
-    """`GET /metrics` 的**类型占位**。
-
-    Prometheus exposition format 是 `text/plain; version=0.0.4`，不是 JSON，
-    故此处仅用于在 OpenAPI 里显式声明一个 `text/plain` 响应体，
-    避免该端点被推断成 JSON。真正的内容契约由 Prometheus 文本格式本身约束
-    （指标名对齐 `infra/observability/rules/robot-alerts.yml`）。
-    """
-
-    pass
