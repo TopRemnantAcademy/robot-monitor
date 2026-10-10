@@ -1,7 +1,8 @@
 # STATUS — RobotMonitor 主计划与状态看板
 
-> 最后更新：**2026-10-11（批量回收 12 个分支后重写实况表）**。
-> 派单方法见 `docs/CNB-DISPATCH-SOP.md`（**§6.5 批量回收纪律**为本轮新增）。
+> 最后更新：**2026-10-11（第二轮全量对账 22 个分支 + 派出订单 19）**。
+> 派单方法见 `docs/CNB-DISPATCH-SOP.md`（**§6.5 批量回收纪律**为本轮新增，
+> 步骤 6~8 为第二轮补充：三点 diff、超集校验、假覆盖扫描）。
 > 上游开源源套用计划见 `external/INTEGRATION-PLAN.md`。
 > 用真实源码复核三条审计结论的报告见 `external/ORDER12-VERIFICATION.md`。
 
@@ -32,14 +33,19 @@
 | 10 告警抑制 inhibition | ✅ **已回收验证** | `alert_engine/tests/` **11/11 passed** |
 | 前端 bundle 瘦身 | ✅ **已回收验证** | 1209.34 → **671.40 kB**（gzip 401.05 → **224.90 kB**，−44%） |
 | 前端告警行增量渲染 | ✅ **已合入** | `AlertLogTable.tsx` / `FleetOverviewCards.tsx` memo 化；`tsc` 0 错误 |
-| 可观测性（Prometheus/Grafana） | ⚠️ **配置已就位，接线未完成** | `infra/observability/**`、`infra/ops/grafana/**`（9 个看板）已合入；但两服务 `main.py` 的 `grep metrics` **均为空** → 订单 13 处理 |
-| 13 可观测性接线 + 6 分支收敛 | ⏳ **CNB 执行中** | issue **#33** / `cnb-f0b-1k4j8osuu`，基线 `main@772efca`，workMode=true 已核验 |
+| 可观测性（Prometheus/Grafana） | ✅ **已接线并实跑验证** | 后端 `:8011/metrics` → 200 `text/plain; version=0.0.4`；告警 `:8012/metrics` → 200，实测 `robot_alert_emitted_total{rule_id="motor_temp"} 3.0`、`robot_alert_suppressed_total{rule_id="battery_low"} 2.0`、`robot_alert_robots_online 97.0` |
+| 13 可观测性接线 + 6 分支收敛 | ✅ **已回收验证** | 产出 `feat/order-13` @ `911b667`；其 alert `main.py`/`config.py` 因基线过旧判为回退已弃；主代理补上 NPC 漏掉的 `alerts_suppressed` 计数 |
+| MQTT 计数器接线 | ✅ **已回收验证** | `metrics.py:41,46` 定义了 `mqtt_received`/`mqtt_dropped` 却从未被引用（恒为 0）；喂坏 payload 实测 `robot_backend_mqtt_dropped_total` 由 0 → 1.0 |
+| 19 `robot_alert` 身份 + ack 字段 | ⏳ **CNB 执行中** | issue **#34** / `cnb-38h-1k4jdbsm4`，基线 `main@5b7b496`，workMode=true 已核验 |
 
-本地 HEAD = CNB `main` = **`dbf7f0f`**（已推送同步）。
+本地 HEAD = CNB `main` = **`5b7b496`**（已推送同步）。
+远端 **22 个分支**已全部对账完毕（第二轮），实际有价值的独有贡献仅 5 处，均已落地。
 
-> **注意**：远端一度累积 19 个分支。本轮回收 **12 个**，其中
-> **拒取 3 处**（会回退既有成果，见 `docs/CNB-DISPATCH-SOP.md` §6.5 台账），
-> 剩余 3 个纯文档分支的并集合并移交订单 13。
+> **第二轮对账结论**：用 `git diff main...cnb/$b`（三点）逐支取证后，
+> 22 个分支里真正的新东西只有 —— ①MQTT 计数器接线 ②`.gitignore` 4 条
+> ③`external/` 第五批重扫 ④`orders/15-18` 换号留档 ⑤`fix/issue19-p0-gaps` 的
+> `alert_id` schema 方案（**尚未采用，已整理为订单 19 派给 CNB**）。
+> 其余分支均为旧基线的重复或回退版本，见 SOP §6.5 台账。
 
 ---
 
@@ -96,7 +102,7 @@
 | # | 阻塞 | 证据 | 影响 |
 |---|---|---|---|
 | B1 | AI 积分耗尽 | `402 [EXCEEDING_LIMIT] AI 积分已用尽` | NPC 无法继续；需根组织管理员提配额 |
-| B2 | NPC 无 `repo-code:rw` | `403 Your token does not have the repo-code:rw scope` | NPC 推不进 main → **主代理必须手工合并分支** |
+| B2 | NPC 不直接推 `main` | 实测 `workMode: true` 时 NPC 能写仓，但产出落在**分支**上 | 这是**设计而非故障**：主代理按 SOP §6.5 对账后按路径回收，避免旧基线分支回退 main |
 
 ### 已解除（本轮实证纠正了之前的误判）
 
@@ -122,6 +128,10 @@
 | EMQX 镜像同源 | ✅ 实证：`library/emqx` 由 `emqx/emqx-docker` 构建（official-images `GitRepo` 字段），与 `emqx/emqx` 同源；此前「`emqx:5.6` 非 EMQX」的结论**已撤稿**（对比粒度错误） |
 | Schema 契约（init.sql ↔ ORM） | ✅ `tests/test_schema_contract.py` **4/4 通过**；并做过**反向验证**（注入历史缺陷后测试确实 FAIL） |
 | `test_integration.sh` health 解析器 | ✅ 8 个用例实测通过（含旧版数组式输出、垃圾输入、字段缺失） |
+| 全仓 pytest（`pytest.ini` 生效后） | ✅ **25 passed** —— `tests/test_schema_contract.py` 4 + `alert_engine` 11 + 10。**此前 21 是 alert_engine 局部口径，根 `tests/` 的 4 条从未被跑过** |
+| 两服务 `/metrics` 端点 | ✅ 后端 `:8011` 与告警 `:8012` 均返回 200，`content_type=text/plain; version=0.0.4` |
+| `.gitignore` 覆盖 `.venv-ci` | ✅ `git check-ignore .venv-ci/pyvenv.cfg` → 命中 `.gitignore:14:.venv*/` |
+| 假覆盖测试文件 | ✅ 全仓扫描 **0 个**（`test_*.py` 均含真实 `test_*` 函数） |
 
 本机验证环境（已打通）：Python **3.13.14** 隔离 venv，
 `aiomqtt 2.5.1 / asyncpg 0.32.0 / fastapi 0.143.0 / redis 8.1.0 / pydantic 2.14.0`。
@@ -173,6 +183,16 @@
 > digest 只能回答「字节是否相同」，不能回答「是不是同一个项目」。
 > 跨发布通道比 digest 之前，必须先确认构建来源。
 
+### 第三轮：22 分支全量对账（2026-10-11）
+
+| # | 问题 | 位置 | 性质 | 处置 |
+|---|---|---|---|---|
+| 12 | `mqtt_received` / `mqtt_dropped` **定义了却从未递增** | `backend_ingestion/app/metrics.py:41,46` ↔ `mqtt_subscriber.py` | 「模块存在但未接线」，两个 Counter **恒为 0** | 补 3 行接线；实测喂坏 payload 后 `dropped_total` 0 → 1.0 |
+| 13 | `test_db_integration.py` **收集 0 个用例却静默通过** | `backend_ingestion/tests/` | 假覆盖（断言在 `t1..t6` 里，由 `main()` 驱动） | 改名 `verify_db_integration.py` + 修正 README；全仓扫描现为 0 个假覆盖文件 |
+| 14 | 仓库**无 pytest 配置** | 全仓 | 根跑 `pytest` 会收集 `external/`（58 MB 第三方源码），实测 **61 个 collection error 并中断** | 新增 `pytest.ini`（`testpaths` + `norecursedirs`）→ 25 passed |
+| 15 | `.gitignore` 挡不住 `.venv-ci` | `.gitignore:10` | 只写 `.venv/`，`fix/issue19-p0-gaps` 因此**整包误提交虚拟环境** | 补 `.venv*/`；`check-ignore` 实测命中 |
+| 16 | `robot_alert` 主键靠 `__mapper_args__` 权宜之计 | `backend_ingestion/app/db/models.py:78-86` | ORM 身份 `(time, robot_id)` 与「同 tick 可命中多条规则」**语义冲突**；且 ORM DDL 与 `init.sql` 永远不一致 | 整理为**订单 19** 派给 CNB（加 `alert_id BIGSERIAL` + 真实主键） |
+
 ---
 
 ## 七、文档索引
@@ -182,8 +202,10 @@
 | **本文件** | 主计划与状态 |
 | `docs/CNB-DISPATCH-SOP.md` | **如何给 CNB 派单**（含判别真完成的流程） |
 | `external/INTEGRATION-PLAN.md` | 上游开源源 → 本项目的套用点（I-1~I-12） |
-| `external/SOURCES.md` | **22 个**下载源的 provenance 与取舍理由（第四批 8 个见 §5） |
-| `orders/NN-dispatch.md` | 各单派工正文 |
+| `external/SOURCES.md` | **22 个**下载源的 provenance 与取舍理由（第四批见 §5、第五批从零重扫见 **§6**） |
+| `external/INTEGRATION-PLAN.md` | 套用点 I-1~I-12；第五批 I-11~I-20 见 **§8** |
+| `orders/NN-dispatch.md` | 各单派工正文（最新：**`orders/19-dispatch.md`** `robot_alert` 主键收敛） |
+| `pytest.ini` | 把 `external/` 排除出测试收集；`testpaths` 明确为本仓三处测试目录 |
 | `docs/requirements/R-*.md` | 验收规格（R-01 前端 / R-02 WS 节流 / R-03 API 契约 / R-07 联调压测 / R-08 验收矩阵） |
 | `tests/` | 可重复运行的契约测试（`test_schema_contract.py`：init.sql ↔ ORM 逐列比对，纯标准库） |
 | `AGENTS.md` | NPC 每次运行自动注入的工程纪律 |

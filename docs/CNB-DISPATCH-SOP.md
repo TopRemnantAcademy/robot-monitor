@@ -56,6 +56,11 @@ cnb issues post-issue-comment \
 `--work-mode` **不可省略**。实测：没有它时 NPC 得到 `CNB_NPC_ENABLE_WORKMODE=false`，
 无法写仓库，最终只产出分析不落地。
 
+> ⚠️ **实测陷阱（2026-10-11 订单 19）**：`--body` 里**必须真的写上 `@codebuddy`**。
+> 只带 `--work-mode` 但正文没写触发词时，API 照常返回 `201`、评论也正常出现在 issue 里，
+> **但一个构建都不会被拉起** —— 从返回码完全看不出失败。
+> 派单后必须立即执行步骤 5（查 `get-build-logs`），而不是等到想起来才查。
+
 ### 步骤 5 — 立刻核验 `workMode`
 ```bash
 cnb build get-build-status --repo flow.237/RobotMonitor --sn <sn>
@@ -175,6 +180,7 @@ git -c http.extraHeader="Authorization: Bearer ${TOKEN}" push cnb main
 | `402 [EXCEEDING_LIMIT] AI 积分已用尽` | 账号级别额度耗尽 | 需用户充值，非代码问题 |
 | `workMode: false` | 派单漏了 `--work-mode` | 重新派单并带上参数 |
 | 一次派单出现 **2 个构建** | create-issue 正文含触发词 | `cnb build stop-build --sn <重复sn>` |
+| 评论返回 `201` 但**没有任何构建** | 触发评论里**漏写了触发词** | 补发一条含 `@codebuddy` 的评论（2026-10-11 订单 19 实测踩过） |
 | `status: success` 但 main 没动 | NPC 只推了分支 | 走 §1 步骤 7 |
 | crontab 阶段秒退 `process.exit(1)` | crontab 不注入触发内容，`system_prompt` 或 `user_prompt` 为空 | 两个 prompt 都要**内联非空** |
 | `[CONFIG_YAML_EMPTY]` | CI 配置放错位置 | 必须在**仓库根** `.cnb.yml`，不是 `.cnb/.yml` |
@@ -204,10 +210,11 @@ git -c http.extraHeader="Authorization: Bearer ${TOKEN}" push cnb main
 | 09 前端 bundle 瘦身 | #10 | `cnb-ua1-1k4hj5d3h` | ✅ 已回收验证 | 1209.34→671.23 kB（gzip 401.05→224.79） |
 | 10 告警抑制（I-5） | #13 | — | ✅ 已回收验证 | `alert_engine` 11/11 tests passed |
 | 12 CNB 自行下载上游源 | #15 | — | ✅ 已回收 | 推翻了我的 I-1 结论，见 `external/ORDER12-VERIFICATION.md` |
-| 13 可观测性接线 + 6 分支收敛 | #33 | `cnb-f0b-1k4j8osuu` | ⏳ pending | 基线 `main@772efca`；workMode=true 已核验 |
+| 13 可观测性接线 + 6 分支收敛 | #33 | `cnb-f0b-1k4j8osuu` | ✅ 已回收验证 | 产出 `feat/order-13` @ `911b667`；按路径回收，其 alert `main.py`/`config.py` 判为回退已弃；补了 NPC 漏掉的 `alerts_suppressed` |
+| 19 `robot_alert` 身份 + ack 字段 | #34 | `cnb-38h-1k4jdbsm4` | ⏳ pending | 基线 `main@5b7b496`；workMode=true 已核验 |
 
 > ⚠️ **Issue 号与订单号不对齐，且跳跃极大**：#6=06、**#8=07、#9=08、#10=09、#13=10、
-> #15=12、#33=13**。中间号被其他 issue 占用。**派单后务必记录实际号**，
+> #15=12、#33=13、#34=19**。中间号被其他 issue 占用。**派单后务必记录实际号**，
 > 后续回收分支与追加情报都靠它。
 
 ### 2026-10-11 批量回收台账（远端曾累积到 19 个分支）
@@ -296,6 +303,53 @@ done
 主代理负责**判定**（哪些该留、哪些会回退、为什么），
 把判定结果写成派单里的**显式保留规则表**，交给 CNB 去**执行**合并与验证。
 不要自己手搓十几个冲突文件 —— 易错且不可复现。
+
+### 步骤 6：找「分支独有贡献」要用**三点** diff，不是两点
+
+```bash
+git diff main...cnb/$b        # ← 正确：merge-base → 分支，即分支自己的改动
+git diff main      cnb/$b     # ← 错误：会把 main 后加的内容也算成"分支删掉的"
+```
+
+两点 diff 显示的 `D` 大多是「main 有、分支没有」，不是分支真删了东西。
+用三点 diff 才能拿到该分支**真正新增的东西**（2026-10-11 第二轮实测：
+22 个分支里真正有价值的独有贡献只有 5 处）。
+
+### 步骤 7：即使是"纯新增"，也要先校验它相对 main 是不是超集
+
+三点 diff 显示 `+N -0` **不等于** 可以整文件 checkout。分支往往是旧版：
+
+```bash
+git diff --numstat main cnb/$b -- <file>     # 看删除数；不是 0 就不能整取
+```
+
+实测：`cb/issue19-github-rescan` 的 `external/SOURCES.md` 三点看是 `+138 -0`，
+但两点看是 `+143 -101` —— 整取会删掉 main 后加的「§1.1 撤稿」纠正段。
+正解是**只抽取该分支独有的段落**追加。
+
+⚠️ **顺带检查章节编号冲突**：两边都有 `## 5.` 但内容不同
+（main 的 §5=第四批、分支的 §5=第五批），直接追加会产生两个 §5。
+抽取时按目标文件的实际编号**重编号**再追加。
+
+### 步骤 8：回收后固定跑两种全仓扫描
+
+```bash
+# ① 假覆盖扫描：test_*.py 里没有 test_* 函数 = pytest 收集 0 却静默"通过"
+#    （本仓已踩两次：alert_engine/tests/test_notifier.py、
+#     backend_ingestion/tests/test_db_integration.py）
+python - <<'PY'
+import pathlib, re
+for p in pathlib.Path(".").rglob("test_*.py"):
+    if "external" in p.parts: continue
+    txt = p.read_text(encoding="utf-8", errors="ignore")
+    if not re.search(r'^\s*(async\s+)?def\s+test_', txt, re.M):
+        print("FAKE-COVERAGE:", p)
+PY
+
+# ② 确认仓库有 pytest 配置，否则根跑 pytest 会去收集 external/ 的第三方源码
+#    （本仓此前实测 61 个 collection error 并中断，本仓自身结果完全看不见）
+python -m pytest -q        # 有 pytest.ini 后：25 passed
+```
 
 ---
 
