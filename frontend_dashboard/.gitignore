@@ -9,3 +9,7 @@ dist/
 .env
 .env.local
 .env.*.local
+
+# vitest 缓存与覆盖率产物（订单 24）
+coverage/
+.vitest/
