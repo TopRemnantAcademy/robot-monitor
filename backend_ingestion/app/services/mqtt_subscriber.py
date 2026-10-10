@@ -29,10 +29,14 @@ received = 0
 
 async def run(writer) -> None:
     delay = 1.0
+    # Client 在循环外构造、循环内复用 —— 官方文档要求：
+    # "The `Client` context is designed to be reusable (but not reentrant)"
+    # （external/aiomqtt/docs/reconnection.md @ v2.5.1）。
+    client = aiomqtt.Client(hostname=settings.mqtt_broker,
+                            port=settings.mqtt_port)
     while True:
         try:
-            async with aiomqtt.Client(hostname=settings.mqtt_broker,
-                                      port=settings.mqtt_port) as client:
+            async with client:
                 await client.subscribe(TOPIC)
                 delay = 1.0
                 log.info("mqtt connected: %s:%d, subscribed %s",
@@ -40,6 +44,11 @@ async def run(writer) -> None:
                 async for message in client.messages:
                     await _handle(message.payload, writer)
         except aiomqtt.MqttError as exc:
+            # 指数退避 1→30s（非官方示例的固定 5s）：100 台 × 10Hz = 1000 msg/s
+            # 场景下，broker 抖动时固定高频重连会加剧拥塞。
+            # 必须 aiomqtt>=2.5.0：2.0.1 的 __aexit__ 在重连场景下存在不抛异常的分支，
+            # 会绕过本 except 而直接空转重连（无退避）。
+            # CHANGELOG 2.5.0: "Let exceptions bubble up in Client.__aexit__ instead of suppressing them"
             log.warning("mqtt error (%s), reconnect in %.1fs", exc, delay)
             await asyncio.sleep(delay)
             delay = min(delay * 2, 30.0)

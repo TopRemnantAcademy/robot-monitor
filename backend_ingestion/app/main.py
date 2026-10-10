@@ -42,11 +42,17 @@ async def lifespan(app: FastAPI):
     app.state.mqtt_task = mqtt_task
     log.info("backend started: mqtt=%s:%d", settings.mqtt_broker, settings.mqtt_port)
     yield
-    # shutdown
-    for t in (mqtt_task, writer_task):
-        t.cancel()
+    # shutdown —— 顺序不可调换，官方模式见
+    # external/aiomqtt/docs/alongside-fastapi-and-co.md @ v2.5.1
+    #   ① 先停 MQTT，掐断入口，不再产生新遥测
+    mqtt_task.cancel()
+    await asyncio.gather(mqtt_task, return_exceptions=True)
+    #   ② 冲刷 writer 存量：graceful_shutdown() 投哨兵唤醒 run()，
+    #      再 await writer_task 等它把手上这批刷完才返回。
+    #      若在此前就 cancel writer_task，run() 会在 _flush 中途被中断，
+    #      最后一批遥测（订单 06 验收关注的 30000 行附近）会丢。
     await writer.graceful_shutdown()
-    await asyncio.gather(mqtt_task, writer_task, return_exceptions=True)
+    await asyncio.gather(writer_task, return_exceptions=True)
     await close_pool()
     await close_redis()
     log.info("backend stopped")

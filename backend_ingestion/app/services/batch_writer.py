@@ -20,6 +20,9 @@ from app.schemas.telemetry import Telemetry
 
 log = logging.getLogger("batch_writer")
 
+# 停止哨兵：graceful_shutdown() 用它唤醒阻塞在 queue.get() 的 run()
+_STOP = object()
+
 INSERT_SQL = """
 INSERT INTO robot_telemetry (
     time, robot_id, status_code, error_code, battery_pct, battery_temp, max_joint_temp,
@@ -38,7 +41,9 @@ class BatchWriter:
         self._lock = asyncio.Lock()
         self.written = 0
         self.flushes = 0
-        self._running = False
+        self._draining = False
+        # run() 排空并退出后置位；graceful_shutdown() 靠它确认落库完成
+        self._drained = asyncio.Event()
 
     # ---- 生产者 ----
     async def put(self, t: Telemetry) -> None:
@@ -50,22 +55,47 @@ class BatchWriter:
 
     # ---- 消费者 ----
     async def run(self) -> None:
-        self._running = True
         loop = asyncio.get_running_loop()
         log.info("batch_writer started (count=%d, seconds=%.2f)",
                  settings.batch_trigger_count, settings.batch_trigger_seconds)
-        while self._running:
-            buf = [await self.queue.get()]
+        while True:
+            first = await self.queue.get()
+            if first is _STOP:
+                # 收到停止哨兵：进入排空模式，把 queue 剩余全部落库后再退出。
+                # 不能立刻 break —— 哨兵后面可能还压着多批数据。
+                self._draining = True
+                if self.queue.empty():
+                    break
+                first = await self.queue.get()
+
+            buf = [first]
             deadline = loop.time() + settings.batch_trigger_seconds
             while len(buf) < settings.batch_trigger_count:
                 remaining = deadline - loop.time()
                 if remaining <= 0:
                     break
                 try:
-                    buf.append(await asyncio.wait_for(self.queue.get(), remaining))
+                    item = await asyncio.wait_for(self.queue.get(), remaining)
                 except asyncio.TimeoutError:
                     break
+                if item is _STOP:
+                    self._draining = True
+                    break
+                buf.append(item)
+
+            # 排空模式下不必再等满 1s 凑批：queue 一空就收工，缩短关闭时延
+            if self._draining:
+                while len(buf) < settings.batch_trigger_count and not self.queue.empty():
+                    item = self.queue.get_nowait()
+                    if item is _STOP:
+                        continue
+                    buf.append(item)
+
             await self._flush(buf)
+
+            if self._draining and self.queue.empty():
+                break
+        self._drained.set()
 
     async def _flush(self, buf: list[Telemetry]) -> None:
         if not buf:
@@ -107,12 +137,16 @@ class BatchWriter:
         )
 
     async def graceful_shutdown(self) -> None:
-        """关闭前把队列残留全部强制刷盘。"""
-        self._running = False
-        rest: list[Telemetry] = []
-        while not self.queue.empty():
-            rest.append(self.queue.get_nowait())
-        if rest:
-            log.info("graceful_shutdown: flushing %d residual rows", len(rest))
-            await self._flush(rest)
+        """把队列存量交回 run() 落库后返回（不 cancel writer_task）。
+
+        做法：投一个停止哨兵唤醒可能阻塞在 queue.get() 的 run()，由 run() 负责
+        把 queue 排空落库；本方法等它落库完成后返回。
+        不能只置标志位：run() 若正阻塞在空的 queue 上，标志位唤不醒它，
+        关闭流程会一直等下去。
+
+        调用前提：writer_task 尚未被 cancel（由 lifespan 保证），
+        否则 run() 会在 _flush 中途被 CancelledError 打断而丢在飞数据。
+        """
+        await self.queue.put(_STOP)          # 唤醒可能阻塞在 queue.get() 的 run()
+        await self._drained.wait()           # 等 run() 把 queue 排空并落库
         log.info("batch_writer stopped: written=%d flushes=%d", self.written, self.flushes)

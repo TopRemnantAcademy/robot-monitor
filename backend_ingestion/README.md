@@ -36,7 +36,9 @@ docker build -t robot-monitor-backend ..
 - **严禁逐条 INSERT**：`batch_writer` 用 `asyncio.Queue` 双重触发
   （积压 ≥500 条 **或** 距上次刷盘 >1.0s），`asyncpg.executemany` 批量写入。
 - `asyncio.Lock` 保护刷盘临界区；`graceful_shutdown()` 关闭前强制刷完残留。
-- MQTT 断线指数退避重连（上限 30s）；校验失败的消息**丢弃并计数**，不阻塞队列。
+- MQTT 断线指数退避重连（上限 30s），**不改为固定间隔**；`aiomqtt.Client` 实例在重连循环外构造、循环内复用（官方 `reconnection.md`：Client 可复用但不可重入）。
+- 依赖 `aiomqtt>=2.5.0`：2.0.1 的 `Client.__aexit__` 在重连场景存在不抛 `MqttError` 的分支，会绕过退避逻辑空转重连（CHANGELOG 2.5.0：`Let exceptions bubble up in Client.__aexit__`）。
+- 校验失败的消息**丢弃并计数**，不阻塞队列。
 
 ## 关于 /history 的实现说明
 
