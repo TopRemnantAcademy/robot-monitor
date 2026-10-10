@@ -90,3 +90,36 @@ SELECT add_continuous_aggregate_policy('robot_status_10s',
 CREATE INDEX IF NOT EXISTS idx_telemetry_robot_time ON robot_telemetry (robot_id, time DESC);
 CREATE INDEX IF NOT EXISTS idx_alert_robot_time ON robot_alert (robot_id, time DESC);
 CREATE INDEX IF NOT EXISTS idx_alert_ack ON robot_alert (ack) WHERE ack = FALSE;
+
+-- 7. 数据保留（TimescaleDB retention policy）
+-- 为什么必须有：chunk_time_interval 是 7 天，若不设保留策略，磁盘只增不减。
+-- 100 台 × 10Hz ≈ 8.64M 行/天，按本机实测（PG15，含索引约 12KB/千行量级）估算，
+-- 30 天原始表就是数百 GB 量级 —— 工厂看板不需要无限期保留原始高频点。
+--
+-- 保留 30 天原始数据 + 连续聚合按 chunk 自动级联删除。
+-- 注意：add_retention_policy 会级联删除同一时间范围内的连续聚合物化数据，
+-- 因此 30 天 > 聚合的 start_offset(1h)，不会出现「原始表已删、聚合还在拉」的空洞。
+--
+-- 本语句**未在本机验证**（本环境无 Docker/TimescaleDB，PG15 无 timescaledb 扩展）。
+-- 依据：TimescaleDB 2.x 官方 API `add_retention_policy(hypertable, drop_after)`。
+SELECT add_retention_policy('robot_telemetry',
+    drop_after => INTERVAL '30 days',
+    if_not_exists => TRUE);
+
+-- 告警保留更久（合规/复盘需要），90 天
+SELECT add_retention_policy('robot_alert',
+    drop_after => INTERVAL '90 days',
+    if_not_exists => TRUE);
+
+-- 8. 压缩策略（可选）：把 7 天前的 chunk 按 robot_id 分段列式压缩，
+--    压缩率通常 10x 以上，同时保留查询能力（透明解压）。
+--    未验证：需 TimescaleDB 2.13 环境实测压缩率后再决定是否启用，故此处先注释掉，
+--    避免「写了却没验证过」的策略悄悄生效。启用前请跑 EXPLAIN 确认查询计划未劣化。
+--
+-- ALTER TABLE robot_telemetry SET (
+--     timescaledb.compress,
+--     timescaledb.compress_segmentby = 'robot_id',
+--     timescaledb.compress_orderby = 'time DESC'
+-- );
+-- SELECT add_compression_policy('robot_telemetry', INTERVAL '7 days', if_not_exists => TRUE);
+

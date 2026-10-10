@@ -27,15 +27,19 @@ async def save(alert: Alert) -> None:
 
     pool = await get_pool()
     try:
-        await pool.execute(
-            INSERT_SQL,
-            datetime.now(timezone.utc),
-            alert.robot_id,
-            alert.rule_id,
-            alert.severity,
-            alert.message,
-            json.dumps(alert.detail),
-        )
+        # 走 acquire() 而不是 pool.execute()：前者失败时会**丢弃**这条连接，
+        # 后者在连接处于异常状态（如网络中断）时可能被放回池中复用，导致后续写入连环失败。
+        # 告警是低基数事件（去重后 60~120s 一条/机器人），这里多一层 acquire 无性能代价。
+        async with pool.acquire() as conn:
+            await conn.execute(
+                INSERT_SQL,
+                datetime.now(timezone.utc),
+                alert.robot_id,
+                alert.rule_id,
+                alert.severity,
+                alert.message,
+                json.dumps(alert.detail),
+            )
     except Exception:
         log.exception("alert insert failed: %s/%s", alert.robot_id, alert.rule_id)
 
@@ -57,9 +61,10 @@ async def update_online(robot_id: str, online: bool) -> None:
     """维护 robot_metadata.is_online / last_seen（仅在状态变化时调用）。"""
     pool = await get_pool()
     try:
-        await pool.execute(
-            "UPDATE robot_metadata SET is_online=$2, last_seen=NOW() WHERE robot_id=$1",
-            robot_id, online,
-        )
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE robot_metadata SET is_online=$2, last_seen=NOW() WHERE robot_id=$1",
+                robot_id, online,
+            )
     except Exception:
         log.exception("metadata update failed: %s", robot_id)

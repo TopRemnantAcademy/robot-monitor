@@ -27,6 +27,21 @@ class Settings(BaseSettings):
     batch_trigger_count: int = 500
     batch_trigger_seconds: float = 1.0
     batch_queue_maxsize: int = 20000
+    # 单批写入失败时的重试与退避（见 services/batch_writer.py 的降级链）
+    batch_flush_max_retries: int = 3
+    batch_flush_retry_backoff_s: float = 0.5
+    # 病态批次隔离的二分深度上限：每层把批减半，段大小 = batch/2^depth。
+    # 上限存在的意义是保证最坏情况下的往返次数有界（避免 O(n) 次查询）。
+    # 深度 8 + 批 500 → 最小段 1 行，足以定位单行坏数据。
+    batch_isolation_max_depth: int = 8
+
+    # ---- asyncpg 连接池 ----
+    db_pool_min_size: int = 2
+    db_pool_max_size: int = 10
+    db_command_timeout_s: float = 30.0
+    db_max_idle_s: float = 300.0
+    # /healthz 的 DB 探活（就绪探针不应每次打库，缓存结果）
+    db_health_cache_s: float = 5.0
 
     # ---- Redis 最新状态缓存（spec/01 §4.3）----
     state_ttl_seconds: int = 10

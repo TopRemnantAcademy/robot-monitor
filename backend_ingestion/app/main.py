@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.db.redis import close_redis, get_redis
-from app.db.session import close_pool
+from app.db.session import close_pool, ping
 from app.services import mqtt_subscriber, state_cache
 from app.services.batch_writer import BatchWriter
 
@@ -65,14 +65,44 @@ app = FastAPI(title="RobotMonitor Ingestion", lifespan=lifespan)
 
 @app.get("/healthz")
 async def healthz():
+    """健康检查。
+
+    `status` 反映**依赖可达性**，不只是「进程活着」：
+    - `ok`       —— DB 与 Redis 都可达
+    - `degraded` —— 进程活着但依赖不可达（此时写入会堆积到队列，需立刻告警）
+    - 仍返回 HTTP 200：这是**存活探针**语义，改为 503 会让容器被重启掉，
+      而依赖恢复后本服务能自愈，重启反而丢在飞数据。依赖不健康由 `status` 字段表达。
+    """
+    db_ok = await _db_healthy()
     return {
-        "status": "ok",
+        "status": "ok" if db_ok else "degraded",
+        "db": "up" if db_ok else "down",
         "written": writer.written,
         "flushes": writer.flushes,
+        "retries": writer.retries,
+        "rejected": writer.rejected,
         "queue_depth": writer.queue.qsize(),
         "mqtt_received": mqtt_subscriber.received,
         "mqtt_dropped": mqtt_subscriber.dropped,
     }
+
+
+_db_probe: tuple[float, bool] | None = None
+
+
+async def _db_healthy() -> bool:
+    """带缓存的 DB 探活。
+
+    缓存的作用：探针会被容器编排以秒级频率调用，每次都打库既浪费连接也放大故障。
+    缓存窗口（settings.db_health_cache_s）内复用上次结果，故障时把探测频率降到窗口频率。
+    """
+    global _db_probe
+    now = asyncio.get_running_loop().time()
+    if _db_probe is not None and now - _db_probe[0] < settings.db_health_cache_s:
+        return _db_probe[1]
+    ok = await ping()
+    _db_probe = (now, ok)
+    return ok
 
 
 @app.get("/robots")
@@ -121,6 +151,10 @@ async def history(robot_id: str, minutes: int = 5, resolution: str = "10s"):
     except Exception as exc:
         log.exception("history query failed")
         return JSONResponse(status_code=503, content={"detail": f"query failed: {exc}"})
+
+    # 注意：这里**刻意不校验 robot_metadata**。init.sql 预置了 100 台机器人，
+    # 但「从未上报过数据的机器人」查历史必然是空数组——这是正常语义而非错误。
+    # 若改成 404，Drawer 对刚上线的机器人会弹错误提示，反而误导运维。
 
     return {
         "robot_id": robot_id,
