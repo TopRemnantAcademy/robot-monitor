@@ -1,0 +1,49 @@
+# timescaledb + pgBackRest 派生镜像
+#
+# 目的：基础镜像 `timescale/timescaledb:2.13.1-pg16` 不含 pgbackrest 二进制，
+# 而 PG 的 WAL 归档靠本地执行的 archive_command（`pgbackrest ... archive-push %p`），
+# 因此 DB 容器内必须有 pgbackrest —— 这也是官方「双端同版本」要求的一半
+# （实证 external/pgbackrest/doc/xml/user-guide.xml:2770）。
+#
+# 只在基础镜像上叠加 PGDG 的 pgbackrest 包，**不改动** timescaledb 本体，
+# 降低与现有 init.sql / 数据卷的兼容风险。
+FROM timescale/timescaledb:2.13.1-pg16
+
+# 该基础镜像是 Alpine 系（timescaledb 官方 2.13.1-pg16 基于 alpine，含 apk）。
+# pgbackrest 官方未在 Alpine 仓库发布包；Alpine 的安装路径是从源码构建。
+# 为保证「可审计 + 官方路径」，这里改用 Alpine 的构建依赖 + 官方源码构建，
+# 版本锁定与仓库侧一致（2.59.3）。
+#
+# ⚠️ 事实标注：timescaledb 2.13.1-pg16 的底层发行版（alpine vs debian）**未在本仓实测**。
+#    若构建时报 `apk: not found`，说明是 debian 系，改用下方注释里的 apt 分支。
+ARG PGBACKREST_VERSION=2.59.3
+
+# --- Alpine 分支（预期）---
+WORKDIR /tmp
+RUN apk add --no-cache \
+        build-base meson ninja pkgconf \
+        libpq-dev openssl-dev libxml2-dev lz4-dev bzip2-dev zlib-dev zstd-dev libssh2-dev \
+        make gcc g++ curl \
+ && curl -fsSL "https://github.com/pgbackrest/pgbackrest/archive/refs/tags/release/${PGBACKREST_VERSION}.tar.gz" -o pgbackrest.tar.gz \
+ && tar xzf pgbackrest.tar.gz \
+ # 构建目录用源码目录名（官方 distribution.xml 的 build 流程：meson setup build .）
+ && cd "pgbackrest-release-${PGBACKREST_VERSION}" \
+ && meson setup build . \
+ && ninja -C build \
+ && cp build/src/pgbackrest /usr/local/bin/pgbackrest \
+ && chmod 755 /usr/local/bin/pgbackrest \
+ # 构建期自检：二进制必须可执行且版本正确，否则镜像构建失败
+ && pgbackrest version \
+ && cd /tmp \
+ && rm -rf pgbackrest.tar.gz "pgbackrest-release-${PGBACKREST_VERSION}" \
+ # 清理构建依赖，缩小镜像（保留运行时库：libpq/openssl/libxml2/lz4/zstd/bz2/zlib）
+ && apk del build-base meson ninja pkgconf openssl-dev libxml2-dev lz4-dev bzip2-dev zstd-dev libssh2-dev \
+ && rm -rf /var/cache/apk/*
+
+# 官方要求的日志目录（user-guide.xml:626-637）
+RUN mkdir -p /var/log/pgbackrest \
+ && chmod 770 /var/log/pgbackrest \
+ && chown postgres:postgres /var/log/pgbackrest
+
+# 配置以只读挂载方式注入（见 compose），不 COPY 进镜像 —— 避免密钥/配置烘焙进镜像
+# （AGENTS.md §5）。
