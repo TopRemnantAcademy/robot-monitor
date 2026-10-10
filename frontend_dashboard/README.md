@@ -19,6 +19,27 @@ npm run build             # tsc --noEmit + vite build，RC=0
 npm run preview           # 预览构建产物
 ```
 
+## Bundle 体积（订单 09：ECharts 按需引入）
+
+ECharts 默认入口 `echarts-for-react` 内部 `require("echarts")`（整包，无法 tree-shake）。
+订单 09 改为 **core 入口 + 按需注册**，注册清单集中在
+`src/lib/echartsCore.ts`（仅 LineChart + Grid/Tooltip/Legend + CanvasRenderer）。
+本仓库**不使用** HeatmapChart —— `JointHeatmap.tsx` 是纯 CSS grid 自绘（无 ECharts）。
+
+`npx vite build` 实测：
+
+| 版本 | 主 JS chunk | gzip |
+| :--- | ---: | ---: |
+| 改前 | 1,209.34 kB | 401.05 kB |
+| 改后 | 671.23 kB | 224.79 kB |
+
+> 主 chunk 仍 >600 kB 的目标值：剩余体积为 ECharts 引擎的**不可再裁**部分
+> （tree-shake 后 echarts 子树 ≈487 kB + React/业务基线 ≈161 kB）。
+> 详见 issue 的实测说明。
+
+新增/导入图表能力时，请**只**在 `src/lib/echartsCore.ts` 里 `echarts.use([...])` 增补，
+不要再从 `'echarts-for-react'` 默认入口导入组件（否则整包会重新进 bundle）。
+
 后端需先启动 `backend_ingestion`（`ws://localhost:8000/ws/robots` 与 REST `/robots`）。
 
 ## 环境变量

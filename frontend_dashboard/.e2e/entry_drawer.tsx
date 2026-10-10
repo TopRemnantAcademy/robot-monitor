@@ -1,11 +1,7 @@
 import { createRoot } from 'react-dom/client';
 import { useRobotStore } from '../src/store/robotStore';
 import RobotDetailDrawer, { API_BASE } from '../src/components/RobotDetailDrawer';
-import ReactECharts from 'echarts-for-react';
 
-// 拦截传给 ECharts 的真实 option（测试专用，不修改产品代码）
-const origRender = (ReactECharts as unknown as { prototype?: unknown });
-void origRender;
 import { JOINT_NAMES } from '../src/types/robot';
 
 declare global { interface Window { __D__: any; __MOUNT__: () => void } }
@@ -21,8 +17,6 @@ window.__MOUNT__ = () => {
     error_code: 0, ts: Date.now(),
   }]);
   st.selectRobot('humanoid-042');
-  const RealECharts = ReactECharts as unknown as (props: { option: unknown }) => JSX.Element;
-  void RealECharts;
   createRoot(document.getElementById('root')!).render(<RobotDetailDrawer />);
 };
 export {};

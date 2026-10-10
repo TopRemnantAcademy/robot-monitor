@@ -5,7 +5,11 @@
 //   2) 历史折线：GET {VITE_API_BASE}/robots/{id}/history?minutes=5&resolution=10s（spec/00 §5.3）
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import ReactECharts from 'echarts-for-react';
+// 订单 09：走 echarts-for-react 的 core 入口 + 按需注册的 echarts 实例，
+// 取代默认入口（默认入口内部 require 整个 echarts 包，无法 tree-shake）。
+// 注册清单见 src/lib/echartsCore.ts（只含本 Drawer 用到的折线图相关模块）。
+import ReactEChartsCore from 'echarts-for-react/lib/core';
+import echarts from '../lib/echartsCore';
 import JointHeatmap from './JointHeatmap';
 import { COLORS, FONT, STATUS_COLOR, STATUS_LABEL } from '../theme/tokens';
 import { useRobotStore } from '../store/robotStore';
@@ -239,7 +243,13 @@ export default function RobotDetailDrawer() {
                 最近 {HISTORY_MINUTES} 分钟无历史点
               </div>
             ) : (
-              <ReactECharts option={chartOption} style={{ height: 224, width: '100%' }} notMerge lazyUpdate />
+              <ReactEChartsCore
+                echarts={echarts}
+                option={chartOption}
+                style={{ height: 224, width: '100%' }}
+                notMerge
+                lazyUpdate
+              />
             )}
           </section>
         </div>

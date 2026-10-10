@@ -42,9 +42,13 @@ await new Promise((r) => server.listen(8201, r));
 // 在 Node 下 require 得到 { default: fn }，这里解包以免 React 收到 object（仅测试环境需要）
 import { createRequire } from 'node:module';
 const req = createRequire(import.meta.url);
-const efr = req('echarts-for-react');
-if (efr && typeof efr === 'object' && typeof efr.default === 'function') {
-  req.cache[req.resolve('echarts-for-react')].exports = efr.default;
+// 订单 09：产品改用 core 入口，同一互操作问题在 'echarts-for-react/lib/core' 上同样存在，
+// 两个入口都要解包（顺序无关，各自独立判断）。
+for (const id of ['echarts-for-react', 'echarts-for-react/lib/core']) {
+  const mod = req(id);
+  if (mod && typeof mod === 'object' && typeof mod.default === 'function') {
+    req.cache[req.resolve(id)].exports = mod.default;
+  }
 }
 
 const { __MOUNT__ } = await import('./drawer.cjs');
@@ -77,7 +81,9 @@ console.log('报错/无数据       :', out.hasError, '/', out.hasNoData);
 
 // 从 echarts-for-react 实例反查真实 option，确保折线拿到 30 个历史点
 // echarts 实例挂在 DOM 属性 _echarts_instance_ 上；用 echarts 模块自身的注册表读取 option
-const echartsMod = req('echarts');
+// 订单 09：产品改用 `echarts/core` 注册（与全量 `echarts` 是彼此独立的实例注册表），
+// 故这里必须用同一个入口读取，否则 getInstanceByDom 恒为 null（测试侧耦合，非产品缺陷）。
+const echartsMod = req('echarts/core');
 const marked = [...document.querySelectorAll('[_echarts_instance_]')];
 let seriesLen = null, xLen = null;
 for (const el of marked) {
