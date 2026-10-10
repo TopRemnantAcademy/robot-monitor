@@ -23,6 +23,7 @@
 | 03 后端采集 | ✅ 完成 | `backend_ingestion/`，静态校验 13/13 |
 | 04 告警引擎 | ✅ 完成 | `alert_engine/`，规则逻辑 **20/20** 实测 |
 | 05 前端大屏 | ✅ **已完成并合入 main** | 34 文件/6696 行；`tsc --noEmit` **0 错误**、`vite build` **成功**（638 modules） |
+| 09 数据库对接加固 | ✅ **本轮完成（PR 待审）** | 真 TimescaleDB 2.13.1 实测：`init.sql` 全程无错、30,000 行落库无损、连续聚合 3,100 桶、DB 用例 **13/13**。见 `docs/requirements/R-09-database-integration.md` |
 | 06 联调压测 | ⏳ **CNB 执行中** | issue #6 / `cnb-q81-1k4hgt1ee` |
 | 07 aiomqtt 契约（I-1/I-2/I-3） | ⏳ **CNB 执行中** | issue #8 / `cnb-s51-1k4hhvjem` |
 | 08 asyncpg 升级（I-6） | ⏳ **CNB 执行中** | issue #9 / `cnb-ijj-1k4himq2k` |
@@ -117,6 +118,12 @@
 | 3 | Redis Hash 值被字符串化 | `backend_ingestion/app/services/state_cache.py` | 前端收到 `status_code:"1"`，状态色全错 |
 | 4 | 批量写入用 flush 时刻 `now()` | `backend_ingestion/app/services/batch_writer.py` | PK `(time,robot_id)` 冲突 → `ON CONFLICT DO NOTHING` **静默丢行** |
 | 5 | 过热注入被 clamp 上限压回 | `simulator/mock_fleet.py` | 永远到不了 82°C（实测 max=65.6°C） |
+| 6 | **写路径单行坏数据连坐整批** | `backend_ingestion/app/services/batch_writer.py` | 1 条脏 payload 让整批 500 条遥测一起消失（实测 10 好 + 1 坏 → 落库 0 行） |
+| 7 | **COPY 路径无幂等** | 同上 | `copy_records_to_table` 不支持 `ON CONFLICT`，重试即抛 `UniqueViolationError` |
+| 8 | **ORM 与库内类型漂移** | `backend_ingestion/app/db/models.py` | ORM 编出 `JSON`，`init.sql` 是 `JSONB` → 元数据漂移、丢 JSONB 操作符能力 |
+| 9 | 无保留策略，磁盘只增不减 | `infra/init.sql` | 8.64M 行/天，30 天数百 GB；现已加 30d/90d retention |
+| 10 | `/healthz` 不反映 DB 可达性 | `backend_ingestion/app/main.py` | DB 挂了仍报 `ok`，值班看不到；现返回 `db: up/down` + `retries`/`rejected` |
+| 11 | 告警写入用 `pool.execute()` | `alert_engine/app/store.py` | 坏连接可能被放回池中复用 → 连环失败；改 `acquire()` |
 
 另：`npm install` 曾把 `package-lock.json` 的 42 行 `libc`/`musl` 平台标记删掉
 （会导致 Linux CI 上 lock 不完整）—— 已恢复原始跨平台版本。

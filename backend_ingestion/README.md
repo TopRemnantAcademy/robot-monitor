@@ -19,7 +19,7 @@ docker build -t robot-monitor-backend ..
 | WS | `/ws/robots` | 首帧 `type:"snapshot"`（100 台），之后 `type:"telemetry"` 增量 + `type:"alert"` 告警 |
 | GET | `/robots` | 100 台最新状态（WS 之外兜底） |
 | GET | `/robots/{id}/history?minutes=5&resolution=10s` | Drawer 折线 + 关节热力图数据 |
-| GET | `/healthz` | 健康检查，含写入计数与队列深度 |
+| GET | `/healthz` | 健康检查，含 `db` 可达性 + 写入/重试/拒收计数 + 队列深度 |
 
 ### WS 信封（spec/00 §5.2，强制）
 
@@ -34,8 +34,31 @@ docker build -t robot-monitor-backend ..
 ## 性能护栏（不可违反）
 
 - **严禁逐条 INSERT**：`batch_writer` 用 `asyncio.Queue` 双重触发
-  （积压 ≥500 条 **或** 距上次刷盘 >1.0s），`asyncpg.executemany` 批量写入。
+  （积压 ≥500 条 **或** 距上次刷盘 >1.0s）批量写入。
 - `asyncio.Lock` 保护刷盘临界区；`graceful_shutdown()` 关闭前强制刷完残留。
+
+## 写入降级链（写路径的核心设计）
+
+spec/01 §4.2 允许 `copy_records_to_table` **或** 批量 `execute`。本机实测两者吞吐都在
+70k~200k 行/s，相对 1000 行/s 峰值有两个数量级冗余 —— **吞吐不是选型依据，容错才是**。
+实测出的三个硬事实决定了实现必须分级：
+
+1. `copy_records_to_table` **不支持 `ON CONFLICT`**，重复批次抛 `UniqueViolationError`；
+   而重试恰恰会重复提交同一批 → 幂等必须靠临时表中转。
+2. COPY 传 `dict` 会 `TypeError: expected str, got dict` → JSONB 列必须传 JSON 文本。
+3. **单行坏数据连坐整批**（COPY / executemany 都是批级原子）。
+
+故实现三级降级链（见 `app/services/batch_writer.py`）：
+
+| 级 | 路径 | 特性 |
+| :-- | :--- | :--- |
+| L1 | COPY → 临时表 → `INSERT ... SELECT ... ON CONFLICT DO NOTHING` | 快、**幂等**、批级原子 |
+| L2 | `executemany(INSERT ... ON CONFLICT DO NOTHING)` | 慢一档的兜底 |
+| L3 | 二分隔离坏行 | 坏行丢进 `rejected`，**好数据保住** |
+
+> 为什么必须有 L3：一批 500 条时，一行脏 payload 若不隔离就等于每 0.5 秒丢 500 条遥测。
+
+`/healthz` 暴露 `retries` / `rejected`：前者持续增长说明 DB 不稳，后者非 0 说明有脏数据。
 - MQTT 断线指数退避重连（上限 30s），**不改为固定间隔**；`aiomqtt.Client` 实例在重连循环外构造、循环内复用（官方 `reconnection.md`：Client 可复用但不可重入）。
 - 依赖 `aiomqtt>=2.5.0`：2.0.1 的 `Client.__aexit__` 在重连场景存在不抛 `MqttError` 的分支，会绕过退避逻辑空转重连（CHANGELOG 2.5.0：`Let exceptions bubble up in Client.__aexit__`）。
 - 校验失败的消息**丢弃并计数**，不阻塞队列。
