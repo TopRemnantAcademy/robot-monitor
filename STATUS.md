@@ -1,95 +1,137 @@
-# STATUS — RobotMonitor 构建任务看板
+# STATUS — RobotMonitor 主计划与状态看板
 
-> PM 角色定时维护本文件（见 `spec/ci/pm-call.md`）。订单详情见 `orders/0X-*.md`。
+> 最后更新：2026-10-10（本轮整顿）。派单方法见 `docs/CNB-DISPATCH-SOP.md`。
+> 上游开源源套用计划见 `external/INTEGRATION-PLAN.md`。
 
-## 一、执行顺序（依赖正确，不可跳步）
+---
 
-```
-01 基础设施 ──> 02 模拟器 ──> 03 后端 ──> 04 告警引擎 ──> 05 前端 ──> 06 联调
- (compose+init)  (数据源先行)   (用02验收)  (消费03的Redis流) (用03的WS+REST)  (收口)
-```
+## 一、项目目标（一句话）
 
-> 修订：旧版把模拟器排最后，却要求后端阶段「用模拟器跑 30,000 条」——依赖倒置。
-> 模拟器只依赖 MQTT Broker，必须先产出。
+**100 台人形机器人的 2D 实时监控大屏**（在线状态 / 电量 / 关节电机温度 / 扭矩 / 故障码），
+端到端 100 台 × 10Hz = **1000 msg/s**，全部编码工作交给 CNB 的 @codebuddy 执行。
 
-| # | 模块 | 规范 | 订单 | 派工角色 | 状态 |
-| - | :--- | :--- | :--- | :--- | :--- |
-| 01 | 基础设施 | spec/00 §3/§4 | orders/01-infra.md | 时序数据库专家 | **已派工** (CNB Issue #1, build cnb-vvh-1k4guji0r) |
-| 02 | 模拟器 | spec/04 | orders/02-simulator.md | — | **已完成**（NPC 产出但推送失败丢失；主代理本地实现并实测通过，11/11） |
-| 03 | 后端采集存储 | spec/01 | orders/03-backend.md | — | **已实现（主代理）**，静态校验 13/13 通过；运行时未验（见 §七） |
-| 04 | 告警引擎 | spec/02 | orders/04-alert-engine.md | — | **已实现（主代理）**，规则逻辑 20/20 实测通过 |
-| 05 | 前端看板 | spec/03 | orders/05-frontend.md | 前端看板工程师 | **已实现（NPC CodeBuddy）**，`npm run build` RC=0；5 项集成验证全通过 |
-| 06 | 联调压测 | spec/05 阶段六 | orders/06-integration.md | 测试 + 压测 | 待实现（05 已就绪，可开工） |
+明确不做：3D CAD、数字孪生。
 
-## 二、开工前规划审计（已完成，10 项缺陷已修）
+---
 
-| # | 缺陷 | 位置 | 处理 |
-| - | :--- | :--- | :--- |
-| A | Drawer 要 5 分钟历史但 REST 端点缺失 | spec/03:88 vs spec/01 | ✅ spec/00 §5.3 + spec/01 §4.5 增 `/robots/{id}/history` |
-| B | WS 消息无 `type`，alert 无法送达前端 | spec/00:119 | ✅ §5.2 统一信封（snapshot/telemetry/alert） |
-| C | ORM 声明复合 PK 但 DB 无 PK | spec/01:62 vs init.sql | ✅ 增加 `PRIMARY KEY (time, robot_id)` |
-| D | 2 阶段要 simulator 验收但 4 阶段才生成 | spec/05:25 vs :39 | ✅ 重排为 6 阶段（模拟器第 2） |
-| E | `set -u` 下 `ALERT_PID` 未绑定即崩溃 | test_integration.sh | ✅ 变量预先初始化 |
-| F | 无 EMQX 就绪等待 → 写入 0 条假失败 | test_integration.sh | ✅ 三组件全部等待 |
-| G | `robot_metadata` 未播种 | init.sql | ✅ 100 台 generate_series 播种 |
-| H | 前端要 `VITE_WS_HOST` 但 env 是 `WS_HOST` | spec/03:123 | ✅ 补 `VITE_WS_HOST` / `VITE_API_BASE` |
-| I | offline 判定依赖 Redis TTL 过期事件 | spec/02:49 | ✅ 改为 ticker + 内存 last_seen（§3.1） |
-| J | 关节命名无唯一事实来源 | spec/00:11 | ✅ §5.5 确定 24 个标准键 |
+## 二、当前真实状态（实证，非推测）
 
-**核实过但并非缺陷（勿改）**：连续聚合中的 `last()` —— TimescaleDB 2.7+ 官方文档明确支持
-CAgg 内 `first()/last()`，本项目锁 2.13.1，合法。
+| 模块 | 状态 | 证据 |
+|---|---|---|
+| 01 基础设施 | ✅ 完成 | `infra/docker-compose.yml`、`infra/init.sql`（100 台播种） |
+| 02 模拟器 | ✅ 完成 | `simulator/mock_fleet.py`，实测 **1020 msg/s**，用例 11/11 |
+| 03 后端采集 | ✅ 完成 | `backend_ingestion/`，静态校验 13/13 |
+| 04 告警引擎 | ✅ 完成 | `alert_engine/`，规则逻辑 **20/20** 实测 |
+| 05 前端大屏 | ✅ **已完成并合入 main** | 34 文件/6696 行；`tsc --noEmit` **0 错误**、`vite build` **成功**（638 modules） |
+| 06 联调压测 | ⏳ **CNB 执行中** | issue #6 / `cnb-q81-1k4hgt1ee` |
+| 07 aiomqtt 契约（I-1/I-2/I-3） | ⏳ **CNB 执行中** | issue #8 / `cnb-s51-1k4hhvjem` |
+| 08 asyncpg 升级（I-6） | ⏳ **CNB 执行中** | issue #9 / `cnb-ijj-1k4himq2k` |
 
-## 三、NPC 配置（10 角色）
+本地 HEAD = CNB `main` = `7426baf`（已推送同步）。
 
-`.cnb/settings.yml`：产品经理 / 架构师 / 时序数据库专家 / 后端接入工程师 / 告警引擎工程师 /
-前端看板工程师 / 代码审查 / 测试工程师 / 压测与性能工程师 / 合规
+---
 
-`.cnb/.yml`：① Issue·PR 评论 `@flow.237/RobotMonitor(角色)` 派工 ② crontab `0 0,6,12,18 * * *` 7 段自主流水线
+## 三、整顿后的执行计划
 
-## 四、当前状态
-- CNB 仓库 `flow.237/RobotMonitor` 已确认存在，代码已推送（main @ `5c0eab2`）。
-- 平台开关：`auto_trigger_by_npc: true`、`cron_auto_trigger: true`（NPC 与 cron 均已开启）。
-- crontab 已显式注册（`cnb build build-crontab-sync --repo flow.237/RobotMonitor --branch main` → 同步成功）。
-- **已派工 01/02/03**，NPC 构建均为 `event: issue.comment@npc`，状态 pending。
-- 待派工：04（告警引擎）、05（前端）、06（联调）—— 依序在 03 完成后派发。
+### 阶段 A：收口（进行中，CNB 承担）
 
-## 五、当前阻塞（需用户处理，非代码问题）
+| 序 | 任务 | 承担方 | 判据 |
+|---|---|---|---|
+| A1 | 订单 06 端到端联调 + 压测报告 | CNB | `test_integration.sh` 可重复运行；`robot_telemetry` ≈ 30,000 行（真实 SQL 计数）；7 分栏报告 |
+| A2 | 订单 07 aiomqtt 契约对齐 | CNB | `aiomqtt==2.5.1`；`Client` 实例复用；退避保留；关闭顺序修正 |
+| A3 | 订单 08 asyncpg 升级 | CNB | `asyncpg==0.32.0`；贴出 `import app.main` 真实输出 |
 
-| # | 阻塞 | 证据 | 需谁处理 |
-| - | :--- | :--- | :--- |
-| B1 | **AI 积分已用尽** | `[llm error] HTTP 402 [EXCEEDING_LIMIT] AI 积分已用尽，请联系根组织管理员提升配额` | 根组织管理员（提升配额） |
-| B2 | **NPC 无推送权限** | `remote: Your token does not have the repo-code:rw scope required to push` → 403 | 授予 `repo-code:rw` / 开启 NPC 工作模式 |
-| B3 | 派工时未带 `--work-mode` | 构建环境 `CNB_NPC_ENABLE_WORKMODE=false`、`workMode: false` | 已定位；下次派工补 `--work-mode` |
+> ⚠️ A2 与 A3 都改 `requirements.txt`。已在 `orders/08-dispatch.md` §6 约定：
+> 冲突时以**同时包含两项**为准（`aiomqtt==2.5.1` + `asyncpg==0.32.0`）。
 
-**后果**：NPC 实际写出了可用代码（build 02 实测 1020 msg/s、82°C+ 过热注入生效，本地 commit `97e0e96`），
-但 push 403 失败 + 随后 402 断粮，CI 容器为临时环境 → **产出丢失**。
+### 阶段 B：主代理回收与验收（A 完成后，我做）
 
-**注**：主代理凭据**有**推送权限（Bearer 头方式已验证可用），故 02 已由主代理本地落地。
+| 序 | 任务 | 说明 |
+|---|---|---|
+| B1 | **按 SOP §1 步骤 7 回收分支** | `ls-remote --heads` 查分支 → fetch → merge。**不能只看 `status: success`** |
+| B2 | 合并后回归验证 | `tsc --noEmit` + `vite build`；后端 `import app.main` |
+| B3 | 冲突处理 | 07/08 同改 `requirements.txt`，按 A 表约定合并 |
 
-## 六、环境要点（排障记录）
-- **git push 到 CNB 必须用 Bearer 头**：
-  `git -c http.extraHeader="Authorization: Bearer ${TOKEN}" push https://cnb.cool/flow.237/RobotMonitor.git main`
-  （URL 内嵌 token、`cnb git-credential` helper 均会挂起；helper 对 `cnb.cool` 返回 `unknown host`。）
-- **CI 配置必须在仓库根 `.cnb.yml`**，放 `.cnb/.yml` 时 `build-crontab-sync` 报 `CONFIG_YAML_EMPTY`。
+### 阶段 C：后续增强（待派单）
 
-## 七、验证边界（**未验证**事项，不得当作已通过）
+| 序 | 任务 | 优先级 | 依据 |
+|---|---|---|---|
+| C1 | 前端 bundle 优化（ECharts 按需引入） | 中 | 当前 1.21 MB / gzip 401 KB；按需引入可降至 ~400 KB 量级 |
+| C2 | 告警抑制（inhibition） | 中 | `INTEGRATION-PLAN.md` I-5：离线(severity 3) 时不应同时报低电量(severity 2) |
+| C3 | Prometheus 指标接入 | 低 | `client_python` 已下载；`emqtt-bench` 自带 `--prometheus` |
+| C4 | GitHub 同步 | 低 | 目前只推了 CNB，**`origin` 尚未同步** |
 
-| 模块 | 已验证 | 未验证 |
-| :--- | :--- | :--- |
-| 05 前端 | ✅ `npm install` + `npm run build` **RC=0**（tsc --noEmit + vite build，638 modules）<br>✅ 5 项集成验证全通过（见下）：1000 msg/s 洪流下仅 **11 次** React 渲染、type 三分支、alert prepend、指数退避 1s→2s→4s→8s、REST history→ECharts 3 series、无数据 100 张离线占位卡<br>✅ 24 关节键名与 spec/00 §5.5 / 后端 telemetry.py **逐字逐序一致**<br>✅ 10 项颜色 token + 4 项字号/圆角与 spec/03 §3 **逐值相等**；组件内零硬编码色值<br>✅ 真实 Chromium 截图核对 100 卡墙/顶栏 KPI/告警流/Drawer | **真实后端未联调**：本地无 EMQX/TimescaleDB/Redis，WS 与 REST 均由假服务端提供（其 envelope 结构照 spec/00 §5.2/§5.3 构造）。真实 `backend_ingestion` 的 WS 行为、`/history` 聚合返回需在阶段六验证 |
+---
 
-> 05 的集成验证脚本：`bash frontend_dashboard/.e2e/run_all.sh`（5 项）。
-> 发现并修复的真实缺陷 1 处：重连退避在 `onopen` 无条件重置，服务端抖动时退避永远停在 1s（已改为「稳定存活 5s 才重置」）。
+## 四、阻塞与已解除项
 
-（**未验证**事项，不得当作已通过）
+### 仍存在的阻塞（需账号层处理）
 
-| 模块 | 已验证 | 未验证 |
-| :--- | :--- | :--- |
-| 02 模拟器 | ✅ 11/11 实测（关节键名、payload 契约、过热 82°C+、电量 0.05%/s、status_code） | MQTT 真实收发（本机无 broker） |
-| 03 后端 | ✅ 静态校验 13/13（跨模块关节键名一致、INSERT 列/占位符/元组三者=17 对齐、WS 三种 type、alert 转发、REST 路由、无占位符）；`py_compile` 全通过 | **运行时未验**：连库、批量落库吞吐、WS 端到端 |
-| 04 告警引擎 | ✅ **规则逻辑 20/20 实测**（4 条规则齐全且继承基类、去重窗口 60/120/30/60、severity 3/2/3/2、过热需连续 3 点且单点尖峰不误报、电量 15.0% 边界、离线含「从未上报」、卡死方差/扭矩/样本数三重判定）；`py_compile` 全通过 | **运行时未验**：Redis 订阅、去重幂等、落库与 `robot:alerts` 发布 |
+| # | 阻塞 | 证据 | 影响 |
+|---|---|---|---|
+| B1 | AI 积分耗尽 | `402 [EXCEEDING_LIMIT] AI 积分已用尽` | NPC 无法继续；需根组织管理员提配额 |
+| B2 | NPC 无 `repo-code:rw` | `403 Your token does not have the repo-code:rw scope` | NPC 推不进 main → **主代理必须手工合并分支** |
 
-**为何 03 无法运行时验证**：本机 PyPI 被网络策略拦截（`403 Forbidden`），依赖装不上；
-且 `asyncpg==0.29.0` 在 Python 3.13 下源码编译失败（`_PyLong_AsByteArray` 签名变更）。
-→ **这不构成缺陷**：部署镜像锁定 `python:3.11-slim`，该版本有 asyncpg 预编译 wheel。
-真正的端到端验证需在有 Docker + 可连 PyPI 的环境执行 `bash test_integration.sh`。
+### 已解除（本轮实证纠正了之前的误判）
+
+| 原判为「环境阻塞」 | 实际根因 | 解决 |
+|---|---|---|
+| ❌ asyncpg 在 Python 3.13 编译失败 | **我们锁的 `0.29.0` 太旧**（2023-11）；`v0.30.0`(2024-10) 起官方支持 3.13 | 升 `0.32.0` → 已派订单 08 |
+| ❌ PyPI 403 装不了依赖 | `files.pythonhosted.org` 被拦，但**镜像源可用** | `pip install -i https://pypi.tuna.tsinghua.edu.cn/simple`（实测 29s 装完） |
+| ❌ 派单未带 `--work-mode` | 已修正 | 后续派单均带，核验 `workMode: true` |
+
+---
+
+## 五、验证边界（诚实标注，不得当作已通过）
+
+### 已实测验证
+
+| 项 | 结果 |
+|---|---|
+| 前端类型检查 | ✅ `tsc --noEmit` 0 错误 |
+| 前端生产构建 | ✅ `vite build` 成功（638 modules，58s） |
+| 前后端 24 关节键名 | ✅ `telemetry.py:13-22` ↔ `types/robot.ts:8-17` **逐字一致** |
+| WS 契约 | ✅ `/ws/robots` + `snapshot/telemetry/alert` 三分支一致 |
+| aiomqtt 2.5.1 兼容性 | ✅ `app.main` 导入成功；`Client.__init__` 参数实测 `['self','hostname','port','username']` |
+| EMQX 镜像名 | ✅ digest 级验证：`emqx:5.6` ≠ `emqx/emqx:5.6`（前者非 EMQX） |
+
+本机验证环境（已打通）：Python **3.13.14** 隔离 venv，
+`aiomqtt 2.5.1 / asyncpg 0.32.0 / fastapi 0.143.0 / redis 8.1.0 / pydantic 2.14.0`。
+
+### 仍未验证
+
+| 项 | 所需条件 |
+|---|---|
+| 端到端 30,000 行落库 | 需真实 EMQX + TimescaleDB + Redis（Docker），属订单 06 |
+| I-2 / I-3 的**运行时**行为 | 需真实 broker；导入期已验证 |
+| 告警去重幂等 / `robot:alerts` 发布 | 同上 |
+
+---
+
+## 六、本轮修掉的真实缺陷（有 file:line 证据）
+
+| # | 缺陷 | 位置 | 后果 |
+|---|---|---|---|
+| 1 | EMQX 镜像名缺 org 前缀 | `infra/docker-compose.yml` | 拉起**非 EMQX** 的容器（digest 实证） |
+| 2 | `/history` 不返回 `joint_positions` | `backend_ingestion/app/main.py` | Drawer 第三条折线「角度(rad)」**恒空** |
+| 3 | Redis Hash 值被字符串化 | `backend_ingestion/app/services/state_cache.py` | 前端收到 `status_code:"1"`，状态色全错 |
+| 4 | 批量写入用 flush 时刻 `now()` | `backend_ingestion/app/services/batch_writer.py` | PK `(time,robot_id)` 冲突 → `ON CONFLICT DO NOTHING` **静默丢行** |
+| 5 | 过热注入被 clamp 上限压回 | `simulator/mock_fleet.py` | 永远到不了 82°C（实测 max=65.6°C） |
+
+另：`npm install` 曾把 `package-lock.json` 的 42 行 `libc`/`musl` 平台标记删掉
+（会导致 Linux CI 上 lock 不完整）—— 已恢复原始跨平台版本。
+
+---
+
+## 七、文档索引
+
+| 文件 | 内容 |
+|---|---|
+| **本文件** | 主计划与状态 |
+| `docs/CNB-DISPATCH-SOP.md` | **如何给 CNB 派单**（含判别真完成的流程） |
+| `external/INTEGRATION-PLAN.md` | 上游开源源 → 本项目的套用点（I-1~I-6） |
+| `external/SOURCES.md` | 14 个下载源的 provenance 与取舍理由 |
+| `orders/NN-dispatch.md` | 各单派工正文 |
+| `docs/requirements/R-*.md` | 验收规格（R-01 前端 / R-02 WS 节流 / R-03 API 契约 / R-07 联调压测 / R-08 验收矩阵） |
+| `AGENTS.md` | NPC 每次运行自动注入的工程纪律 |
+| `.cnb.yml` / `.cnb/settings.yml` | CI 流水线 / 10 个 NPC 角色 |
