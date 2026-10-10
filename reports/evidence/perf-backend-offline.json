@@ -1,0 +1,35 @@
+{
+  "measured": {
+    "_to_row_per_row_us": 29.546917229890823,
+    "_to_row_throughput_rows_per_s": 33844.478333203595,
+    "row_payload_bytes_estimate": 2433.0,
+    "flush_p50_ms": 13.61665315926075,
+    "flush_p95_ms": 14.142970787361264,
+    "flush_max_ms": 21.097262855619192,
+    "stub_batches": 60,
+    "stub_rows": 30000,
+    "enqueue_capacity_rows": 20000,
+    "enqueue_rate_rows_per_s": 51195.39024661601,
+    "enqueue_window_s": 0.3906601727940142,
+    "queue_full_would_block": true,
+    "queue_depth_p50_live": 1.0,
+    "queue_depth_p95_live": 2.0,
+    "queue_depth_p99_live": 10.0,
+    "queue_depth_max_live": 16.0,
+    "queue_samples": 3000,
+    "live_flush_batches": 6
+  },
+  "inferred": {
+    "note": "以下为推算，非实测：需真实 docker(EMQX+TimescaleDB+Redis) 才能测",
+    "batch_latency_real_ms_range": [
+      5.0,
+      20.0
+    ],
+    "basis": "loopback PG executemany 500 rows 常见区间；未在本环境实测"
+  },
+  "params": {
+    "batch_trigger_count": 500,
+    "batch_trigger_seconds": 1.0,
+    "queue_maxsize": 20000
+  }
+}
