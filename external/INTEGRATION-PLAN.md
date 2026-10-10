@@ -261,3 +261,62 @@ aiomqtt==2.5.1   asyncpg==0.32.0   fastapi==0.143.0   redis==8.1.0   pydantic==2
 |---|---|
 | I-2 / I-3 的**运行时**行为 | 需真实 MQTT broker + TimescaleDB（Docker），导入期已验证 |
 | 端到端 30,000 行 | 同上，属订单 06 范围（CNB 执行中） |
+
+---
+
+## 7. 第四批套用计划：非功能面（CodeBuddy，2026-10-10）
+
+前三批解决的是「功能能不能跑」。本批解决「**跑了以后你怎么知道它在好好跑**」。
+
+### 7.0 缺口清单（先行结论）
+
+| # | 缺口 | 事实依据 | 严重度 |
+|---|---|---|---|
+| G-1 | **全仓无 `/metrics`** | `backend_ingestion/app/main.py:66-75` 的 `/healthz` 只回 JSON；`alert_engine` 只有 `main()`，**连 HTTP 都没有**（`alert_engine/app/main.py:127-132`） | 🔴 高 |
+| G-2 | **1000 msg/s 无历史曲线** | `/healthz` 的 `written/flushes/queue_depth/mqtt_dropped` 是瞬时值，压测跑完就没了 | 🔴 高 |
+| G-3 | **「看板假的绿」无人识别** | 后端 WS 广播与 broker 侧真实状态无交叉校验 | 🔴 高 |
+| G-4 | **`robot_alert` 落库失败静默** | `alert_engine/app/store.py:53` `log.exception("alert publish failed")` —— 只进日志 | 🟡 中 |
+| G-5 | **零备份** | `infra/init.sql` 超表 ≈ 8.64M 行/天；compose 只有 `tsdb-data` 卷 | 🔴 高 |
+| G-6 | **`robot_metadata.last_seen` / `is_online` 从没人写** | `infra/init.sql:39-40` 定义了这两列；全仓无 UPDATE | 🟡 中 |
+| G-7 | **无多机器人任务级仿真** | `simulator/mock_fleet.py` 只产遥测波形，不产「任务意图」 | 🟢 低 |
+
+### 7.1 已落地（本次交付）
+
+| # | 套用点 | 源 | 实证 |
+|---|---|---|---|
+| O-1 | `infra/ops/prometheus/prometheus.yml` 6 个 job | `emqx/prometheus`(sparse) + `emqx/emqx`(sparse) + exporter README | `emqx_prometheus_api.erl:63` 定端点；`blackbox_exporter/README.md:33` 定 `/probe` |
+| O-2 | `infra/ops/grafana/provisioning/*` + 9 个看板 JSON | `emqx/emqx-exporter`(自带模板) + `grafana-provisioning-ref` | dashboards 全部 `json.load()` 通过（实测） |
+| O-3 | `infra/ops/emqx-exporter/emqx-exporter.config.yaml` | `emqx-exporter/examples/docker-compose/` | 官方示例原样抽 metrics/probes 两段 |
+| O-4 | `infra/ops/blackbox/blackbox.yml` | `prometheus/blackbox_exporter` | 官方默认模块文件 |
+| O-5 | `infra/docker-compose.yml` 新增 6 服务（`profiles: ["ops"]`） | 各仓库 README 端口/环境变量 | 见 7.2 |
+| O-6 | `infra/ops/pgbackrest/pgbackrest.conf`（**未接线**） | `pgbackrest/pgbackrest` | `doc/xml/reference.xml:7` 定配置路径 |
+| O-7 | `docs/UPSTREAM.md` | 全部 30+ 源 | 许可逐仓库登记 |
+| O-8 | `.env.example` 新增 ops 段 | — | 密钥占位、不硬编码 |
+
+### 7.2 为什么用 `profiles: ["ops"]`（设计判断）
+
+**依据**：`test_integration.sh` 与订单 06 的验收判据是「30s 压测 → `robot_telemetry` ≈ 30000 行」。
+多起 6 个容器会抢 IO/CPU，**污染压测基线**。
+
+因此全部运维服务放进 compose `profiles`（Docker Compose 原生特性）：
+
+```bash
+# 日常联调（原样不变，一个容器都不多）
+docker compose -f infra/docker-compose.yml up -d
+
+# 要看曲线时才叠加
+docker compose -f infra/docker-compose.yml --profile ops up -d
+```
+
+`emqx` 服务只多了一行 `EMQX_PROMETHEUS__ENABLE: "true"` —— **纯显式声明，无行为变化**
+（EMQX 5 该开关默认即 true）。
+
+### 7.3 未接线项（诚实列出）
+
+| 项 | 为什么没接 | 需要什么才能接 |
+|---|---|---|
+| backend `/metrics` | 要改 `backend_ingestion/app/main.py` 生产代码，属订单级改动；本次只交付**探针**（blackbox 打 `/healthz`） | 引入 `prometheus/client_python`（已下载），挂 `/metrics`，把 `writer.written/flushes/queue_depth` 变 Counter/Gauge |
+| py-spy 火焰图 | 需给 container 加 `cap_add: [SYS_PTRACE]`（`external/py-spy/README.md:217-232`），改的是**运行时权限** | 压测诊断时按需加，不必常驻 |
+| pgBackRest | `timescale/timescaledb:2.13.1-pg16` 镜像内**不含** pgbackrest 二进制 | 换镜像或起边车，并先 `docker manifest inspect` 核镜像（EMQX 镜像名的教训） |
+| G-4 告警落库失败告警 | 需要「告警的告警」机制 | 用 postgres_exporter 的 `pg_stat` 指标 + Prometheus 规则；本批已铺好 exporter |
+| G-6 `robot_metadata` 未更新 | 涉 `offline` 规则的 last_seen 语义 | 单独订单 |

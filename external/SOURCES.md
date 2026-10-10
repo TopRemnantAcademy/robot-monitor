@@ -184,3 +184,119 @@ git clone --depth 1 https://github.com/eclipse-paho/paho.mqtt.python.git
 
 > 原则：宁可少下载，也不把低质量代码当作「参考」引入。
 > 参考源必须是**官方组织仓库**或经 digest/stars 实证的高质量仓库。
+
+---
+
+## 5. 第四批：平台「非功能面」缺口（2026-10-10 全量复扫 · CodeBuddy）
+
+前三批复扫的都是**功能层**依赖（MQTT/PG/Redis/前端/告警）。
+本批换个问法：**这套系统上线第一天就会缺什么？** —— 答案是四类，
+前三批一个都没覆盖。
+
+### 5.1 可观测性（最狠的缺口：整个仓库没有 /metrics）
+
+| 需求点 | 仓库 | 体积 | stars | 许可 | 套用结论 |
+|---|---|---|---|---|---|
+| 指标 TSDB + 抓取 | `prometheus/prometheus` | 33 MB | 66459 | Apache-2.0 | 部署契约 → **已接线** |
+| EMQX 补充指标 | `emqx/emqx-exporter` | 2.3 MB | 41 | Apache-2.0 | demo compose + 看板 → **已套用** |
+| EMQX 内置端点实证 | `emqx/emqx`（sparse `apps/emqx_prometheus/`） | 444 KB | 16780 | Apache-2.0 | file:line 实证 → 见下 |
+| HTTP/TCP 探针 | `prometheus/blackbox_exporter` | 736 KB | 5894 | Apache-2.0 | 模块配置 → **已套用** |
+| PG/落库观测 | `prometheus-community/postgres_exporter` | 1.1 MB | 3630 | Apache-2.0 | DATA_SOURCE_NAME → **已接线** |
+| Redis 观测 | `oliver006/redis_exporter` | 916 KB | 3696 | MIT | 端口/镜像 → **已接线** |
+| 看板渲染 | `grafana/grafana` | **2011 MB** | 77222 | **AGPL-3.0** | ⚠️ 全量不下，见 5.4 |
+
+> `emqx-exporter` 只有 41 stars，**不是**因为质量差 —— 它是 EMQX 官方组织仓库，
+> 但主要面向企业版缺失指标的补齐。判断依据：它自带
+> `grafana-dashboard/template/emqx-5/` 7 个看板 JSON + `examples/docker-compose/` 完整栈，
+> 属「拿来就能接」的形态。stars 低 ≠ 不可用，这里用**官方组织归属 + 自带 demo 完整性**作为判据。
+
+### ⭐ 关键发现：EMQX 的 Prometheus 端点是**内置**的，不需要 exporter
+
+`external/emqx-prometheus-sparse/apps/emqx_prometheus/src/emqx_prometheus_api.erl:63`
+
+```
+        "/prometheus/stats" => ?SCOPE_MONITORING,
+```
+
+（同文件 `:60` 为 `/prometheus`，`:64-67` 为 `data_integration` / `schema_validation` /
+`message_transformation` / `topic_metrics`）
+
+→ `http://emqx:18083/api/v5/prometheus/stats` 直接可抓，Prometheus 无需任何 exporter
+即可拿到 EMQX 的全部 Publish/Subscribe/连接/积压指标。**exporter 只补它没覆盖的**。
+
+这条是**实证得到的**（读 fetched 源码），不是查文档抄的 —— 因为它直接决定了
+`ops/prometheus/prometheus.yml` 里第一个 job 的 `metrics_path` 写什么。
+
+### 5.2 性能诊断（不知道瓶颈在哪，就只能靠猜）
+
+| 需求点 | 仓库 | 体积 | stars | 许可 | 套用结论 |
+|---|---|---|---|---|---|
+| Python 火焰图 | `benfred/py-spy`（sparse README） | 36 KB | 15557 | MIT | **`cap_add: [SYS_PTRACE]`** → 见下 |
+
+**这个必须记下来，否则压测期一定踩**：
+`external/py-spy/README.md:217-232`
+
+> ### How do I run py-spy in Docker?
+> This error is caused by docker restricting the `process_vm_readv` system call…
+> This can be overridden by setting `--cap-add SYS_PTRACE` when starting the docker container.
+>
+> ```yaml
+> your_service:
+>    cap_add:
+>      - SYS_PTRACE
+> ```
+
+→ 后端容器不加 `SYS_PTRACE`，`py-spy` 在容器内**必报 Permission denied**。
+本仓库的 `backend_ingestion/Dockerfile` 目前没有这一行。（未接线，见文档 §6）
+
+### 5.3 数据保护（最容易被忽略、且真会丢数据）
+
+| 需求点 | 仓库 | 体积 | stars | 许可 | 套用结论 |
+|---|---|---|---|---|---|
+| 物理备份 + WAL 归档 | `pgbackrest/pgbackrest` | 19 MB | 4428 | 见仓库 LICENSE | 配置契约 → 已交付，**未接线** |
+| 备份目标对象存储 | `minio/minio` | 40 MB | 61331 | **AGPL-3.0** | ⚠️ 备选，未采用 |
+
+**为什么这是缺口**：`infra/init.sql` 的 `robot_telemetry` 是 `(time, robot_id)` 超表，
+100 台 × 10Hz ≈ **8,640,000 行/天**。整个仓库**没有任何备份路径**，
+`docker compose down -v` 一次历史归零，看板「历史折线」永不可复现。
+
+> MinIO 的现状需要标注（实证 README 首行）：
+> **「THIS REPOSITORY IS NO LONGER MAINTAINED.」**（推荐迁 AIStor）
+> → 因此**不作为首选**，只登记为备选；且 AGPL-3.0 同样有传染性提醒。
+
+### 5.4 关于 grafana 全量 clone：改用 sparse 参考
+
+`grafana/grafana` 的 GitHub API `size` = **2,064,477 KB ≈ 2011 MB**，不可接受。
+但它有价值的部分只有一个目录。本次采用**稀疏检出的下游仓库**：
+
+`external/grafana-provisioning-ref/`（来源 `fkerem/AgLab`，★0，size 2885 KB）
+
+理由（这是**判断**，注明依据）：它包含
+- `docker-compose.yml:25-51` —— Grafana 12.3.2 的完整跑法
+- `grafana/provisioning/datasources/instructor-postgres.yml` —— **`type`/`uid`/`jsonData.timescaledb` 的确切写法**
+
+这两样正是「Grafana 自动接 TimescaleDB」的关键，而 Grafana 官方文档没给可执行的 YAML。
+用 ★0 的仓库采证据有风险 → **因此在 `datasources.yaml` 里已把它标为「未验证」**，
+且保守选了 Grafana 全系兼容的 `type: postgres` 而非参考里的 `grafana-postgresql-datasource`。
+
+另：实测 `grafana/grafana` 内置数据源目录
+（`public/app/plugins/datasource`，main 分支）只有
+`alertmanager / azuremonitor / cloudwatch / dashboard / grafana-testdata-datasource /
+grafana / graphite / mixed` —— **没有 timescaledb**。所以 TimescaleDB 只能走 postgres 数据源。
+
+### 5.5 评过但**不下载**的（含体积实证，避免重复搜索）
+
+| 仓库 | GitHub API size | clone 后实测 | stars | 不下的理由 |
+|---|---|---|---|---|
+| `Tencent/TAD_Sim` | 643,179 KB | **354 MB** | 468 | 想接真机仿真，但体积 + GPU + ROS 依赖，对本项目「2D 运维看板」收益为负 |
+| `OpenBMB/ChatDev` | 381,817 KB | **301 MB** | 34477 | 与 AgentVerse 能力重叠，取轻的 |
+| `debauchee/barrier` | 85,633 KB | **27 MB** | 30916 | 软 KVM，管键鼠不对管遥测，用不上 |
+| `tsl0922/ttyd` | 20,567 KB | **2.7 MB** | 12486 | 浏览器终端，与 Grafana 运维窗口功能重叠 |
+| `grafana/loki` | 563,797 KB | — | 29005 | 日志聚合；本项目日志量（结构化 stdout）远未到需要 Loki |
+| `bloomberg/memray` | 33,165 KB | — | 15372 | 离线内存分析，与 py-spy 定位不同层，压测期先要 CPU 火焰图 |
+| `git.macports/…` 等零散仓库 | — | — | — | 未列入 |
+
+**唯一进 `external/` 的「大件」是 `AgentVerse`（31 MB）**，
+理由（判断）：spec 里 06 阶段是「联调压测」，但**没有一个模块承担「多机器人任务级仿真」**。
+AgentVerse 提供 task-solving + simulation 两套框架，是把它补上的现成起点。
+**未验证**：它是否真能驱动 100 台并发 agent（其 README 明确是 LLM 多 agent 框架，不是物理仿真）。

@@ -15,6 +15,13 @@ services:
       - "18083:18083"    # Dashboard
     environment:
       EMQX_LOG__LEVEL: warning
+      # Prometheus 拉取端点显式开启（EMQX 5 默认即为 true，此处显式声明便于审计）。
+      # 端点实证：external/emqx-prometheus-sparse/apps/emqx_prometheus/src/emqx_prometheus_api.erl:63
+      #   "/prometheus/stats" => ?SCOPE_MONITORING
+      # 注意：这是**内置**能力，不需要 emqx-exporter；exporter 只补它没覆盖的指标。
+      # 该端点无需 API Key（scope 注册表见同文件 :60-67，/prometheus/stats 属 MONITORING 读接口），
+      # Prometheus 直接抓 /api/v5/prometheus/stats 即可 —— 见 ops/prometheus/prometheus.yml ①。
+      EMQX_PROMETHEUS__ENABLE: "true"
     healthcheck:
       # 与官方示例保持一致（external/mqtt-to-timescaledb 使用 emqx ping）
       test: ["CMD", "emqx", "ping"]
@@ -51,5 +58,117 @@ services:
       timeout: 5s
       retries: 5
 
+
+  # ============================================================
+  # 运维/可观测性层（sources: external/prometheus, external/emqx-exporter,
+  #                       external/blackbox_exporter, external/postgres_exporter,
+  #                       external/redis_exporter）
+  #
+  # 为什么必需：看板只能回答「我现在看到什么」。压测跑完谁都不知道
+  #   - 峰值到底打在哪一层（EMQX 连接数 / 队列 / PG 写入 / Redis RTT）
+  #   - 1000 msg/s 是 broker 先扛不住还是后端先扛不住
+  #   - 过去 10 分钟到底掉了几条（/healthz 只是一个瞬时 JSON，没有历史）
+  # 这一层就是把这个空白补上。全部为**可选叠加**，不改变 robot-monitor 的既有启动方式。
+  # ============================================================
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: robot-monitor-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+      # 校验入口实证：external/prometheus/docs/command-line/promtool.md:91
+      #   `promtool check config`（本仓库未跑，见 PR「未验证」章节）
+    depends_on:
+      - emqx
+    profiles: ["ops"]
+
+  emqx-exporter:
+    # 端口 8085 实证：external/emqx-exporter/README.md
+    #   "The emqx-exporter listens on HTTP port 8085 by default."
+    # tag 0.2.3 来自官方示例：external/emqx-exporter/examples/docker-compose/docker-compose.yml
+    image: emqx/emqx-exporter:0.2.3
+    container_name: robot-monitor-emqx-exporter
+    ports:
+      - "8085:8085"
+    environment:
+      # 刻意保留示例里的占位值形态（不是生产凭据，也不是秘密）：
+      # 见 external/emqx-exporter/examples/docker-compose/bootstrap-api
+      # 正式部署换成 EMQX Dashboard → System → API Keys 生成的真实值，走 .env。
+      EMQX_EXPORTER_API_KEY: ${EMQX_EXPORTER_API_KEY:-replace-me}
+      EMQX_EXPORTER_API_SECRET: ${EMQX_EXPORTER_API_SECRET:-replace-me}
+    volumes:
+      - ./ops/emqx-exporter/emqx-exporter.config.yaml:/usr/local/emqx-exporter/bin/config.yaml:ro
+    depends_on:
+      emqx:
+        condition: service_healthy
+    profiles: ["ops"]
+
+  blackbox-exporter:
+    # /probe?target=&module= 与 9115 端口实证：external/blackbox_exporter/README.md
+    image: prom/blackbox-exporter:v0.26.0
+    container_name: robot-monitor-blackbox-exporter
+    ports:
+      - "9115:9115"
+    volumes:
+      - ./ops/blackbox/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+    profiles: ["ops"]
+
+  postgres-exporter:
+    # 用途：把「批量落库是否真的在写」变成可观测的时间序列（/healthz 只有瞬时值）。
+    # DATA_SOURCE_NAME 语义实证：external/postgres_exporter/README.md:252,316-325
+    image: prometheuscommunity/postgres-exporter:v0.17.0
+    container_name: robot-monitor-postgres-exporter
+    ports:
+      - "9187:9187"
+    environment:
+      DATA_SOURCE_NAME: "postgresql://postgres:postgres@timescaledb:5432/robot_monitor?sslmode=disable"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    profiles: ["ops"]
+
+  redis-exporter:
+    # 端口 9121 实证：external/redis_exporter/README.md:292  "-p 9121:9121"
+    image: oliver006/redis_exporter:v1.67.0
+    container_name: robot-monitor-redis-exporter
+    ports:
+      - "9121:9121"
+    environment:
+      REDIS_ADDR: "redis://redis:6379"
+    depends_on:
+      - redis
+    profiles: ["ops"]
+
+  grafana:
+    # ⚠️ License 提醒：grafana/grafana 与 grafana/loki 为 **AGPL-3.0**。
+    #   本仓库 MIT（LICENSE）下「调用」它没问题，但若将来对外提供修改版 Grafana 服务，
+    #   需承担 AGPL 的源码开放义务。已记录在 external/SOURCES.md。
+    image: grafana/grafana:11.5.0
+    container_name: robot-monitor-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      # 默认口令只用于本地开发；生产必须从 .env 覆盖（AGENTS.md §5：不在代码里硬编码生产凭据）
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      # 供给目录结构实证：external/grafana-provisioning-ref/docker-compose.yml:40-43
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    profiles: ["ops"]
+
 volumes:
   tsdb-data:
+  prom-data:
+  grafana-data:

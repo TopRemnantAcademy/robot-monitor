@@ -1,0 +1,16 @@
+# Grafana 看板自动供给
+# 来源：external/emqx-exporter/examples/docker-compose/grafana-dashboard.yaml 的 provider 写法
+#   + external/prometheus/docs（provider 目录挂载语义）
+apiVersion: 1
+
+providers:
+  - name: 'RobotMonitor'
+    orgId: 1
+    folder: 'RobotMonitor'
+    folderUid: 'robot-monitor'
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
