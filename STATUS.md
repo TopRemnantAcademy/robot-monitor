@@ -1,7 +1,9 @@
 # STATUS — RobotMonitor 主计划与状态看板
 
-> 最后更新：2026-10-10（本轮整顿）。派单方法见 `docs/CNB-DISPATCH-SOP.md`。
+> 最后更新：**2026-10-11（批量回收 12 个分支后重写实况表）**。
+> 派单方法见 `docs/CNB-DISPATCH-SOP.md`（**§6.5 批量回收纪律**为本轮新增）。
 > 上游开源源套用计划见 `external/INTEGRATION-PLAN.md`。
+> 用真实源码复核三条审计结论的报告见 `external/ORDER12-VERIFICATION.md`。
 
 ---
 
@@ -23,12 +25,21 @@
 | 03 后端采集 | ✅ 完成 | `backend_ingestion/`，静态校验 13/13 |
 | 04 告警引擎 | ✅ 完成 | `alert_engine/`，规则逻辑 **20/20** 实测 |
 | 05 前端大屏 | ✅ **已完成并合入 main** | 34 文件/6696 行；`tsc --noEmit` **0 错误**、`vite build` **成功**（638 modules） |
-| 09 数据库对接加固 | ✅ **本轮完成（PR 待审）** | 真 TimescaleDB 2.13.1 实测：`init.sql` 全程无错、30,000 行落库无损、连续聚合 3,100 桶、DB 用例 **13/13**。见 `docs/requirements/R-09-database-integration.md` |
-| 06 联调压测 | ⏳ **CNB 执行中** | issue #6 / `cnb-q81-1k4hgt1ee` |
-| 07 aiomqtt 契约（I-1/I-2/I-3） | ⏳ **CNB 执行中** | issue #8 / `cnb-s51-1k4hhvjem` |
-| 08 asyncpg 升级（I-6） | ⏳ **CNB 执行中** | issue #9 / `cnb-ijj-1k4himq2k` |
+| 09 数据库对接加固 | ✅ **已合入 main** | 真 TimescaleDB 2.13.1 实测：`init.sql` 全程无错、30,000 行落库无损、连续聚合 3,100 桶、DB 用例 **13/13**。含**三级写入降级链**（L1 COPY→临时表→`ON CONFLICT` / L2 `executemany` / L3 二分隔离坏行）与 **JSONB 类型修正**。见 `docs/requirements/R-09-database-integration.md` |
+| 06 联调压测 | ✅ **已回收** | 证据落 `reports/evidence/`（perf 数据 + 3 次实跑日志）；`test_integration.sh` 已加固超时守卫 |
+| 07 aiomqtt 契约（I-1/I-2/I-3） | ✅ **已回收验证** | `aiomqtt==2.5.1`、`_STOP` 哨兵 + `_drained` 事件就位 |
+| 08 asyncpg 升级（I-6） | ✅ **已落地** | `asyncpg 0.29.0 → 0.32.0`；实测 `create_pool()` 同时接受 `init_size` 与 `min_size`（语义护栏见 `app/db/pool.py`） |
+| 10 告警抑制 inhibition | ✅ **已回收验证** | `alert_engine/tests/` **11/11 passed** |
+| 前端 bundle 瘦身 | ✅ **已回收验证** | 1209.34 → **671.40 kB**（gzip 401.05 → **224.90 kB**，−44%） |
+| 前端告警行增量渲染 | ✅ **已合入** | `AlertLogTable.tsx` / `FleetOverviewCards.tsx` memo 化；`tsc` 0 错误 |
+| 可观测性（Prometheus/Grafana） | ⚠️ **配置已就位，接线未完成** | `infra/observability/**`、`infra/ops/grafana/**`（9 个看板）已合入；但两服务 `main.py` 的 `grep metrics` **均为空** → 订单 13 处理 |
+| 13 可观测性接线 + 6 分支收敛 | ⏳ **CNB 执行中** | issue **#33** / `cnb-f0b-1k4j8osuu`，基线 `main@772efca`，workMode=true 已核验 |
 
-本地 HEAD = CNB `main` = `7426baf`（已推送同步）。
+本地 HEAD = CNB `main` = **`dbf7f0f`**（已推送同步）。
+
+> **注意**：远端一度累积 19 个分支。本轮回收 **12 个**，其中
+> **拒取 3 处**（会回退既有成果，见 `docs/CNB-DISPATCH-SOP.md` §6.5 台账），
+> 剩余 3 个纯文档分支的并集合并移交订单 13。
 
 ---
 
