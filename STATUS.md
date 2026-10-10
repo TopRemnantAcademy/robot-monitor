@@ -58,8 +58,22 @@
 |---|---|---|---|
 | C1 | 前端 bundle 优化（ECharts 按需引入） | 中 | 当前 1.21 MB / gzip 401 KB；按需引入可降至 ~400 KB 量级 |
 | C2 | 告警抑制（inhibition） | 中 | `INTEGRATION-PLAN.md` I-5：离线(severity 3) 时不应同时报低电量(severity 2) |
-| C3 | Prometheus 指标接入 | 低 | `client_python` 已下载；`emqtt-bench` 自带 `--prometheus` |
+| C3 | Prometheus 指标接入（后端 `/metrics`） | 中 | 运维层已铺好（PR #26）；`client_python` 已下载。**缺口 G-1/G-2 的收口动作** |
 | C4 | GitHub 同步 | 低 | 目前只推了 CNB，**`origin` 尚未同步** |
+
+### 阶段 D：非功能面缺口（PR #26 已铺路，待逐个收口）
+
+> 完整论证与 file:line 见 `external/INTEGRATION-PLAN.md` §7 与 PR #26。
+
+| 序 | 缺口 | 现状 | 收口动作 |
+|---|---|---|---|
+| G-1 | 全仓无 `/metrics` | 仅 `/healthz` 裸 JSON（`backend_ingestion/app/main.py:66-75`）；`alert_engine` 连 HTTP 都没有 | 引入 `prometheus/client_python` 挂 `/metrics` |
+| G-2 | 1000 msg/s 无历史曲线 | `/healthz` 全是瞬时值 | 同上，改成 Counter/Gauge |
+| G-3 | 「看板假的绿」无人识别 | 无客户端视角探针 | 已铺 `mqtt-probe`；待补 WS 合成探针 |
+| G-4 | 告警落库失败静默 | `alert_engine/app/store.py:53` 只 `log.exception` | 用 postgres_exporter 指标 + Prometheus 规则 |
+| G-5 | 零备份（≈8.64M 行/天） | `infra/ops/pgbackrest/` 只有配置契约 | 换带 pgbackrest 的镜像或起边车 |
+| G-6 | `robot_metadata` 的 `last_seen`/`is_online` 从没人写 | `infra/init.sql:39-40` 建了列 | 与 `offline` 规则耦合，单独一单 |
+| G-7 | 无多机器人任务级仿真 | `mock_fleet.py` 只产波形 | `AgentVerse` 已下载（未验证能否驱动 100 agent） |
 
 ---
 
