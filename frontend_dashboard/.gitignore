@@ -2,6 +2,7 @@ node_modules/
 dist/
 .e2e/bundle.cjs
 .e2e/drawer.cjs
+.e2e/alert.cjs
 *.log
 
 # 本地环境变量（.env.example 是模板，必须入库）

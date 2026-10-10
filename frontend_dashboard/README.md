@@ -96,7 +96,24 @@ src/
 
 store 初值即 100 台离线占位（`src/store/robotStore.ts:65`），WS 未连上首屏也有 100 张卡。
 
-### 5. 温度/电量色阶
+### 5. 告警流增量渲染（无常的告警不该驱动整表重排）
+
+`AlertLogTable` 的行拆为 `memo(AlertRow)`：新告警进来只有**新增那一行**挂载，
+已有行 props 未变 → memo 命中 → 不重建。
+
+关键前提是 `key` 只能用告警自身的稳定字段（`ts-robot_id-rule_id`），
+**不能带 `idx`** —— prepend 语义下 idx 整体平移会让所有 key 变化，memo 全部失效。
+实测（`node .e2e/run_alert_rows.mjs`）：push 5 条新告警
+
+| 实现 | 新增 DOM 行节点数 |
+| :--- | ---: |
+| 带 idx 的 key | 215 |
+| 稳定 key + memo（当前） | **5** |
+
+`ALERT_RENDER_LIMIT = 60` 控制表格实际渲染条数，与 store 的
+`ALERT_BUFFER_LIMIT = 200`（供「累计」计数）职责不同。
+
+### 6. 温度/电量色阶
 
 `<50` 绿 / `50~70` 黄 / `>70` 红（`src/theme/tokens.ts:47`）；电量 `>50` 绿 / `15~50` 黄 / `<15` 红
 （`src/theme/tokens.ts:55`）。
@@ -108,5 +125,12 @@ npm run build                      # RC=0
 node .e2e/run.mjs                  # WS 洪流 + 三分支 + prepend（真实 hook/store + 假 WS 服务端）
 node .e2e/run_reconnect.mjs        # 指数退避重连
 node .e2e/run_drawer.mjs           # REST history → ECharts（假后端）
-node .e2e/run_offline.mjs          # 无数据时 100 张离线占位卡
+node .e2e/run_alert_rows.mjs       # 告警行增量渲染（memo 生效，不整表重建）
+node .e2e/run_offline.mjs          # 无数据时 100 张离线占位卡（需先 `npm run preview`）
+```
+
+一键全跑（含自动起 preview 服务）：
+
+```bash
+bash .e2e/run_all.sh               # 6/6
 ```

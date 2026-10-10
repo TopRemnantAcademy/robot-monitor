@@ -12,6 +12,7 @@ const define = {
 
 const targets = [
   { entry: '.e2e/entry.tsx', out: '.e2e/bundle.cjs', external: [] },
+  { entry: '.e2e/entry_alert.tsx', out: '.e2e/alert.cjs', external: [] },
   { entry: '.e2e/entry_drawer.tsx', out: '.e2e/drawer.cjs',
     // 订单 09：产品改用 echarts-for-react 的 core 入口，需一并 external：
     //   1) 避免 CJS default 互操作把 module object 当成组件传给 React；
