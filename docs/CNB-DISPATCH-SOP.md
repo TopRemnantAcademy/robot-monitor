@@ -201,9 +201,16 @@ git -c http.extraHeader="Authorization: Bearer ${TOKEN}" push cnb main
 | 06 联调压测 | #6 | `cnb-q81-1k4hgt1ee` | ⏳ pending | 收口单 |
 | 07 aiomqtt 契约（I-1/I-2/I-3） | #8 | `cnb-s51-1k4hhvjem` | ⏳ pending | 另有一个重复构建已 stop |
 | 08 asyncpg 升级（I-6） | #9 | `cnb-ijj-1k4himq2k` | ⏳ pending | 与 07 同改 `requirements.txt`，已注明冲突处理 |
+| 09 前端 bundle 瘦身 | #10 | `cnb-ua1-1k4hj5d3h` | ⏳ pending | 已补发 echarts 引用范围实证，省其调研 |
 
-> 注意 Issue 号与订单号**不对齐**：#6=订单06，但 **#8=订单07、#9=订单08**
-> （#7 被其他 issue 占用）。派单后务必记录实际号。
+> ⚠️ **Issue 号与订单号不对齐**：#6=订单06，但 **#8=订单07、#9=订单08、#10=订单09**
+> （#7 被其他 issue 占用）。**派单后务必记录实际号**，后续回收分支靠它。
+
+### 追加情报的正确姿势
+
+已派单后又发现关键事实，可**追加评论**补充 —— 但正文**不得含 `@codebuddy`**，
+否则会再触发一次构建。实测：订单 09 派单后追加了一条 echarts 引用范围的情报
+（不含触发词），构建数保持 1 个。
 
 ---
 
