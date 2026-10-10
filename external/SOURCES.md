@@ -99,6 +99,54 @@ $ curl https://hub.docker.com/v2/repositories/emqx/emqx/tags/5.6
 
 ---
 
+---
+
+## 4. 第三批：补齐数据层与前端桥接的遗漏（2026-10-10 全量复扫）
+
+复扫发现**核心数据层依赖此前完全没有参考源** —— `asyncpg` 是批量落库的命脉。
+
+| 需求点 | 仓库 | 体积 | stars | 套用结论 |
+|---|---|---|---|---|
+| **异步 PG 驱动** | `MagicStack/asyncpg` | 2.0 MB | 8105 | **I-6 必升 0.29.0 → 0.30+**，见下 |
+| 前端图表桥接 | `hustcc/echarts-for-react` | 292 KB | 5005 | 直接依赖核对 |
+| WS 底层实现 | `Kludex/starlette` | 7.0 MB | 12654 | WebSocket 契约核对 |
+| DB 迁移 | `sqlalchemy/alembic` | 4.1 MB | 4438 | 未来迁移方案评估 |
+| MQTT 底层客户端 | `eclipse-paho/paho.mqtt.python` | 1.3 MB | 2429 | aiomqtt 的下层依赖 |
+
+### ⭐ 关键发现：`asyncpg` 0.29.0 是「本机无法验证」的**根因**，不是环境限制
+
+| 版本 | 发布日 | Python 支持 |
+|---|---|---|
+| `v0.29.0`（我们锁的） | 2023-11-05 | `requires-python = '>=3.8.0'`，**无 3.13 classifier** |
+| `v0.30.0` | 2024-10-20 | **"Support Python 3.13 and PostgreSQL 17"** |
+| `v0.31.0` | 2025-11-24 | + Python 3.14 |
+| `v0.32.0`（最新） | 2026-10-06 | + Python 3.15 |
+
+HEAD 版 `pyproject.toml` classifiers 实证列出 `3.9/3.10/3.11/3.12/3.13/3.14`。
+
+此前把「`asyncpg==0.29.0` 在 Python 3.13 编译失败（`_PyLong_AsByteArray` 签名变更）」
+归为**环境错误**，实为**版本过旧**。升 0.30+ 后该阻塞消失。
+
+### ⭐ 附带发现：PyPI 403 可用镜像源绕过
+
+本机 `files.pythonhosted.org` 返回 403，但**清华镜像源可用**：
+
+```bash
+pip install -i https://pypi.tuna.tsinghua.edu.cn/simple asyncpg
+# 实测：Python 3.13.14 + asyncpg 0.32.0 安装成功并可 import，耗时 29s（有 wheel）
+```
+
+这意味着此前标注「未验证（本机无法运行）」的后端项，**现在可以真实运行验证了**。
+
+### 第三批中不下的
+
+| 仓库 | 体积 | 理由 |
+|---|---|---|
+| `puppeteer/puppeteer` | **1533 MB** | 体量致命；已由 npm 引入（`frontend_dashboard/node_modules`） |
+| `redis/redis` | 212 MB | 我们只用客户端；`redis-py` 已覆盖需求 |
+
+---
+
 ## 复现命令
 
 ```bash
@@ -113,7 +161,14 @@ git clone --depth 1 https://github.com/fastapi/full-stack-fastapi-template.git
 git clone --depth 1 https://github.com/prometheus/client_python.git
 git clone --depth 1 --filter=blob:none --sparse https://github.com/prometheus/alertmanager.git
 cd alertmanager && git sparse-checkout set docs && cd ..
+git clone --depth 1 https://github.com/MagicStack/asyncpg.git
+git clone --depth 1 https://github.com/hustcc/echarts-for-react.git
+git clone --depth 1 https://github.com/Kludex/starlette.git
+git clone --depth 1 https://github.com/sqlalchemy/alembic.git
+git clone --depth 1 https://github.com/eclipse-paho/paho.mqtt.python.git
 ```
+
+> 另注：`encode/uvicorn` 仓库已迁至 **`Kludex/uvicorn`**（实证：API 返回 `Kludex/uvicorn`）。
 
 ---
 

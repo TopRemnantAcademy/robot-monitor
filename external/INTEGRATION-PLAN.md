@@ -18,6 +18,11 @@
 | 7 | 异步 Redis 用法 | `redis/redis-py` | 18 MB | 版本核对 |
 | 8 | 前端状态管理 | `pmndrs/zustand` | 3.6 MB | 版本核对 |
 | 9 | 全栈工程结构 | `fastapi/full-stack-fastapi-template` | 3.5 MB | 结构对照 |
+| 10 | **异步 PG 驱动（批量落库命脉）** | `MagicStack/asyncpg` | 2.0 MB | 版本核对 → **I-6 必升** |
+| 11 | 前端图表桥接 | `hustcc/echarts-for-react` | 292 KB | 直接依赖核对 |
+| 12 | WS 底层实现 | `Kludex/starlette` | 7.0 MB | WebSocket 契约核对 |
+| 13 | DB 迁移 | `sqlalchemy/alembic` | 4.1 MB | 未来迁移方案评估 |
+| 14 | MQTT 底层客户端 | `eclipse-paho/paho.mqtt.python` | 1.3 MB | aiomqtt 的下层依赖 |
 
 **明确不下**（附理由，避免重复搜索）：
 
@@ -46,6 +51,31 @@
 ---
 
 ## 2. 待执行的套用项（按优先级）
+
+### I-6 🔴🔴 升级 `asyncpg` 0.29.0 → 0.30+（**解锁本机验证，最高优先**）
+
+- **套用点**：`backend_ingestion/requirements.txt`（当前 `asyncpg==0.29.0`）
+- **源**：`external/asyncpg` + 官方 release notes
+- **实证**：
+
+  | 版本 | 发布日 | Python 支持 |
+  |---|---|---|
+  | `v0.29.0`（**我们锁的**） | 2023-11-05 | `requires-python = '>=3.8.0'`，**无 3.13 classifier** |
+  | `v0.30.0` | 2024-10-20 | **"Support Python 3.13 and PostgreSQL 17"** |
+  | `v0.31.0` | 2025-11-24 | + Python 3.14（实验性 subinterpreter / freethreading） |
+  | `v0.32.0`（最新） | 2026-10-06 | + Python 3.15 |
+
+  HEAD 版 `pyproject.toml` classifiers 实证列出 `3.9 / 3.10 / 3.11 / 3.12 / 3.13 / 3.14`。
+
+- **为什么这是最高优先级**：
+  此前记录的环境阻塞 —— *「`asyncpg==0.29.0` 在 Python 3.13 上编译失败
+  （`_PyLong_AsByteArray` 签名变更）」* —— **根因不是环境，是我们锁的版本太旧**。
+  升到 0.30+ 后 Python 3.13 是官方支持目标，该阻塞**消失**。
+  这意味着后端可以在本机真实跑起来，而不是永远停留在「未验证」。
+- **连带影响**：部署镜像锁 `python:3.11-slim`（有预编译 wheel），生产侧不受影响；
+  升级是为了**开发/验证侧**可运行，顺带对齐 PostgreSQL 17。
+- **风险**：低。0.29 → 0.32 为 minor 升级，`connect()` / `fetch()` / `executemany()` API 稳定。
+  `COPY` 相关 API 若有使用需在 Docker 内回归一次。
 
 ### I-1 🔴 升级 `aiomqtt` 2.0.1 → 2.5.1
 
@@ -201,6 +231,33 @@ cd alertmanager && git sparse-checkout set docs && cd ..
 | aiomqtt `Client(hostname=,port=)` 签名 | ✅ 实测（v2.5.1 源码） |
 | aiomqtt 2.5.0 `__aexit__` 修复 | ✅ 实测（CHANGELOG） |
 | 官方 `Client` reusable 表述 | ✅ 实测（reconnection.md） |
+| asyncpg 0.30+ 支持 Python 3.13 | ✅ 实测（release notes + `pyproject.toml` classifiers） |
 | 各仓库 stars/size | ✅ 实测（GitHub API） |
-| I-2/I-3 的运行时影响 | ⚠️ **未验证** —— 本机 PyPI 403，`asyncpg` 在 Python 3.13 无法编译，只能在 Docker 内验证 |
-| I-1 升级后行为 | ⚠️ **未验证** —— 同上，需在 Docker（python:3.11-slim）内跑 |
+
+### ⭐ 2026-10-10 追加实测：本机验证通道已打通
+
+此前两项标为「未验证」的阻塞**已解除**：
+
+1. **PyPI 403 可用镜像源绕过** —— `pip install -i https://pypi.tuna.tsinghua.edu.cn/simple`
+2. **asyncpg 在 Python 3.13 装不上是版本问题** —— 换 0.32.0 后 29 秒装完
+
+实测结果（Python **3.13.14** + 隔离 venv）：
+
+```
+aiomqtt==2.5.1   asyncpg==0.32.0   fastapi==0.143.0   redis==8.1.0   pydantic==2.14.0
+
+[1] schemas.telemetry OK, joints = 24
+[2] app.main import OK
+[3] aiomqtt 2.5.1
+[4] Client params: ['self', 'hostname', 'port', 'username']
+```
+
+**结论**：
+- I-1（升 aiomqtt 2.5.1）**已验证安全** —— 我们的 `Client(hostname=..., port=...)`
+  在 2.5.1 下签名一致，`app.main` 正常导入
+- 后端模块在**最新依赖组合**下可导入，不存在隐藏的导入期不兼容
+
+| 剩余未验证 | 原因 |
+|---|---|
+| I-2 / I-3 的**运行时**行为 | 需真实 MQTT broker + TimescaleDB（Docker），导入期已验证 |
+| 端到端 30,000 行 | 同上，属订单 06 范围（CNB 执行中） |
