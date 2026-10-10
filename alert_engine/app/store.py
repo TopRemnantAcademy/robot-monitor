@@ -16,9 +16,12 @@ from app.rules.base import Alert
 
 log = logging.getLogger("store")
 
+# RETURNING alert_id：WS 告警信封必须带上 alert_id，前端的「确认」按钮
+# 才能寻址到具体一条（订单 17）。此前不返回 id，前端拿不到寻址键。
 INSERT_SQL = """
 INSERT INTO robot_alert (time, robot_id, rule_id, severity, message, detail)
 VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+RETURNING alert_id
 """
 
 
@@ -31,7 +34,7 @@ async def save(alert: Alert) -> None:
         # 后者在连接处于异常状态（如网络中断）时可能被放回池中复用，导致后续写入连环失败。
         # 告警是低基数事件（去重后 60~120s 一条/机器人），这里多一层 acquire 无性能代价。
         async with pool.acquire() as conn:
-            await conn.execute(
+            alert_id = await conn.fetchval(
                 INSERT_SQL,
                 datetime.now(timezone.utc),
                 alert.robot_id,
@@ -42,9 +45,14 @@ async def save(alert: Alert) -> None:
             )
     except Exception:
         log.exception("alert insert failed: %s/%s", alert.robot_id, alert.rule_id)
+        alert_id = None
 
     try:
         r = await get_redis()
+        # 信封结构不变（禁止项 3）：仍是扁平 JSON，仍是 type:"alert" 的 data。
+        # 新增两个**数据字段**（不新增信封类型）：
+        #   alert_id —— 前端 ack/unack 的寻址键；
+        #   escalated —— 初发恒为 false，前端据此统一渲染字段（避免 undefined 分支）。
         await r.publish(settings.chan_alerts, json.dumps({
             "robot_id": alert.robot_id,
             "rule_id": alert.rule_id,
@@ -52,6 +60,8 @@ async def save(alert: Alert) -> None:
             "message": alert.message,
             "detail": alert.detail,
             "ts": int(time.time() * 1000),
+            "alert_id": alert_id,
+            "escalated": False,
         }, separators=(",", ":")))
     except Exception:
         log.exception("alert publish failed: %s/%s", alert.robot_id, alert.rule_id)

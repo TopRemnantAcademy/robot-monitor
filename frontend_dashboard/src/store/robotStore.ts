@@ -55,6 +55,14 @@ interface RobotState {
   applyTelemetryBatch: (list: RobotTelemetry[]) => void;
   /** alert：prepend 到告警流（spec/00 §5.2 ③） */
   pushAlert: (alert: RobotAlert) => void;
+  /**
+   * 确认/撤回后被调（订单 17）：把某条告警的 ack 状态就地更新。
+   *
+   * 为什么按 alert_id 而非索引：告警流是 prepend 的，索引随时间漂移；
+   * alert_id 是稳定主键。找不到（WS 与 REST 视图不同步时）就静默跳过 ——
+   * UI 的权威来源是下一次 REST 拉取，这里只是让"刚点的那个按钮"立刻变灰。
+   */
+  applyAlertAck: (alertId: number, patch: Partial<RobotAlert>) => void;
   setWsStatus: (status: 'connecting' | 'open' | 'closed') => void;
   selectRobot: (robotId: string | null) => void;
 }
@@ -93,6 +101,19 @@ export const useRobotStore = create<RobotState>((set) => ({
 
   pushAlert: (alert) =>
     set((state) => ({ alerts: [alert, ...state.alerts].slice(0, ALERT_BUFFER_LIMIT) })),
+
+  applyAlertAck: (alertId, patch) =>
+    set((state) => {
+      // 只有内容真的变了才换数组引用：否则每次点击都会让整张告警表重渲染，
+      // 违背 R-01 §6「其余 UI 应静」的性能护栏。
+      let hit = false;
+      const next = state.alerts.map((a) => {
+        if (a.alert_id !== alertId) return a;
+        hit = true;
+        return { ...a, ...patch };
+      });
+      return hit ? { alerts: next } : state;
+    }),
 
   setWsStatus: (wsStatus) => set({ wsStatus }),
 

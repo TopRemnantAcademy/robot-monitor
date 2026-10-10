@@ -38,6 +38,54 @@ export interface RobotAlert {
   severity: number;
   message: string;
   ts: number;
+  /**
+   * 告警主键（订单 17）。WS 初发信封由 alert_engine/app/store.py 的
+   * `INSERT ... RETURNING alert_id` 带回；DB 故障时后端会发 null，
+   * 此时本条告警无法寻址（确认按钮应禁用）。
+   */
+  alert_id?: number | null;
+  /** 是否已升级重发（订单 17）：true 时前端显著色 + 「⚠ 已升级」。 */
+  escalated?: boolean;
+  /** 是否已确认（订单 17）：来自 GET /alerts 或本地 ack 后的乐观更新。 */
+  ack?: boolean;
+  ack_at?: string | null;
+  ack_by?: string | null;
+}
+
+/** 告警筛选（订单 17 T4）：全部 / 未确认 / 已升级。 */
+export type AlertFilter = 'all' | 'unacked' | 'escalated';
+
+/** `GET /alerts` 单条（与后端 app/alerts/schemas.py:AlertItem 逐字段对齐）。 */
+export interface AlertApiItem {
+  alert_id: number;
+  time: string;
+  robot_id: string;
+  rule_id: string;
+  severity: number;
+  message: string;
+  detail: Record<string, unknown> | null;
+  ack: boolean;
+  ack_at: string | null;
+  ack_by: string | null;
+  escalated: boolean;
+}
+
+/** `GET /alerts` 分页响应（app/alerts/schemas.py:AlertPage）。 */
+export interface AlertPage {
+  items: AlertApiItem[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/** `POST /alerts/{id}/ack|unack` 响应（app/alerts/schemas.py:AckResult）。 */
+export interface AckResult {
+  alert_id: number;
+  ack: boolean;
+  ack_at: string | null;
+  ack_by: string | null;
+  /** false = 幂等命中（已是目标状态），不是错误。 */
+  changed: boolean;
 }
 
 /** GET /robots/{id}/history 单点（spec/00 §5.3） */

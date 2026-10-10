@@ -68,7 +68,8 @@ class RobotAlert(Base):
       去重窗口，同一 (time, robot_id) 可合法对应多条不同规则告警。
     - 因此**不再需要**映射级 `__mapper_args__` 权宜之计：ORM 身份与 DDL 同源，
       `metadata.create_all()` 不会与 init.sql 漂移。
-    - ack_at / ack_by 本轮仅建字段；ack 接口属订单 17（告警闭环）范围。
+    - ack_at / ack_by 由订单 19 建字段、订单 17 接 ack/unack 端点；
+      escalated 由订单 17 新增（severity=3 超时未确认的升级标记）。
     """
 
     __tablename__ = "robot_alert"
@@ -83,6 +84,8 @@ class RobotAlert(Base):
     ack: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     ack_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     ack_by: Mapped[str | None] = mapped_column(Text)
+    # 订单 17：severity=3 且超时未 ack → TRUE。索引 idx_alert_escalation（init.sql:206）。
+    escalated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     # 显式声明 PK 列顺序 (time, alert_id)，与 init.sql 逐字一致。
     # 必要性（已实测）：SQLAlchemy 生成复合 PK 时会把 BIGSERIAL 列排到最前，
