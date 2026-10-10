@@ -14,6 +14,8 @@ import { useRobotStore } from '../store/robotStore';
 import { getToken } from '../auth/session';
 import { useAuthStore } from '../auth/authStore';
 import type { RobotAlert, RobotTelemetry, WsEnvelope } from '../types/robot';
+// 订单 18 T4：WS 信封的开发模式校验（生产不校验，见 wsEnvelope.ts 的性能说明）
+import { checkEnvelope, initWsValidator } from '../lib/wsEnvelope';
 
 /** 节流刷库间隔：100ms = 10Hz（spec/03 §6） */
 export const FLUSH_INTERVAL_MS = 100;
@@ -100,14 +102,26 @@ export function useRobotWebSocket(): void {
       }
     };
 
+    // 开发模式：先把 ajv 校验器预热好（动态 import，生产分支不会执行）。
+    void initWsValidator();
+
     const handleEnvelope = (raw: string) => {
       let envelope: WsEnvelope;
+      let parsed: unknown;
       try {
-        envelope = JSON.parse(raw) as WsEnvelope;
+        parsed = JSON.parse(raw);
       } catch {
         // 非法 JSON 直接丢弃，不污染状态树
         return;
       }
+      // 开发模式契约校验：**只警告不丢弃** —— 丢弃会让开发期页面白屏，
+      // 而"契约漂移"这件事应该是看得见的告警，不该伪装成"没收到数据"。
+      // checkEnvelope 在生产模式恒返回 {ok:true} 且零开销（见 wsEnvelope.ts）。
+      const check = checkEnvelope(parsed);
+      if (!check.ok) {
+        console.error('[ws-contract] 信封不符合 docs/contracts/ws-envelope.schema.json:', check.errors);
+      }
+      envelope = parsed as WsEnvelope;
       if (!envelope || typeof envelope !== 'object' || !('type' in envelope)) return;
 
       switch (envelope.type) {

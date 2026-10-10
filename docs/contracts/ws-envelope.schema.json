@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://robotmonitor.local/contracts/ws-envelope.schema.json",
+  "title": "RobotMonitor WS envelope",
+  "description": "ws://{host}:8000/ws/robots 出站信封（spec/00 §5.2）。OpenAPI 不描述 WebSocket，故单独成文：本文件是 WS 契约的机器可读事实来源，前端 src/lib/wsEnvelope.ts 在开发模式下用 ajv 校验它（生产不校验）。三条分支的判定顺序与 backend_ingestion/app/main.py 的 ws_robots() 出站顺序一致：① snapshot（首帧）② telemetry ③ alert。",
+  "oneOf": [
+    { "$ref": "#/$defs/SnapshotEnvelope" },
+    { "$ref": "#/$defs/TelemetryEnvelope" },
+    { "$ref": "#/$defs/AlertEnvelope" }
+  ],
+  "$defs": {
+    "JointDict": {
+      "type": "object",
+      "description": "关节名 → 数值。键名为 spec/00 §5.5 的 24 个标准键。",
+      "minProperties": 1,
+      "additionalProperties": { "type": "number" }
+    },
+    "RobotTelemetry": {
+      "type": "object",
+      "description": "与后端 /openapi.json 的 RobotTelemetryOut 逐字段一致（joint_positions 必须在内，见 STATUS.md §六第 2 条事故）。",
+      "required": [
+        "robot_id",
+        "status_code",
+        "battery_pct",
+        "max_joint_temp",
+        "joint_temperatures",
+        "joint_positions",
+        "joint_torques",
+        "error_code",
+        "ts"
+      ],
+      "properties": {
+        "robot_id": { "type": "string", "pattern": "^humanoid-[0-9]{3}$" },
+        "status_code": { "type": "integer", "enum": [0, 1, 2, 3] },
+        "error_code": { "type": "integer" },
+        "battery_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+        "max_joint_temp": { "type": "number" },
+        "joint_temperatures": { "$ref": "#/$defs/JointDict" },
+        "joint_positions": { "$ref": "#/$defs/JointDict" },
+        "joint_torques": { "$ref": "#/$defs/JointDict" },
+        "ts": { "type": "integer" }
+      }
+    },
+    "RobotAlert": {
+      "type": "object",
+      "description": "告警（spec/00 §5.2 ③），经 Redis robot:alerts 转发。",
+      "required": ["robot_id", "rule_id", "severity", "message", "ts"],
+      "properties": {
+        "robot_id": { "type": "string" },
+        "rule_id": { "type": "string" },
+        "severity": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "message": { "type": "string" },
+        "ts": { "type": "integer" }
+      }
+    },
+    "SnapshotEnvelope": {
+      "type": "object",
+      "description": "① 首帧：100 台全量快照。",
+      "required": ["type", "data"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "snapshot" },
+        "data": {
+          "type": "object",
+          "required": ["robots"],
+          "additionalProperties": false,
+          "properties": {
+            "robots": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/RobotTelemetry" }
+            }
+          }
+        }
+      }
+    },
+    "TelemetryEnvelope": {
+      "type": "object",
+      "description": "② 增量遥测：单台。",
+      "required": ["type", "data"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "telemetry" },
+        "data": { "$ref": "#/$defs/RobotTelemetry" }
+      }
+    },
+    "AlertEnvelope": {
+      "type": "object",
+      "description": "③ 告警：单条。",
+      "required": ["type", "data"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "alert" },
+        "data": { "$ref": "#/$defs/RobotAlert" }
+      }
+    }
+  }
+}

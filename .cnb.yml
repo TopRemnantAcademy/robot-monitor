@@ -12,6 +12,76 @@ $:
       settings:
         max_turns: 200
         workspace_preflight: on
+# ---------------------------------------------------------------------------
+# 订单 18 T2 —— 契约门禁（契约即代码）
+# 触发：所有分支的 pull_request。
+#
+# **刻意不做 `|| true` / `continue-on-error` 兜底**：门禁一旦能被吞掉就等于不存在。
+# 两道判定都必须让构建变红：
+#   ① generated-types-must-be-committed —— api.gen.ts 与 openapi.snapshot.json 不同步；
+#   ② contract-snapshot-check           —— 后端删字段/改类型但没同步快照（breaking）。
+# 依据：本仓已真实翻车过一次（STATUS.md §六第 2 条 —— `/history` 漏 `joint_positions`
+# 导致 Drawer 第三条折线恒空）。那次是"人眼比对通过"的，机器一跑就现形。
+#
+# 为什么用 cnbcool/default-npc 之外的 node 镜像 + 自装 python：
+#   门禁横跨两侧 —— 前端要 Node（openapi-typescript / tsc / node --test），
+#   契约导出要 Python（import app.main 拿 app.openapi()）。
+#   选 node:20（全量镜像，自带 python3 与 pip）一次满足两侧；
+#   若换成 node:20-slim 则没有 python3，需改回两步。
+#   依赖装在 --user，不碰系统 site-packages，也不需要 root。
+# ---------------------------------------------------------------------------
+    pull_request:
+      - name: contract-gate
+        docker:
+          image: node:20
+        env:
+          # 只为让 `Settings()` 在 import 期实例化成功（jwt_secret 无默认值）。
+          # 是占位串，不参与任何签名；真实密钥绝不入仓（AGENTS.md §5）。
+          JWT_SECRET: ci-openapi-export-placeholder
+        stages:
+          - name: prepare-backend-deps
+            script: |
+              set -euo pipefail
+              python3 -m pip install --user --quiet --disable-pip-version-check \
+                -r backend_ingestion/requirements.txt
+              python3 -c "import fastapi, pydantic; print('backend deps ok:', fastapi.__version__, pydantic.VERSION)"
+
+          # 契约快照漂移 + breaking 检测（T3）。
+          # --check 的语义：非 breaking（加可选字段/改描述）只告警并 exit 0；
+          # breaking（删字段/改类型/删路径）exit 1。
+          - name: contract-snapshot-check
+            script: |
+              set -euo pipefail
+              python3 scripts/export-openapi.py --check docs/contracts/openapi.snapshot.json
+
+          - name: prepare-frontend-deps
+            script: |
+              set -euo pipefail
+              cd frontend_dashboard
+              npm ci --no-audit --fund=false
+
+          # T1/T2 核心门禁：生成类型必须与入库产物逐字节一致。
+          # 只盯 api.gen.ts 这一个文件 —— 它是「契约 → 前端类型」的唯一出口。
+          - name: generated-types-must-be-committed
+            script: |
+              set -euo pipefail
+              cd frontend_dashboard
+              npm run gen:types
+              cd ..
+              git diff --exit-code -- frontend_dashboard/src/types/api.gen.ts
+
+          # T4：WS 信封 schema + ajv（含故意构造的错误信封）
+          - name: ws-envelope-contract
+            script: |
+              set -euo pipefail
+              cd frontend_dashboard
+              node --test "tests/*.test.mjs"
+
+          - name: typecheck
+            script: |
+              set -euo pipefail
+              cd frontend_dashboard
+              npx tsc --noEmit
   pull_request:
     comment@npc:
       image: cnbcool/default-npc:latest

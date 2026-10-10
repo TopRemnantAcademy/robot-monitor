@@ -33,6 +33,11 @@ from app.auth.users import RobotUser, close_engine
 from app.config import settings
 from app.db.redis import close_redis, get_redis
 from app.db.session import close_pool, ping
+from app.schemas.api import (
+    HealthResponse,
+    RobotHistoryResponse,
+    RobotListResponse,
+)
 from app.services import mqtt_subscriber, state_cache
 from app.services.batch_writer import BatchWriter
 
@@ -82,8 +87,8 @@ app.include_router(auth_router)
 
 # ------------------------------------------------------------------ REST
 
-@app.get("/healthz")
-async def healthz():
+@app.get("/healthz", response_model=HealthResponse)
+async def healthz() -> HealthResponse:
     """健康检查。
 
     `status` 反映**依赖可达性**，不只是「进程活着」：
@@ -147,13 +152,13 @@ async def prometheus_metrics():
     return Response(content=body, media_type=ctype)
 
 
-@app.get("/robots")
+@app.get("/robots", response_model=RobotListResponse)
 async def list_robots(_user: RobotUser = Depends(current_active_user)):
     """100 台最新状态。只读端点：viewer 起可访问，返回体与加鉴权前逐字段一致。"""
     return {"robots": await state_cache.snapshot(settings.robot_ids)}
 
 
-@app.get("/robots/{robot_id}/history")
+@app.get("/robots/{robot_id}/history", response_model=RobotHistoryResponse)
 async def history(
     robot_id: str,
     minutes: int = 5,
