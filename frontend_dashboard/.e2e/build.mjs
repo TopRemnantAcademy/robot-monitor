@@ -22,6 +22,8 @@ const targets = [
     // 同一份模块实例，否则 use() 注册的表与 init() 读取的表不是同一张（xAxis not found）。
     external: ['echarts', 'echarts/core', 'echarts/charts', 'echarts/components',
       'echarts/renderers', 'echarts-for-react', 'echarts-for-react/lib/core'] },
+  // 订单 26（I-20）：错误边界 + react-query 缓存/重试验证入口
+  { entry: '.e2e/entry_order26.tsx', out: '.e2e/order26.cjs', external: [] },
 ];
 
 for (const t of targets) {

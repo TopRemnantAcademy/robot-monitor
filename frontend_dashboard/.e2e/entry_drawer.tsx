@@ -1,6 +1,8 @@
 import { createRoot } from 'react-dom/client';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { useRobotStore } from '../src/store/robotStore';
 import RobotDetailDrawer, { API_BASE } from '../src/components/RobotDetailDrawer';
+import { makeQueryClient } from '../src/lib/queryClient';
 
 import { JOINT_NAMES } from '../src/types/robot';
 
@@ -17,6 +19,11 @@ window.__MOUNT__ = () => {
     error_code: 0, ts: Date.now(),
   }]);
   st.selectRobot('humanoid-042');
-  createRoot(document.getElementById('root')!).render(<RobotDetailDrawer />);
+  // 订单 26：Drawer 的历史查询依赖 react-query，测试挂载必须包 Provider。
+  createRoot(document.getElementById('root')!).render(
+    <QueryClientProvider client={makeQueryClient()}>
+      <RobotDetailDrawer />
+    </QueryClientProvider>,
+  );
 };
 export {};
