@@ -1,0 +1,56 @@
+# Prometheus 抓取配置 —— 直接套用 external/prometheus 的 v3.x 配置语法。
+#
+# 为什么这个文件此前不存在：
+#   `prometheus/client_python` 已在上一轮下载，但**代码里没有任何一处 import**，
+#   也没有 Prometheus 服务端去抓 —— 等于「下了但没接」。
+#   仅装客户端库不会产生任何指标，必须有 server 抓 + exporter 暴露。
+#
+# 抓取目标的端口与 infra/docker-compose.yml 中的 service 一一对应：
+#   backend  :8000 /metrics   <- backend_ingestion 暴露（见 app/metrics.py）
+#   alert    :8001 /metrics   <- alert_engine 暴露
+#   postgres :9187            <- prometheus-community/postgres_exporter
+#   redis    :9121            <- oliver006/redis_exporter
+global:
+  scrape_interval: 10s        # 与遥测 10Hz / 看板 10s 刷新对齐，不引入额外量级
+  evaluation_interval: 10s
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # 应用层：后端采集与告警引擎（自定义业务指标）
+  - job_name: robot_backend
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["backend:8000"]
+
+  - job_name: robot_alert_engine
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["alert-engine:8001"]
+
+  # Broker 层：EMQX 自带 Prometheus 端点（18083 端口的 /api/v5/prometheus/stats）
+  # 注：该端点默认需 API key；未验证 —— 若抓取失败，用 emqtt-bench 的 --prometheus
+  # 或 EMQX Dashboard 的 metrics 页面替代，不要伪造 up=1。
+  - job_name: emqx
+    metrics_path: /api/v5/prometheus/stats
+    static_configs:
+      - targets: ["emqx:18083"]
+
+  # 数据层：TimescaleDB / Redis（用 exporter 暴露，无需改数据库）
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+
+  - job_name: redis
+    static_configs:
+      - targets: ["redis-exporter:9121"]

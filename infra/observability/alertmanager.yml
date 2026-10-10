@@ -1,0 +1,49 @@
+# Alertmanager 配置 —— 结构直接套用 external/alertmanager/doc/examples/simple.yml
+# （官方 v0.28.1 示例），把接收方从示例的邮件改为本项目的 webhook。
+#
+# 与 alert_engine/app/main.py 的关系（重要，别搞混）：
+#   - alert_engine 判的是**机器人**（motor_temp/battery_low/offline/joint_stuck），
+#     它的 inhibition 语义抄的是 Alertmanager 的 inhibit_rules（见 orders/10-dispatch.md）。
+#   - Alertmanager 在这里判的是**平台**（Prometheus 规则 robot-alerts.yml）。
+#   两者共用同一套概念（group_by / repeat_interval / inhibition），但作用于不同对象。
+#
+# 套用痕迹：route.group_by / group_wait / group_interval / repeat_interval
+# 与 inhibit_rules 的字段名逐字对齐官方示例（simple.yml:19-36、:90-93）。
+
+global:
+  resolve_timeout: 5m
+
+route:
+  # 按 alertname + 严重度分组：同一个平台故障只推一条
+  group_by: ["alertname", "severity"]
+  group_wait: 30s
+  group_interval: 5m
+  # 平台故障不像机器人告警那样高频，重复提醒拉到 1h 足够
+  repeat_interval: 1h
+  receiver: robot-monitor-webhook
+
+  routes:
+    # critical 立即走同一条 webhook，但不再等待 group_wait
+    - matchers:
+        - severity="critical"
+      receiver: robot-monitor-webhook
+      group_wait: 0s
+      repeat_interval: 30m
+      continue: true
+
+# 抑制规则 —— 官方示例的等价物。
+# 语义：backend 都 down 了，「队列积压」这种下游症状没有处置价值，根因在上游。
+inhibit_rules:
+  # source：后端不可达（severity critical）
+  # target：积压/丢弃等衍生告警（severity warning）
+  - source_matchers: [severity="critical"]
+    target_matchers: [severity="warning"]
+    equal: ["alertname"]
+
+receivers:
+  - name: robot-monitor-webhook
+    webhook_configs:
+      # 后端在 /alerts/webhook 接收；若未实现该端点，Alertmanager 会重试并打日志，
+      # 不影响 Prometheus / 抓取面（未验证：该端点属后续单，本次不新增应用代码）。
+      - url: "http://backend:8000/alerts/webhook"
+        send_resolved: true

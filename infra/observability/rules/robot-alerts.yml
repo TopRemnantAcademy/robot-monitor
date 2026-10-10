@@ -1,0 +1,61 @@
+# 平台自身健康告警规则（PromQL）。
+#
+# 边界声明：这里告警的是**平台**（broker/后端/落库拥堵），
+# 不是**机器人本体**。机器人本体的 motor_temp / battery_low / offline / joint_stuck
+# 四类告警由 alert_engine 在应用层判定，不经过 Prometheus。
+# 两者互补：robot_alert 表回答「哪台机器人坏了」，
+# 这里回答「监控系统自己是否还健康」—— 后者若失灵，前者的一切结论都不可信。
+groups:
+  - name: robot-monitor-platform
+    rules:
+      # 队列积压持续增长 => 落库跟不上 1000 msg/s，CPU 或 IO 瓶颈
+      - alert: IngestionQueueBacklog
+        expr: robot_backend_queue_depth > 5000
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "遥测写入队列积压 {{ $value }} 条"
+          description: "超过批量阈值 500 的 10 倍，疑似 TimescaleDB 写入受阻。"
+
+      # MQTT 丢弃非 0 说明 payload 校验失败，机器人端字段契约被破坏
+      - alert: MqttMessagesDropped
+        expr: increase(robot_backend_mqtt_dropped_total[1m]) > 0
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "1 分钟内丢弃 {{ $value }} 条 MQTT 消息"
+          description: "payload 不符合 spec/01 telemetry schema，检查模拟器/固件版本。"
+
+      - alert: BackendDown
+        expr: up{job="robot_backend"} == 0
+        for: 15s
+        labels:
+          severity: critical
+        annotations:
+          summary: "后端采集服务 down"
+
+      - alert: AlertEngineDown
+        expr: up{job="robot_alert_engine"} == 0
+        for: 15s
+        labels:
+          severity: critical
+        annotations:
+          summary: "告警引擎 down（此时机器人告警全部停摆）"
+
+      - alert: TimescaleDown
+        expr: up{job="postgres"} == 0
+        for: 15s
+        labels:
+          severity: critical
+        annotations:
+          summary: "TimescaleDB 不可达"
+
+      - alert: MqttBrokerDown
+        expr: up{job="emqx"} == 0
+        for: 20s
+        labels:
+          severity: critical
+        annotations:
+          summary: "EMQX broker 不可达（100 台机器人数据全部中断）"

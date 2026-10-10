@@ -1,0 +1,59 @@
+# 应用层叠加（overlay）—— 把后端与告警引擎**真正跑进容器网络**。
+#
+# 为什么这个文件是「连接」的关键：
+#   Prometheus 的抓取目标写的是 `backend:8000` / `alert-engine:8001`，
+#   这是 Docker 网络里的 service DNS。若应用跑在宿主机上（现状），
+#   这两个名字**根本解析不到**，两个 job 永远 up=0，
+#   规则文件里的 BackendDown / AlertEngineDown 会永久误报。
+#   所以「装了 exporter」不等于「接上了」—— 必须把应用也放进同一个网络。
+#
+# 用法（三层叠加）：
+#   docker compose \
+#     -f infra/docker-compose.yml \
+#     -f infra/docker-compose.app.yml \
+#     -f infra/observability/docker-compose.observability.yml up -d
+version: "3.8"
+
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: backend_ingestion/Dockerfile
+    image: robot-monitor-backend:local
+    container_name: robot-monitor-backend
+    ports:
+      - "8000:8000"          # /healthz、/robots、/ws/robots
+    environment:
+      # 服务名即 DNS：mqtt/redis/tsdb 三个组件来自基础 compose
+      MQTT_BROKER: emqx
+      MQTT_PORT: "1883"
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://postgres:postgres@timescaledb:5432/robot_monitor
+      BATCH_TRIGGER_COUNT: "500"
+      BATCH_TRIGGER_SECONDS: "1.0"
+    depends_on:
+      emqx:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  alert-engine:
+    build:
+      context: ..
+      dockerfile: alert_engine/Dockerfile
+    image: robot-monitor-alert-engine:local
+    container_name: robot-monitor-alert-engine
+    ports:
+      - "8001:8001"          # /metrics
+    environment:
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://postgres:postgres@timescaledb:5432/robot_monitor
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped

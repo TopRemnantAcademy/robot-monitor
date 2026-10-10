@@ -1,0 +1,67 @@
+# 可观测性叠加层（overlay）—— 与 infra/docker-compose.yml 组合使用：
+#
+#   docker compose -f infra/docker-compose.yml \
+#                  -f infra/observability/docker-compose.observability.yml up -d
+#
+# 为什么用 overlay 而不是改基础 compose：
+#   基础 compose 是「跑通看板」的最小集（3 个组件），必须保持轻量；
+#   可观测性是运维增强层，按需叠加，不增加看板本身的启动负担。
+#
+# 每个服务都对应一个**已下载**的上游仓库（external/ 下），不是凭空写镜像名：
+#   prometheus         <- external/prometheus              @ v3.2.1
+#   alertmanager       <- external/alertmanager            @ v0.28.1
+#   postgres-exporter  <- external/postgres_exporter       @ v0.17.1
+#   redis-exporter     <- external/redis_exporter          @ v1.74.0
+version: "3.8"
+
+services:
+  prometheus:
+    # 官方镜像名带 org 前缀（教训同 EMQX：裸名会解析到同名第三方镜像）
+    image: prom/prometheus:v3.2.1
+    container_name: robot-monitor-prometheus
+    ports:
+      - "9090:9090"     # UI + /api/v1
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./rules:/etc/prometheus/rules:ro
+      - prom-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+    depends_on:
+      - alertmanager
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    container_name: robot-monitor-alertmanager
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      # 官方示例 simple.yml:12 从 templates/ 读模板，沿用该目录约定
+      - ./templates:/etc/alertmanager/template:ro
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.17.1
+    container_name: robot-monitor-postgres-exporter
+    ports:
+      - "9187:9187"
+    environment:
+      # 变量名实证自 external/postgres_exporter/README.md:223（DATA_SOURCE_NAME）
+      DATA_SOURCE_NAME: "postgresql://postgres:postgres@timescaledb:5432/robot_monitor?sslmode=disable"
+    depends_on:
+      - timescaledb
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.74.0
+    container_name: robot-monitor-redis-exporter
+    ports:
+      - "9121:9121"
+    environment:
+      # 变量名实证自 external/redis_exporter/README.md:170（REDIS_ADDR）
+      REDIS_ADDR: "redis://redis:6379"
+    depends_on:
+      - redis
+
+volumes:
+  prom-data:
