@@ -129,8 +129,8 @@
 |---|---|
 | **本文件** | 主计划与状态 |
 | `docs/CNB-DISPATCH-SOP.md` | **如何给 CNB 派单**（含判别真完成的流程） |
-| `external/INTEGRATION-PLAN.md` | 上游开源源 → 本项目的套用点（I-1~I-6） |
-| `external/SOURCES.md` | 14 个下载源的 provenance 与取舍理由 |
+| `external/INTEGRATION-PLAN.md` | 上游开源源 → 本项目的套用点（I-1~I-12） |
+| `external/SOURCES.md` | **22 个**下载源的 provenance 与取舍理由（第四批 8 个见 §5） |
 | `orders/NN-dispatch.md` | 各单派工正文 |
 | `docs/requirements/R-*.md` | 验收规格（R-01 前端 / R-02 WS 节流 / R-03 API 契约 / R-07 联调压测 / R-08 验收矩阵） |
 | `AGENTS.md` | NPC 每次运行自动注入的工程纪律 |

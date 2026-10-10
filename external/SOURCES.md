@@ -172,6 +172,118 @@ git clone --depth 1 https://github.com/eclipse-paho/paho.mqtt.python.git
 
 ---
 
+## 5. 第四批：全量复扫补齐遗漏（2026-10-10 收口复扫）
+
+> 触发：Issue #19「确保没有遗漏才行，继续找出可以组装的开源项目」。
+> 复扫方法：**不看名字看依赖** —— 逐个扫 `requirements.txt` / `package.json` 里的
+> 每一个包，以及项目「要真实跑起来还必须懂什么」，逐项回溯其上游源。
+> 结论：**又发现 8 个遗漏**，其中 3 个是此前完全无参考源的关键项。
+
+### ⭐ 遗漏 1：`timescale/timescaledb-docker`（官方部署契约）
+
+| 项 | 值 |
+|---|---|
+| 来源 | `https://github.com/timescale/timescaledb-docker`（Timescale 官方组织） |
+| stars / 体积 | 353 / 220 KB |
+| 用途 | **TimescaleDB 官方镜像的权威部署契约**：镜像 tag 命名规则、`docker-entrypoint-initdb.d` 行为、`timescaledb-tune` 的 env 开关 |
+
+**为什么此前漏了**：第一批只下了 `mqtt-to-timescaledb` 拿 EMQX 契约，
+但**数据库侧自己的官方镜像契约反而没下** —— 这是对称性的遗漏。
+
+**实证**：官方 `README.md:20,56,68` 展示的两个关键能力，我们**都没用上**：
+- `ts_tune_*` 系列 env（`TS_TUNE_MEMORY` / `TS_TUNE_NUM_CPUS` / `TS_TUNE_MAX_CONNS`）—— 
+  我们在 `infra/docker-compose.yml` 里**一个都没设**，容器按默认内存自调，压测时不可控。
+- `NO_TS_TUNE=true` 开关 —— 明确关闭自动调优，测试环境需要关掉才能复现固定基线。
+
+### ⭐ 遗漏 2：`timescale/timescaledb-tune`（参数调优工具本体）
+
+| 项 | 值 |
+|---|---|
+| 来源 | `https://github.com/timescale/timescaledb-tune` |
+| stars / 体积 | 507 / 632 KB |
+| 用途 | 官方 PG/TSDB 参数调优器；镜像内已内置，源码提供 `shared_buffers` / `max_connections` / `work_mem` 的推导规则 |
+
+**实证**（`timescaledb-docker/docker-entrypoint-initdb.d/001_timescaledb_tune.sh:1-8`）：
+镜像的 entrypoint 就是调它。懂它才知道 `TS_TUNE_*` env 到底改了什么 —— 否则只是照抄。
+
+### ⭐ 遗漏 3：`locustio/locust`（**broker 层压测的第二条路，且官方内置 MQTT**）
+
+| 项 | 值 |
+|---|---|
+| 来源 | `https://github.com/locustio/locust` |
+| stars / 体积 | 28199 / 18 MB |
+| 用途 | Python 负载测试框架，**官方 contrib 内置 MQTT 客户端** |
+
+**这是本轮最有价值的发现**。此前 broker 层压测只有 `emqtt-bench`（Erlang，
+需 OTP 27.2+ 编译或下预编译二进制，上手门槛高）。而 locust：
+
+```
+locust/locust/contrib/mqtt.py        557 行，MqttUser / MqttClient
+locust/examples/mqtt/locustfile.py   官方 MQTT 压测示例
+```
+
+**实证** `locust/locust/contrib/mqtt.py`：
+- `:72` `class MqttClient(mqtt.Client)` —— 基于 **paho.mqtt**（我们第三批已下的源）
+- `:516` `class MqttUser(User)`；`:521-522` `transport = "tcp"` / `ws_path = "/mqtt"`
+- `:419 publish` / `:459 subscribe` —— 可压 pub 也可压 sub
+
+**与已有两个工具的分工**（三者互补，非替代）：
+
+| 工具 | 层 | 语言/门槛 | 输出 |
+|---|---|---|---|
+| `simulator/mock_fleet.py` | 端到端业务链路 | Python，已有 | 100 台真实 schema 负载 |
+| `emqtt-bench` | broker 层裸上限 | Erlang，需 OTP | msg/s 上限 |
+| **`locust` + `contrib.mqtt`** | broker 层 + **可写断言** | Python，pip 即装 | 带 SLA 判定的压测报告 |
+
+**关键增益**：locust 能写**带断言的自定义压测脚本**（`--check` 失败率、
+`events` 钩子），比 emqtt-bench 只能吐数字更贴合 R-07「可判定」的要求。
+
+### 遗漏 4-8：补齐 set / 版本核对（此前无源）
+
+| 需求点 | 仓库 | 体积 | stars | 套用结论 |
+|---|---|---|---|---|
+| **WS 服务端底层** | `python-websockets/websockets` | 4.0 MB | 5732 | 我们锁 `websockets==12.0`，上游 **17.3** —— 见 I-8 |
+| **ASGI 服务器** | `Kludex/uvicorn` | 3.1 MB | 11007 | 锁定 `0.28.0`，上游 **0.54.0** —— 见 I-7 |
+| **ORM 本体** | `sqlalchemy/sqlalchemy` | 34 MB | 12211 | 我们锁 `2.0.28`，上游 **2.1.5**；**仅读路径使用** —— 见 I-9 |
+| **settings 管理** | `pydantic/pydantic-settings` | 1.8 MB | 1475 | 锁 `2.2.1`，上游 **2.15.0** —— 见 I-10 |
+| **指标暴露范式** | `prometheus/node_exporter` | 4.5 MB | 13831 | 与 `client_python` 配套，提供 collector 写法范式（C3 用） |
+
+### 第四批的复现命令（新增部分）
+
+```bash
+cd external
+git clone --depth 1 https://github.com/timescale/timescaledb-docker.git
+git clone --depth 1 https://github.com/timescale/timescaledb-tune.git
+git clone --depth 1 https://github.com/locustio/locust.git
+git clone --depth 1 https://github.com/python-websockets/websockets.git
+git clone --depth 1 https://github.com/Kludex/uvicorn.git
+git clone --depth 1 https://github.com/sqlalchemy/sqlalchemy.git
+git clone --depth 1 https://github.com/pydantic/pydantic-settings.git
+git clone --depth 1 https://github.com/prometheus/node_exporter.git
+```
+
+### 第四批中**不下**的（新增留档）
+
+| 仓库 | 体积 | 理由 |
+|---|---|---|
+| `prometheus/prometheus` | **286 MB** | 我们只做指标暴露（pull 模型用 client_python 即可），不需要 server 源码 |
+| `apache/superset` | **1235 MB** | 体量致命；BI 平台是自研大屏的**替代品**不是依赖 |
+| `dataease/dataease` | **343 MB** | 同上，国产大屏成品 |
+| `thingsboard/thingsboard` | **404 MB** | 完整 IoT 平台，与本项目「自研 2D 看板」定位冲突 |
+| `home-assistant/core` | **893 MB** | 体量致命，领域不匹配（家居而非工业遥测） |
+| `grafana/k6` | 83 MB | 已由 locust 覆盖 Python 压测需求，跨语言引入不划算 |
+| `sqlfluff/sqlfluff` | 53 MB | `init.sql` 体量小，手工审查已足够 |
+| `dromara/go-view` | 11 MB | Vue 技术栈，与本项目 React 不符 |
+| `tremorlabs/tremor` | 4.7 MB | React 图表组件，但已由 ECharts 覆盖 |
+| `bvaughn/react-window` | 8.9 MB | 告警表当前体量不需要虚拟滚动（属过度设计） |
+| `lucide-icons/lucide` | 26 MB | 图标已由内联 SVG/现有方案覆盖 |
+| `timescale/timescaledb` | 65 MB | 主体是 C 扩展；SQL 层契约已由 `timescaledb-docker` 覆盖 |
+
+> **原则不变**：参考源必须是**官方组织仓库**。`grafana` / `superset` / `thingsboard`
+> 这类「整平台」一律不下 —— 它们是**替代方案**，不是**依赖**，下了只会污染判断。
+
+---
+
 ## 搜索过但**判定不值得下载**的仓库（留档，避免重复搜索）
 
 | 仓库 | stars | 不下载的理由 |
