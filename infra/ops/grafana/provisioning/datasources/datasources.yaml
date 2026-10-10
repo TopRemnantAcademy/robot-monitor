@@ -1,0 +1,44 @@
+# Grafana 数据源自动供给（provisioning）
+#
+# 来源实证（不是抄博客）：
+#   - external/grafana-provisioning-ref/grafana/provisioning/datasources/instructor-postgres.yml
+#     → type / uid / jsonData.timescaledb / postgresVersion 的写法
+#   - external/grafana-provisioning-ref/docker-compose.yml:26-43
+#     → 供给目录挂载点 /etc/grafana/provisioning（只读）
+#   - 判断依据：external/minio 检查过，Grafana 12 只内置了
+#     alertmanager/azuremonitor/cloudwatch/dashboard/grafana/testdata/graphite/mixed 这些内置插件目录
+#     （实证：GitHub API 列 public/app/plugins/datasource 的 main 分支内容），
+#     **不包括** timescaledb —— 所以 TimescaleDB 走 Grafana 内置的 PostgreSQL 数据源
+#     （type: postgres），用 jsonData.timescaledb: true 打开 TimescaleDB 特性。
+#     ⚠️ 未验证：Grafana 12 的 provisioning 里 `grafana-postgresql-datasource` 这个新 type 别名
+#     是否被接受（参考仓库用的是它，而该仓库锁的是 grafana/grafana:12.3.2）。
+#     本仓库保守起见先用经典 `postgres`（Grafana 全系兼容），若 Grafana 报未知类型再改。
+apiVersion: 1
+
+datasources:
+  # ---- TimescaleDB（= PostgreSQL 16 + timescaledb 扩展，见 infra/init.sql）----
+  - name: RobotMonitor-TimescaleDB
+    uid: rm-timescaledb
+    type: postgres
+    access: proxy
+    url: timescaledb:5432
+    database: robot_monitor
+    user: postgres
+    secureJsonData:
+      password: postgres
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1600      # infra/docker-compose.yml: timescale/timescaledb:2.13.1-pg16
+      timescaledb: true          # 打开 TimescaleDB 专属能力（time_bucket、CAgg 识别）
+    editable: true
+
+  # ---- Prometheus（EMQX / exporter / probe / PG / Redis 指标）----
+  - name: RobotMonitor-Prometheus
+    uid: rm-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    jsonData:
+      timeInterval: 5s
+      httpMethod: POST
+    editable: true

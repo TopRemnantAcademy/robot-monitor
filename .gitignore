@@ -26,3 +26,6 @@ external/*
 
 # OS
 .DS_Store
+
+# 运维层本地状态（Grafana 新建的看板不入库；供给源是 infra/ops/grafana/dashboards）
+infra/ops/grafana/data/

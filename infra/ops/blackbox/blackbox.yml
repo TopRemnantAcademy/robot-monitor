@@ -1,0 +1,14 @@
+# blackbox_exporter 探针模块
+# 来源：external/blackbox_exporter/blackbox.yml（官方仓库默认配置）+ README.md:33 / 76
+#   /probe?target=<addr>&module=<name>、默认监听 9115（README.md:61 "…/metrics for scraping, /probe for probing"）
+modules:
+  # 后端 /healthz、EMQX Dashboard 都用这个
+  http_2xx:
+    prober: http
+    timeout: 5s
+    http:
+      preferred_ip_protocol: ip4
+      valid_status_codes: []   # 空 = 默认 2xx
+  tcp_connect:
+    prober: tcp
+    timeout: 5s
