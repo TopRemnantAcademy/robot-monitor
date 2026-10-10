@@ -64,12 +64,55 @@ $ curl https://hub.docker.com/v2/repositories/emqx/emqx/tags/5.6
 
 ---
 
+---
+
+## 3. 第二批：按需求点全量下载（2026-10-10）
+
+**套用与连接计划见 `external/INTEGRATION-PLAN.md`**（本文只记录来源与取舍）。
+
+| 需求点 | 仓库 | 体积 | stars | 套用结论 |
+|---|---|---|---|---|
+| Broker 层压测 | `emqx/emqtt-bench` | 350 KB | 568 | 订单 06 接入，与 `mock_fleet.py` 互补（见 I-4） |
+| MQTT 客户端契约 | `empicano/aiomqtt` | 430 KB | 577 | 契约核对 → I-1 升级、I-2 实例复用 |
+| 前端状态管理 | `pmndrs/zustand` | 3.6 MB | 58801 | 版本核对，**决定不升级**（见 I-3 决策表） |
+| 异步 Redis 用法 | `redis/redis-py` | 18 MB | 13647 | 版本核对，**决定不升级** |
+| 全栈结构参考 | `fastapi/full-stack-fastapi-template` | 3.5 MB | 45929 | 结构对照 |
+| 告警设计标准 | `prometheus/alertmanager`（sparse `docs/`） | 816 KB | 8642 | 对照发现缺「抑制」机制（I-5） |
+| 指标暴露 | `prometheus/client_python` | 14 MB | 4380 | 订单 06 可选 |
+
+> ⚠️ `aiomqtt` 仓库已从 `sbtinstruments/aiomqtt` **迁移至 `empicano/aiomqtt`**
+> （实证：`gh api repos/sbtinstruments/aiomqtt` 返回 `empicano/aiomqtt`）。
+> PyPI 包名 `aiomqtt` 未变，`requirements.txt` 无需改包名。
+
+### 同上：搜索过但**不下**的（体积/价值比不划算或已被包管理器覆盖）
+
+| 仓库 | 体积 | 理由 |
+|---|---|---|
+| `grafana/grafana` | **2011 MB** | 体量致命；本项目自研看板，Grafana 是替代方案不是依赖 |
+| `apache/echarts` | 264 MB | 已由 npm 引入，实证 `frontend_dashboard/node_modules/echarts` 存在 |
+| `pydantic/pydantic` | 458 MB | pip 已引入，458 MB 换类型注解细节不划算 |
+| `timescale/timescaledb` | 65 MB | 主体是 C 扩展源码，本项目只需 SQL 层契约（已由官方示例覆盖） |
+| `fastapi/fastapi` | 53 MB | pip 已引入，6 MB 的 template 已覆盖结构需求 |
+
+> **原则**：已由包管理器（npm/pip）引入的依赖**不再 clone 源码**。
+> clone 只用于拿「包里没有的东西」—— 部署契约、最佳实践文档、压测工具。
+
+---
+
 ## 复现命令
 
 ```bash
 mkdir -p external && cd external
 git clone --depth 1 https://github.com/emqx/mqtt-to-timescaledb.git
 git clone --depth 1 https://github.com/timescale/tsbs.git
+git clone --depth 1 https://github.com/emqx/emqtt-bench.git
+git clone --depth 1 https://github.com/empicano/aiomqtt.git
+git clone --depth 1 https://github.com/pmndrs/zustand.git
+git clone --depth 1 https://github.com/redis/redis-py.git
+git clone --depth 1 https://github.com/fastapi/full-stack-fastapi-template.git
+git clone --depth 1 https://github.com/prometheus/client_python.git
+git clone --depth 1 --filter=blob:none --sparse https://github.com/prometheus/alertmanager.git
+cd alertmanager && git sparse-checkout set docs && cd ..
 ```
 
 ---

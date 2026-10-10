@@ -18,9 +18,10 @@ build/
 # 日志
 *.log
 
-# 外部下载的参考源：只入库归因清单 SOURCES.md，第三方源码不进主仓
+# 外部下载的参考源：只入库归因清单与套用计划，第三方源码不进主仓
 external/*
 !external/SOURCES.md
+!external/INTEGRATION-PLAN.md
 
 # OS
 .DS_Store
