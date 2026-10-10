@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     joint_stuck_torque: float = 8.0
     joint_stuck_dedup_s: int = 60
 
+    # ---- 抑制（inhibition，对照 Alertmanager 的 inhibit_rules）----
+    # 机器人已判离线（severity 3）时，抑制同一 robot_id 的其他告警：
+    # 机器都离线了，「电量低」「关节卡死」没有处置价值，根因就是离线。
+    # 留开关便于回滚与 A/B 对比；关闭后行为回到加抑制之前。
+    inhibit_offline: bool = True
+
     # ---- 判定循环 ----
     tick_interval_s: float = 1.0        # 离线 ticker 间隔
     window_maxlen: int = 100            # 每台机器人滑动窗口容量（10Hz → 约 10s）

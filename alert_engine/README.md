@@ -34,6 +34,26 @@ python -m app.main
 机器人 ID 全集来自 `config.robot_ids`（100 台，与 `init.sql` 预置一致），
 保证"从未上线"的机器人也能被正确判离线。
 
+## 抑制（inhibition）
+
+对照 Alertmanager 的 `inhibit_rules`：`source=offline` / `equal=[robot_id]`。
+
+机器人已判离线（severity 3）时，同一 `robot_id` 的 `motor_temp` / `battery_low` /
+`joint_stuck` 告警**不落库、不发布** —— 机器都离线了，「电量低」没有处置价值，根因是离线。
+
+判定在 `main.py` 的 `emit()` 入口，**前置**于去重；实现见 `is_inhibited()`。
+
+三条不变量：
+
+| 不变量 | 原因 |
+|---|---|
+| `online_state.get(rid) is False`（**不是** falsy 判定） | ticker 跑满一轮前字典为空，`not None` 会把所有告警吞掉 |
+| `offline` 自身永不被抑制 | 否则根因告警永远报不出来 |
+| 抑制即丢弃，恢复后不补发 | Alertmanager 语义 |
+
+开关：`config.inhibit_offline`（默认 `True`）；设为 `False` 行为回到加抑制之前。
+被抑制时打 **DEBUG** 日志，不静默丢弃。
+
 ## 去重
 
 Redis `alert:dedup:{robot_id}:{rule_id}` + `EX`，`SET ... NX` 保证幂等
