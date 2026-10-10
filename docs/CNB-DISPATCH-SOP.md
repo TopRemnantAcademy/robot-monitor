@@ -201,16 +201,101 @@ git -c http.extraHeader="Authorization: Bearer ${TOKEN}" push cnb main
 | 06 联调压测 | #6 | `cnb-q81-1k4hgt1ee` | ⏳ pending | 收口单 |
 | 07 aiomqtt 契约（I-1/I-2/I-3） | #8 | `cnb-s51-1k4hhvjem` | ⏳ pending | 另有一个重复构建已 stop |
 | 08 asyncpg 升级（I-6） | #9 | `cnb-ijj-1k4himq2k` | ⏳ pending | 与 07 同改 `requirements.txt`，已注明冲突处理 |
-| 09 前端 bundle 瘦身 | #10 | `cnb-ua1-1k4hj5d3h` | ⏳ pending | 已补发 echarts 引用范围实证，省其调研 |
+| 09 前端 bundle 瘦身 | #10 | `cnb-ua1-1k4hj5d3h` | ✅ 已回收验证 | 1209.34→671.23 kB（gzip 401.05→224.79） |
+| 10 告警抑制（I-5） | #13 | — | ✅ 已回收验证 | `alert_engine` 11/11 tests passed |
+| 12 CNB 自行下载上游源 | #15 | — | ✅ 已回收 | 推翻了我的 I-1 结论，见 `external/ORDER12-VERIFICATION.md` |
+| 13 可观测性接线 + 6 分支收敛 | #33 | `cnb-f0b-1k4j8osuu` | ⏳ pending | 基线 `main@772efca`；workMode=true 已核验 |
 
-> ⚠️ **Issue 号与订单号不对齐**：#6=订单06，但 **#8=订单07、#9=订单08、#10=订单09**
-> （#7 被其他 issue 占用）。**派单后务必记录实际号**，后续回收分支靠它。
+> ⚠️ **Issue 号与订单号不对齐，且跳跃极大**：#6=06、**#8=07、#9=08、#10=09、#13=10、
+> #15=12、#33=13**。中间号被其他 issue 占用。**派单后务必记录实际号**，
+> 后续回收分支与追加情报都靠它。
+
+### 2026-10-11 批量回收台账（远端曾累积到 19 个分支）
+
+一次性回收 12 个分支，主代理在**本机实测**后分批落地：
+
+| 分支 | 处置 | 依据 |
+|---|---|---|
+| `feat/order-06-integration` | ✅ 全取（仅 `reports/`） | 纯证据文件，零代码 |
+| `auto/upstream-sources-3ec1`、`codebuddy/external-sources-download` | ✅ 全取 | 纯文档 |
+| `auto/ui-alert-render-997e` | ✅ 全取 | 前端告警行增量渲染；`tsc` 0 错误 |
+| `feat/ops-observability-layer` | ✅ 全取 | +13448 行是 9 个 Grafana 看板 JSON，非垃圾 |
+| `feat/order-10-alert-inhibition` | ✅ 全取 | 自有订单，11/11 测试通过 |
+| `auto/db-integration-copy` | ✅ 全取 | 引入 JSONB 类型修正与三级降级链 |
+| `fix/infra-image-facts-and-contract-drift` | ⚠️ 部分取 | 取其 EMQX 撤稿与 `init.sql` 契约洞察；**`db/models.py` 拒取**（用 `sqlalchemy.JSON` 会回退 JSONB 修复） |
+| `fix/issue19-merge-safe` | ⚠️ 只取新增文件 | 其 `batch_writer.py` **会删除整条三级降级链** |
+| `codebuddy/observability-direct-wiring` | ⚠️ 只取新增文件 | 其 `main.py` 会回退 `/healthz` 语义 |
+| `feat/order-08-asyncpg-upgrade` | ⚠️ 只取 `pool.py` + 单行依赖 | 其 `requirements.txt` 会把 aiomqtt 从 2.5.1 退回 2.0.1 |
+| `cb/issue19-github-rescan`、`docs/detail-gap-reassessment`、`feat/enterprise-gap-analysis-issue19` | ⏳ 移交订单 13 | 三方同时追加 `STATUS.md`/`external/*.md`，需并集合并 |
 
 ### 追加情报的正确姿势
 
 已派单后又发现关键事实，可**追加评论**补充 —— 但正文**不得含 `@codebuddy`**，
 否则会再触发一次构建。实测：订单 09 派单后追加了一条 echarts 引用范围的情报
 （不含触发词），构建数保持 1 个。
+
+---
+
+## 6.5 批量回收纪律（2026-10-11，一次回收 12 个分支的实测总结）
+
+并行派单会让远端在几小时内堆积十几个分支。回收时**禁止一次性 merge**，
+必须按下列顺序处置。
+
+### 步骤 1：先测每个分支的「基线世代」
+
+```bash
+for b in <branch>...; do
+  base=$(git merge-base main cnb/$b)
+  echo "$b : 含order07=$(git merge-base --is-ancestor <sha7> cnb/$b && echo Y||echo N) \
+        含order09=$(git merge-base --is-ancestor <sha9> cnb/$b && echo Y||echo N)"
+done
+```
+
+**基于旧世代的分支，其"未改动"的文件里藏着已被修好的旧 bug。**
+实测：`feat/order-08` 的 `batch_writer.py` 不含 `_STOP` 哨兵、
+`requirements.txt` 写着 `aiomqtt==2.0.1` —— 直接 checkout 会静默回退订单 07。
+
+### 步骤 2：区分「新增文件」与「修改文件」
+
+```bash
+git diff --name-status --diff-filter=A $base cnb/$b   # 新增 → 可直接取
+git diff --name-status --diff-filter=M $base cnb/$b   # 修改 → 必须逐个审
+```
+
+**新增文件零回归风险，可批量 `git checkout cnb/$b -- <path>`。
+修改文件是全部风险所在。**
+
+### 步骤 3：修改文件逐条做「是回退还是改进」判定
+
+判定标准：**对方版本相对 `main` 删掉了什么**。删除比新增危险得多。
+实测三个真实案例：
+
+| 分支改动 | 判定 | 依据 |
+|---|---|---|
+| 删掉三级降级链（L1/L2/L3） | ❌ 拒取 | 是 `spec/01 §4.2` 的容错核心 |
+| `/healthz` 从依赖可达性退化成硬编码 `status:ok` | ❌ 拒取 | 丢掉 `db`/`retries`/`rejected` |
+| `primary_key=True` → 完全无主键 | ❌ 拒取（且**跑不通**） | SQLAlchemy 抛 `ArgumentError` |
+
+### 步骤 4：合并演练，量化冲突面
+
+```bash
+git checkout -b tmp/probe main
+for b in ...; do
+  git merge --no-commit --no-ff cnb/$b -m x >/dev/null 2>&1
+  echo "$b conflicts=$(git diff --name-only --diff-filter=U | wc -l)"
+  git diff --name-only --diff-filter=U
+  git merge --abort
+done
+```
+
+⚠️ **演练前务必确认当前不在 `tmp/probe` 上**，否则最后 `git branch -D tmp/probe`
+ 会失败，后续 commit 全部落进临时分支（本次实际踩中，导致一次空推送）。
+
+### 步骤 5：无法自动合并的，把「判定」和「执行」分开
+
+主代理负责**判定**（哪些该留、哪些会回退、为什么），
+把判定结果写成派单里的**显式保留规则表**，交给 CNB 去**执行**合并与验证。
+不要自己手搓十几个冲突文件 —— 易错且不可复现。
 
 ---
 
