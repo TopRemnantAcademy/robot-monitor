@@ -170,6 +170,116 @@
 
 ---
 
+
+### I-4b 🟢 订单 06 增补 `locust`（broker 层压测 · 可写断言）
+
+- **套用点**：`orders/06-dispatch.md` 的 T3（性能报告）
+- **源**：`external/locust`（`locust/locust/contrib/mqtt.py`，557 行）
+- **实证**：`locust/locust/contrib/mqtt.py:516` `class MqttUser(User)`；
+  `:72` `class MqttClient(mqtt.Client)`（底层即 `paho.mqtt`）；
+  `:521-522` 支持 `transport="tcp"` 与 `transport="websockets"`（`ws_path`）
+- **为什么值得加**（与 I-4 的 `emqtt-bench` 互补，不是替代）：
+
+  | 工具 | 优点 | 缺点 |
+  |---|---|---|
+  | `emqtt-bench` | 纯 Erlang，能压到 broker 极限 | 需 OTP 27.2+；只吐数字，**难以自定义断言** |
+  | `locust` | `pip install locust` 即可；可写 `@task` + `events` 钩子做**通过/失败判定** | Python GIL 下绝对上限低于 Erlang |
+
+  两者**都跑**才能同时得到「broker 上限」与「带 SLA 判定的结论」——
+  后者正是 R-07 / R-08 要求的「可判定」。
+- **示例骨架**（按官方 `examples/mqtt/locustfile.py` 改写，非照抄）：
+  ```python
+  from locust import task
+  from locust.contrib.mqtt import MqttUser
+  from locust.user.wait_time import between
+
+  class FleetPublisher(MqttUser):
+      host = "localhost"; port = 1883
+      wait_time = between(0.01, 0.1)          # ~10-100 msg/s/实例，多实例叠加到 1000
+      @task
+      def telemetry(self):
+          self.client.publish("robots/humanoid-001/telemetry", PAYLOAD_1KB)
+  ```
+- **状态**：**未验证**（需真实 EMQX 才能跑；本项是「该怎么用」的实证，不是「已跑通」）
+
+### I-7 🟡 `uvicorn` 0.28.0 与上游 0.54.0 的差距（**记录，不升级**）
+
+- **套用点**：`backend_ingestion/requirements.txt:2`
+- **源**：`external/uvicorn`（`Kludex/uvicorn`，原 `encode/uvicorn` 已迁移）
+- **实证**：我们锁 `0.28.0`；`uvicorn/uvicorn/__init__.py:4` `__version__ = "0.54.0"`
+- **决策：不升级**。理由：uvicorn 只负责把 `app.main:app` 跑起来，
+  我们用到的 `--host/--port/--reload` 在 0.x 全线稳定；跨 26 个小版本升级
+  对应 R-01 的「构建/类型 0 错误」基线无增益，只有回归风险。
+  **留档意义**：证明「不升级」是**看过上游**后的决定，不是不知道有新版本。
+
+### I-8 🟡 `websockets` 12.0 与上游 17.3 的差距（**记录，不升级**）
+
+- **套用点**：`backend_ingestion/requirements.txt:9`（`websockets==12.0`）
+- **源**：`external/websockets`（`python-websockets/websockets`）
+- **实证**：`websockets/src/websockets/version.py` `tag = version = "17.3"`
+- **决策：不升级**。`websockets==12.0` 是 `uvicorn[standard]` 的传递依赖，
+  我们**不直接 import 它**（WS 走 Starlette/FastAPI）。
+  跨 5 个大版本升级无收益。**留档意义同上**。
+
+### I-9 🟡 `sqlalchemy` 2.0.28 → 2.1.5（**记录，不升级**）
+
+- **套用点**：`backend_ingestion/requirements.txt:6`（`sqlalchemy[asyncio]==2.0.28`）
+- **源**：`external/sqlalchemy`（`sqlalchemy/sqlalchemy`）
+- **实证**：`sqlalchemy/lib/sqlalchemy/__init__.py` `__version__ = "2.1.5"`
+- **⭐ 顺带核实的事实**（重要）：本项目**写路径不用 ORM** ——
+  `backend_ingestion/app/db/session.py:9,13,16` 是 `asyncpg` 原生连接池；
+  `session.py:3` 注释明确「批量落库走 asyncpg 原生批量接口」。
+  SQLAlchemy 只出现在 `app/db/models.py:10-11`（`DeclarativeBase`/`Mapped`），
+  用于**读路径与 schema 对齐**。
+- **决策：不升级**。2.0→2.1 是 minor，但我们的 ORM 用法极浅（只声明模型），
+  升级收益 ≈ 0。**这一条同时纠正了一个潜在误解**：
+  有人可能以为「主键冲突/批量写入」是 SQLAlchemy 的事 —— 不是，
+  那是 `asyncpg.executemany` 的 `ON CONFLICT`（见 STATUS.md §六 缺陷 4）。
+
+### I-10 🟢 `pydantic-settings` 2.2.1 → 2.15.0（**记录，不升级**）
+
+- **套用点**：`backend_ingestion/app/config.py:8,11`、`alert_engine/app/config.py:5,8`
+- **源**：`external/pydantic-settings`（`pydantic/pydantic-settings`）
+- **实证**：`pydantic_settings/version.py` `VERSION = '2.15.0'`
+- **决策：不升级**。我们只用 `BaseSettings` + `SettingsConfigDict`
+  （`pydantic-settings/__init__.py:2` 导出），核心 API 自 2.x 起未变。
+  两个服务共用同一份用法，锁版本保证可复现。
+
+### I-11 🟢 TimescaleDB 容器调优参数（**建议纳入订单 06**）
+
+- **套用点**：`infra/docker-compose.yml:25-41`（`timescaledb` service）
+- **源**：`external/timescaledb-docker`（Timescale 官方镜像仓库）
+- **实证**（官方 `README.md:56,68,74`）：
+  官方镜像支持 `TS_TUNE_MEMORY` / `TS_TUNE_NUM_CPUS` / `TS_TUNE_MAX_CONNS` /
+  `NO_TS_TUNE` 等 env；镜像 entrypoint
+  （`timescaledb-docker/docker-entrypoint-initdb.d/001_timescaledb_tune.sh:1-8`）
+  会读取它们去调 `shared_buffers` / `max_connections` / `work_mem`。
+- **我们当前**：`docker-compose.yml:25-41` **一个 `TS_TUNE_*` 都没设** →
+  容器按 cgroup 内存自行推算，**压测时参数不可控、不可复现**。
+- **建议**（不本次实施，避免污染收口验收）：
+  ```yaml
+  environment:
+    POSTGRES_PASSWORD: postgres
+    NO_TS_TUNE: "true"          # 测试环境关掉自调优，保证基线可复现
+    # 或显式指定：
+    # TS_TUNE_MEMORY: "2GB"
+    # TS_TUNE_NUM_CPUS: "2"
+    # TS_TUNE_MAX_CONNS: "200"
+  ```
+  「固定基线」对 R-08 C1（30,000 行 ±10%）的**可重复性**有直接价值。
+- **状态**：**未验证**（需在真实容器内对比 `SHOW shared_buffers` 前后值）
+
+### I-12 🟢 Prometheus exporter 写法范式（C3 用）
+
+- **套用点**：`external/SOURCES.md` 已记 `prometheus/client_python`；本项补 **collector 写法范式**
+- **源**：`external/node_exporter`（`node_exporter/collector/`，官方 collector 目录结构）
+- **用途**：`STATUS.md` 阶段 C3「Prometheus 指标接入」时，
+  按官方 collector 的「`Describe` / `Collect` 双方法 + `prometheus.Desc`」范式写
+  我们的 `queue_depth` / `mqtt_dropped` 指标，而不是自创一次性写法。
+- **状态**：**未使用**（C3 才需要）
+
+---
+
 ## 3. 版本核对结论（**决定不升级**，附理由）
 
 | 依赖 | 本项目 | 上游最新 | 决策 | 理由 |
@@ -194,6 +304,8 @@
 
 ④ I-4 emqtt-bench ─────→ 订单 06（CNB @codebuddy 正在跑）
 ⑤ I-5 告警抑制 ────────→ 订单 06 之后，作为 v1.1 建议
+⑥ I-4b locust 压测 ─────→ 订单 06（与 emqtt-bench 并行，断言维度互补）
+⑦ I-11 TSDB 调优 env ──→ 订单 06 可选（固定基线，提升可重复性）
 ```
 
 - ①②③ 依赖同一个文件，必须**一起改**避免半套状态
@@ -216,6 +328,21 @@ git clone --depth 1 https://github.com/fastapi/full-stack-fastapi-template.git
 git clone --depth 1 https://github.com/prometheus/client_python.git
 git clone --depth 1 --filter=blob:none --sparse https://github.com/prometheus/alertmanager.git
 cd alertmanager && git sparse-checkout set docs && cd ..
+# 第三批：数据层与前端桥接
+git clone --depth 1 https://github.com/MagicStack/asyncpg.git
+git clone --depth 1 https://github.com/hustcc/echarts-for-react.git
+git clone --depth 1 https://github.com/Kludex/starlette.git
+git clone --depth 1 https://github.com/sqlalchemy/alembic.git
+git clone --depth 1 https://github.com/eclipse-paho/paho.mqtt.python.git
+# 第四批：2026-10-10 收口复扫补齐
+git clone --depth 1 https://github.com/timescale/timescaledb-docker.git
+git clone --depth 1 https://github.com/timescale/timescaledb-tune.git
+git clone --depth 1 https://github.com/locustio/locust.git
+git clone --depth 1 https://github.com/python-websockets/websockets.git
+git clone --depth 1 https://github.com/Kludex/uvicorn.git
+git clone --depth 1 https://github.com/sqlalchemy/sqlalchemy.git
+git clone --depth 1 https://github.com/pydantic/pydantic-settings.git
+git clone --depth 1 https://github.com/prometheus/node_exporter.git
 ```
 
 > 注意：`aiomqtt` 仓库已从 `sbtinstruments/aiomqtt` **迁移**至 `empicano/aiomqtt`
@@ -233,6 +360,9 @@ cd alertmanager && git sparse-checkout set docs && cd ..
 | 官方 `Client` reusable 表述 | ✅ 实测（reconnection.md） |
 | asyncpg 0.30+ 支持 Python 3.13 | ✅ 实测（release notes + `pyproject.toml` classifiers） |
 | 各仓库 stars/size | ✅ 实测（GitHub API） |
+| locust 官方内置 MQTT（`contrib/mqtt.py`） | ✅ 实测（`contrib/mqtt.py:72,516`、`examples/mqtt/locustfile.py`） |
+| TimescaleDB 官方镜像支持 `TS_TUNE_*` env | ✅ 实测（`timescaledb-docker/README.md:56,68,74`） |
+| `uvicorn`/`websockets`/`sqlalchemy`/`pydantic-settings` 上游版本号 | ✅ 实测（各自源码版本文件） |
 
 ### ⭐ 2026-10-10 追加实测：本机验证通道已打通
 
