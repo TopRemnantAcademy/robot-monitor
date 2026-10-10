@@ -31,7 +31,12 @@ $:
 #   依赖装在 --user，不碰系统 site-packages，也不需要 root。
 # ---------------------------------------------------------------------------
     pull_request:
-      - name: contract-gate
+      # 对象形式（`contract-gate:` 为流水线标识）而不是数组形式（`- name: ...`）。
+      # 原因：同一 `pull_request` 事件下已存在 NPC 的 `comment@npc:` 键，
+      # 数组形式与之并存会被解析成非法结构 —— 实测数组写法**整个流水线没被触发**
+      # （构建 cnb-nfc-1k4k3ookb 的 pipelineTotalCount = 1，只有 comment@npc）。
+      # 依据：语法手册「也支持通过对象的形式声明多个流水线」（docs.cnb.cool/zh/build/grammar.md）。
+      contract-gate:
         docker:
           image: node:20
         env:
@@ -39,49 +44,49 @@ $:
           # 是占位串，不参与任何签名；真实密钥绝不入仓（AGENTS.md §5）。
           JWT_SECRET: ci-openapi-export-placeholder
         stages:
-          - name: prepare-backend-deps
-            script: |
-              set -euo pipefail
-              python3 -m pip install --user --quiet --disable-pip-version-check \
-                -r backend_ingestion/requirements.txt
-              python3 -c "import fastapi, pydantic; print('backend deps ok:', fastapi.__version__, pydantic.VERSION)"
+        - name: prepare-backend-deps
+          script: |
+            set -euo pipefail
+            python3 -m pip install --user --quiet --disable-pip-version-check \
+              -r backend_ingestion/requirements.txt
+            python3 -c "import fastapi, pydantic; print('backend deps ok:', fastapi.__version__, pydantic.VERSION)"
 
-          # 契约快照漂移 + breaking 检测（T3）。
-          # --check 的语义：非 breaking（加可选字段/改描述）只告警并 exit 0；
-          # breaking（删字段/改类型/删路径）exit 1。
-          - name: contract-snapshot-check
-            script: |
-              set -euo pipefail
-              python3 scripts/export-openapi.py --check docs/contracts/openapi.snapshot.json
+        # 契约快照漂移 + breaking 检测（T3）。
+        # --check 的语义：非 breaking（加可选字段/改描述）只告警并 exit 0；
+        # breaking（删字段/改类型/删路径）exit 1。
+        - name: contract-snapshot-check
+          script: |
+            set -euo pipefail
+            python3 scripts/export-openapi.py --check docs/contracts/openapi.snapshot.json
 
-          - name: prepare-frontend-deps
-            script: |
-              set -euo pipefail
-              cd frontend_dashboard
-              npm ci --no-audit --fund=false
+        - name: prepare-frontend-deps
+          script: |
+            set -euo pipefail
+            cd frontend_dashboard
+            npm ci --no-audit --fund=false
 
-          # T1/T2 核心门禁：生成类型必须与入库产物逐字节一致。
-          # 只盯 api.gen.ts 这一个文件 —— 它是「契约 → 前端类型」的唯一出口。
-          - name: generated-types-must-be-committed
-            script: |
-              set -euo pipefail
-              cd frontend_dashboard
-              npm run gen:types
-              cd ..
-              git diff --exit-code -- frontend_dashboard/src/types/api.gen.ts
+        # T1/T2 核心门禁：生成类型必须与入库产物逐字节一致。
+        # 只盯 api.gen.ts 这一个文件 —— 它是「契约 → 前端类型」的唯一出口。
+        - name: generated-types-must-be-committed
+          script: |
+            set -euo pipefail
+            cd frontend_dashboard
+            npm run gen:types
+            cd ..
+            git diff --exit-code -- frontend_dashboard/src/types/api.gen.ts
 
-          # T4：WS 信封 schema + ajv（含故意构造的错误信封）
-          - name: ws-envelope-contract
-            script: |
-              set -euo pipefail
-              cd frontend_dashboard
-              node --test "tests/*.test.mjs"
+        # T4：WS 信封 schema + ajv（含故意构造的错误信封）
+        - name: ws-envelope-contract
+          script: |
+            set -euo pipefail
+            cd frontend_dashboard
+            node --test "tests/*.test.mjs"
 
-          - name: typecheck
-            script: |
-              set -euo pipefail
-              cd frontend_dashboard
-              npx tsc --noEmit
+        - name: typecheck
+          script: |
+            set -euo pipefail
+            cd frontend_dashboard
+            npx tsc --noEmit
   pull_request:
     comment@npc:
       image: cnbcool/default-npc:latest
