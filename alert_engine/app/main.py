@@ -6,7 +6,8 @@
 2. **ticker 线**：每秒遍历 100 台机器人跑 offline 规则
    —— **不依赖 Redis Key 过期事件**（keyspace notification 默认关闭）。
 
-告警经 deduplicator 过滤后由 store 写入 robot_alert 并 PUBLISH robot:alerts。
+告警先经**抑制**（inhibition，见 spec 对照 Alertmanager `inhibit_rules`）、
+再由 deduplicator 去重过滤后，由 store 写入 robot_alert 并 PUBLISH robot:alerts。
 """
 
 from __future__ import annotations
@@ -36,6 +37,10 @@ DEDUP_WINDOW = {r.rule_id: r.dedup_window_s for r in RULES}
 STREAM_RULES = [r for r in RULES if r.rule_id != "offline"]
 OFFLINE_RULE = next(r for r in RULES if r.rule_id == "offline")
 
+# 抑制的**源规则**：offline 告警活跃时，抑制同一机器人的其他告警。
+# 对应 Alertmanager 的 `inhibit_rules`：source=offline / equal=[robot_id]。
+INHIBIT_SOURCE_RULE = "offline"
+
 windows: dict[str, deque] = {}
 last_seen: dict[str, float] = {}
 online_state: dict[str, bool] = {}
@@ -50,7 +55,33 @@ def spawn(coro) -> None:
     t.add_done_callback(_tasks.discard)
 
 
+def is_inhibited(alert: Alert) -> bool:
+    """抑制判定（inhibition）—— 必须在 emit() 里去重**之前**执行。
+
+    语义对齐 Alertmanager `inhibit_rules`：
+        source: rule_id == "offline"（severity 3）
+        target: 同一 robot_id 的其他所有规则
+        equal:  [robot_id]
+
+    两个关键点（写错会吞掉真实告警）：
+
+    1. `online_state.get(rid) is False` —— 必须显式 `is False`，
+       不能用 `not online_state.get(rid)`。ticker 要跑满一轮才会给 100 台机器人
+       填值，启动初期字典为空，falsy 判定会把**所有**告警全判成被抑制。
+    2. offline 规则**自身永不被抑制** —— 否则高严重度的根因告警永远报不出来。
+    """
+    if not settings.inhibit_offline:
+        return False
+    if alert.rule_id == INHIBIT_SOURCE_RULE:
+        return False
+    return online_state.get(alert.robot_id) is False
+
+
 async def emit(alert: Alert) -> None:
+    if is_inhibited(alert):
+        log.debug("alert inhibited: %s %s (robot offline)", alert.robot_id,
+                  alert.rule_id)
+        return
     window = DEDUP_WINDOW.get(alert.rule_id, 60)
     if await should_emit(alert, window):
         await save(alert)
