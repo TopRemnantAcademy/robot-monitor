@@ -100,10 +100,13 @@ main:
           script: |
             set -eu
             cd frontend_dashboard
-            # npm ci 不行：lockfile v3 只写生成平台的原生可选依赖条目（本仓在 Windows 生成，
-            # 无 linux-x64 条目），npm ci 严格按 lockfile 安装 → rollup 原生模块缺失
-            # （npm/cli#4828 症状，2026-10-11 CI 实录）。npm install 的 reify 会按
-            # 父包 optionalDependencies 元数据补装当前平台的可选依赖。版本仍受 lockfile 约束。
+            # npm 10 实测（2026-10-11 两个 CI 轮次）：lockfile 在 Windows 生成时只写
+            # win32 的 rollup 原生可选依赖条目；无论 npm ci 还是 npm install，
+            # 只要 lockfile 存在就不据 rollup 的 optionalDependencies 元数据补装
+            # linux-x64 变体 → vitest 启动即崩（npm/cli#4828）。
+            # 解法：测试门禁内删 lockfile 让 npm 在 linux 全新 resolve
+            # （错误信息自身推荐的做法）；代价是传递依赖浮动，门禁可接受。
+            rm -f package-lock.json
             npm install
             npm test
     - name: sync-to-github
@@ -229,10 +232,13 @@ main:
           script: |
             set -eu
             cd frontend_dashboard
-            # npm ci 不行：lockfile v3 只写生成平台的原生可选依赖条目（本仓在 Windows 生成，
-            # 无 linux-x64 条目），npm ci 严格按 lockfile 安装 → rollup 原生模块缺失
-            # （npm/cli#4828 症状，2026-10-11 CI 实录）。npm install 的 reify 会按
-            # 父包 optionalDependencies 元数据补装当前平台的可选依赖。版本仍受 lockfile 约束。
+            # npm 10 实测（2026-10-11 两个 CI 轮次）：lockfile 在 Windows 生成时只写
+            # win32 的 rollup 原生可选依赖条目；无论 npm ci 还是 npm install，
+            # 只要 lockfile 存在就不据 rollup 的 optionalDependencies 元数据补装
+            # linux-x64 变体 → vitest 启动即崩（npm/cli#4828）。
+            # 解法：测试门禁内删 lockfile 让 npm 在 linux 全新 resolve
+            # （错误信息自身推荐的做法）；代价是传递依赖浮动，门禁可接受。
+            rm -f package-lock.json
             npm install
             npm test
     # e2e 与 push 共用同一份 stages/env（锚点定义在 push 块，此处按文档序用别名引用）
