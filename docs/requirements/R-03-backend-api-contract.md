@@ -54,7 +54,7 @@ Drawer 的 ECharts 折线与关节热力图数据源。
 | 参数 | 类型 | 默认 | 说明 |
 | :--- | :--- | :--- | :--- |
 | `minutes` | int | 5 | 回溯分钟数 |
-| `resolution` | str | `10s` | 支持 `10s` / `30s` / `1m`；小于 1s 返回 400 |
+| `resolution` | str | `10s` | 支持 `10s` / `30s` / `1m` 等**整秒/整分钟**值（`<n>s` / `<n>m`，n 必须为正整数）；小于 1s、非整数倍（`2.5s` / `1.5m`）、格式非法 一律 400 |
 
 **成功响应**
 
@@ -75,12 +75,32 @@ Drawer 的 ECharts 折线与关节热力图数据源。
 
 | 状态码 | 场景 | 响应体 |
 | :--- | :--- | :--- |
-| 400 | `resolution` 非法 | `{"detail": "invalid resolution: xx"}` |
+| 400 | `resolution` 非法（格式错 / 非整数倍 / <1s） | `{"detail": "invalid resolution: xx"}` |
+| 400 | `resolution` 非整数倍（显式语义） | `{"detail": "invalid resolution: 2.5s"}` |
 | 503 | 数据库查询失败 | `{"detail": "query failed: ..."}` |
 
 **实现说明（重要）**：连续聚合 `robot_status_10s` 不含 JSONB 关节列，
 而热力图需要 `joint_temperatures`，故本端点直接对 `robot_telemetry` 原始表做 `time_bucket`，
 一次取回标量 + 关节字典。**不要改成只查连续聚合**，否则热力图无数据。
+
+### 4.1 `resolution` 解析语义（Issue #74 锁定）
+
+**不得静默截断**。旧实现用 `int(float(...))` 收尾，把 `2.5s` 变成 2 秒、
+`1.5m` 变成 60 秒、`0.5m` 变成 1 秒 —— HTTP 200，无任何提示，图上点数与预期对不上。
+
+现行规则（`backend_ingestion/app/main.py:_parse_resolution`）：
+
+| 输入 | 结果 | 说明 |
+| :--- | :--- | :--- |
+| `10s` / `30s` / `1s` | 10 / 30 / 1 秒 | 整秒，合法 |
+| `1m` / `5m` | 60 / 300 秒 | 整分钟，合法（响应回显为 `60s` / `300s`，单位规范化） |
+| `2.5s` / `1.5m` / `0.5m` | **400** | 非整数倍，显式拒绝（`resolution must be a whole number of seconds`） |
+| `500ms` / `0s` | **400** | 下限 1s（不得放宽，避免压垮查询） |
+| `abc` / `10` / 空串 | **400** | 格式非法（必须带 `s`/`m` 单位） |
+
+> 前端 Drawer 仅传 `resolution=10s`（`frontend_dashboard/src/api/robotHistory.ts:13`
+> 的 `HISTORY_RESOLUTION`），落在合法区间，本次收紧**不会**触发新的 400。
+
 
 ## 5. WebSocket `/ws/robots`
 

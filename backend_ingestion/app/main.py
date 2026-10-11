@@ -289,15 +289,51 @@ async def history(
 
 
 def _parse_resolution(resolution: str) -> int:
-    """'10s' / '30s' / '1m' → 秒。"""
+    """'10s' / '30s' / '1m' → 整数秒。非整数倍（'2.5s' / '1.5m'）**拒绝**，不静默截断。
+
+    Issue #74：旧实现直接 `int(float(...))`，把 '2.5s' 静默变成 2 秒、
+    '1.5m' 变成 90 秒、'0.5m' 变成 30 秒 —— 用户写的分辨率与实际查询分辨率
+    不一致，且**没有任何错误提示**。这类"差一点就对"的静默降级在运维看板上最难查：
+    图上点数与预期对不上，但 HTTP 200、无告警。
+
+    因此这里改为：**只有当值恰好是整数时才接受**，否则 `raise ValueError`，
+    由 `history()`（`main.py:227-229`）转成 HTTP 400 + `invalid resolution: <原文>`。
+    合法整数值（'10s'→10、'30s'→30、'1m'→60）行为**逐字不变**；
+    下限仍为 1s（sub-1s 仍禁止，避免压垮查询）。
+
+    【为什么不用 'm' 先乘 60 再判整】
+    '0.02m' 乘 60 得 1.2 秒，虽 >1 却不是整秒，对 `time_bucket('1.2 seconds')`
+    这种非整秒桶没有意义；先判「分钟数本身是整数」语义更清晰，
+    也避免 '1.6666666666666667m' ≈ 100s 这种"碰巧凑近整数"的模糊输入被放行。
+    """
     s = resolution.strip().lower()
     if s.endswith("ms"):
         raise ValueError("resolution below 1s not supported")
-    if s.endswith("m"):
-        return max(1, int(float(s[:-1])) * 60)
-    if s.endswith("s"):
-        return max(1, int(float(s[:-1])))
-    raise ValueError(resolution)
+    unit = s[-1:] if s[-1:] in ("s", "m") else ""
+    if not unit:
+        raise ValueError(resolution)
+
+    raw = s[:-1]
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(resolution) from None
+
+    # 拒绝 nan / inf：`float('nan')` 不会被上面的 except 拦住（它解析成功），
+    # 而 `nan != int(nan)` 恒真、`int(nan)` 直接抛 ValueError —— 显式挡掉，
+    # 让错误信息稳定为 "invalid resolution"，而不是随机冒出的 math domain error。
+    if value != value or value in (float("inf"), float("-inf")):
+        raise ValueError(resolution)
+
+    # 非整数倍（含 '2.5s' / '1.5m' / '0.5m'）→ 400，不再静默截断。
+    if value != int(value):
+        raise ValueError(f"resolution must be a whole number of seconds: {resolution}")
+
+    seconds = int(value) * (60 if unit == "m" else 1)
+    # 下限 1s（禁止项：不得放宽）。'0.5m'=30 合法，但 '0m'/'0s' 仍拒绝。
+    if seconds < 1:
+        raise ValueError("resolution below 1s not supported")
+    return seconds
 
 
 def _as_dict(v) -> dict:
