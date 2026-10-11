@@ -1,7 +1,9 @@
 """WS 合成探针的行为契约测试（ISSUE #58 / 缺口 G-3）。
 
 锁定四件在 orders/16-dispatch.md §2 与 ISSUE #58 里被明确要求的事：
-  1. 探针指标**独立存在**，且**不覆盖**订单 16 T1b 的 `robot_backend_ws_connections`；
+  1. 探针指标**独立存在**，且与连接数指标 `robot_backend_ws_connections` **不会互相覆盖**
+     （ISSUE #72 之前误实现为「metrics.py 里不得定义连接数」；连接数本就该定义在 metrics.py，
+     真正要防的是**同名复用**——同一个名字既当服务端连接数又当客户端探针）；
   2. 探针**免鉴权**：`/metrics` 与探针目标都不要求外部 token；
   3. 探针**可降级**：`WS_PROBE_ENABLED=false` 时 `run()` 立刻返回（no-op），
      且探针自身异常不会冒泡（失败只翻指标）；
@@ -49,12 +51,27 @@ class TestProbeMetricsAreDistinct:
         assert "robot_backend_ws_probe_alive" in text
         assert "robot_backend_ws_probe_failures_total" in text
 
-    def test_probe_does_not_define_connections_metric(self):
-        # ISSUE #58 明确：探针指标与订单 16 T1b 的 `robot_backend_ws_connections`
-        # 是**不同**指标。这里断言 `metrics.py` 不定义连接数（只注释里提到）。
-        module_source = __import__("pathlib").Path(metrics.__file__).read_text()
-        assert "Gauge(\n    \"robot_backend_ws_connections\"" not in module_source
-        assert '"robot_backend_ws_connections"' not in module_source.split("#")[0]
+    def test_probe_and_connections_metrics_do_not_collide(self):
+        """探针与连接数是**两个不同名字的指标**，禁止同名复用/互相覆盖。
+
+        ISSUE #58 的本意是"别把探针塞进连接数指标"（客户端视角 vs 服务端视角）。
+        ISSUE #72 把连接数指标统一为 `robot_backend_ws_connections` 并定义在 metrics.py ——
+        这与 ISSUE #58 并不冲突：两者名字不同、语义不同、可共存。真正要守住的是：
+          a) metrics.py 里 `robot_backend_ws_connections` 是 Gauge（连接数，可增可减）；
+          b) 它**不是**探针指标（既不叫 probe，也不被 ws_probe 写）。
+        """
+        import inspect
+
+        # a) 连接数指标存在、类型正确、且名字与探针不同
+        assert type(metrics.ws_connections).__name__ == "Gauge"
+        assert metrics.ws_connections._name == "robot_backend_ws_connections"
+        assert metrics.ws_probe_alive._name != metrics.ws_connections._name
+        assert metrics.ws_probe_failures._name != metrics.ws_connections._name
+
+        # b) 探针模块**不写**连接数指标：它只在文档字符串里提到对方（说明为何不同），
+        #    代码里不得出现 `metrics.ws_connections`（写=覆盖=两个视角混成一个数）。
+        probe_src = inspect.getsource(ws_probe)
+        assert "metrics.ws_connections" not in probe_src
 
     def test_probe_alive_is_gauge_failures_is_counter(self):
         # 类型必须对：Gauge 反映「最近一次」，Counter 单调累加给 increase()/rate() 用。

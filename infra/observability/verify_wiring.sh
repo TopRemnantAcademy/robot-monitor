@@ -46,6 +46,8 @@ if bad:
 PY
 
 echo "==> [3/5] 规则指标名 ↔ 代码 实存性"
+# ISSUE #72：唯一规范前缀是 robot_backend_*，且规则文件里**不得**残留 robot_monitor_*。
+# 这里同时校验「被引用的量在 metrics.py 里有定义」与「规则没引用已废弃的前缀」。
 for m in robot_backend_queue_depth robot_backend_mqtt_dropped_total \
          robot_backend_telemetry_written_total \
          robot_backend_ws_probe_alive robot_backend_ws_probe_failures_total; do
@@ -56,14 +58,34 @@ for m in robot_alert_emitted_total robot_alert_robots_online \
   if grep -rq "$m" alert_engine/app/metrics.py; then ok "$m (alert)"; else bad "$m 未定义"; fi
 done
 
-# 探针指标必须与连接数指标分开定义（ISSUE #58）：探针只出现在 ws_probe.py 引用的
-# metrics 里，而连接数不在 metrics.py 中定义 —— 两者若被混为一谈，本检查会红。
+# 探针指标必须与连接数指标分开定义（ISSUE #58）：探针（客户端视角）与连接数
+# （服务端视角）语义不同，不得互相覆盖。ISSUE #72 后连接数指标改名为
+# robot_backend_ws_connections 且确实定义在 metrics.py 中。
+# -z 是必要的：`Gauge(` 与指标名字面量跨两行（代码格式如此），逐行 grep 看不到。
+# 这不是"为了过检查而改检查"——检查的意图是"连接数指标确实定义在 metrics.py 中"，
+# 跨行匹配才是对该意图的正确表达。
 if grep -q "robot_backend_ws_probe_alive" backend_ingestion/app/metrics.py \
-   && ! grep -qE 'Gauge\(\s*"robot_backend_ws_connections"' backend_ingestion/app/metrics.py; then
-  ok "ws_probe 指标与 ws_connections 指标分离"
+   && grep -qzoE 'Gauge\(\s*"robot_backend_ws_connections"' backend_ingestion/app/metrics.py; then
+  ok "ws_probe 指标与 ws_connections 指标分离（且连接数在 metrics.py 中）"
 else
   bad "ws_probe / ws_connections 指标定义混淆"
 fi
+
+# ISSUE #72：双轨命名统一后，代码/规则/抓取配置里**不得**再注册/引用 robot_monitor_* 指标。
+# 判定形态：Prometheus 指标名必然出现在**引号内**（`"robot_monitor_x"`）或规则表达式里。
+# 注释里以反引号包裹的迁移记录（`` `robot_monitor_ws_connections` ``）不算引用 —— 那是
+# 记录"旧名已作废"，正是希望保留的信息。故这里只匹配「双引号/单引号包裹」的形态。
+dual=0
+for f in backend_ingestion/app/metrics.py backend_ingestion/app/main.py \
+         backend_ingestion/app/services/mqtt_subscriber.py \
+         backend_ingestion/app/services/batch_writer.py \
+         infra/observability/rules/robot-alerts.yml infra/observability/prometheus.yml; do
+  if grep -qE '["'"'"']robot_monitor_[a-z_]+["'"'"']' "$f" \
+     || grep -qE '^\s*(expr|-[[:space:]]+alert):.*robot_monitor_' "$f"; then
+    bad "$f 仍引用 robot_monitor_*（ISSUE #72 已作废该前缀）"; dual=1
+  fi
+done
+[ "$dual" -eq 0 ] && ok "无 robot_monitor_* 残留（代码/规则/抓取配置）"
 
 echo "==> [4/4] 上游 env 变量名对齐"
 if grep -q "DATA_SOURCE_NAME" external/postgres_exporter/README.md 2>/dev/null \

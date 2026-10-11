@@ -185,14 +185,15 @@ class BatchWriter:
         （ISSUE #19 G2 的直接证据）。降级链三条路径都只经由此处记账：
         这里刻意**不改写入语义**（不引 RETURNING、不改批量策略），只加计数器。
 
-        `reason` 供订单 16 的 `robot_monitor_batch_flush_total{reason}` 使用；
+        `reason` 供订单 16 的 `robot_backend_batch_flushes_total{reason}` 使用；
         L3 二分隔离出的子批沿用父批的 reason（它本就是同一次触发的产物，
         拆成两半不改变"为什么刷"这一事实）。
         """
         self.rows_submitted += len(submitted)
         self.rows_skipped += len(submitted) - written
-        metrics.telemetry_written.inc(written)
-        metrics.batch_flushes.inc()
+        # ISSUE #72：批次数 + 行数**只**经 observe_flush 各记一次。
+        # 此前这里多打了 telemetry_written / batch_flushes（无 label 版），
+        # 与 observe_flush 里的 robot_monitor_* 重复计数；合并后由 observe_flush 统一出口。
         metrics.observe_flush(reason, written)
 
     async def _write_with_retry(self, rows: list[tuple], reason: str = "timeout") -> None:

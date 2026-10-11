@@ -70,6 +70,25 @@ prometheus.yml
 `robot_alert` 回答「哪台机器人坏了」；Prometheus 回答「监控系统还有没有资格回答前一个问题」。
 后者失灵时，前者的所有结论都不可信。
 
+### 4.0 命名唯一来源（ISSUE #72）
+
+后端的指标前缀**只有 `robot_backend_*`**。历史上订单 16 的实现分支另立过一套
+`robot_monitor_*`（6 个），与订单 19 已落地的 `robot_backend_*` 双轨并存 —— 其中 3 个
+是同一计数源的重复指标（同一 `queue.qsize()` / `writer.written` / `mqtt.received`）。
+现已统一：
+
+| 旧名（已废） | 现状 |
+|---|---|
+| `robot_monitor_batch_queue_size` | 删除（同源 `robot_backend_queue_depth`） |
+| `robot_monitor_batch_rows_total` | 删除（同源 `robot_backend_telemetry_written_total`） |
+| `robot_monitor_mqtt_messages_total` | 删除（同源 `robot_backend_mqtt_received_total`） |
+| `robot_monitor_batch_flush_total{reason}` | 并入 `robot_backend_batch_flushes_total{reason}` |
+| `robot_monitor_ws_connections` | 改名 `robot_backend_ws_connections` |
+| `robot_monitor_history_latency_seconds` | 改名 `robot_backend_history_latency_seconds` |
+
+**面板/告警若引用过 `robot_monitor_*`，需同步改名**（本仓 rules 与 verify_wiring 已同步；
+外部 Grafana 面板不在仓库内，属运维侧动作）。改名的两个指标 PromQL 写法不变，只是名字换了。
+
 ### 4.1 两个「WS 指标」不是一回事（易混）
 
 | 指标 | 视角 | 谁能回答 | 谁在写 |

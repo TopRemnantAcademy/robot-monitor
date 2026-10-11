@@ -28,6 +28,8 @@ scrape_configs:
       - targets: ["localhost:9090"]
 
   # 应用层：后端采集与告警引擎（自定义业务指标）
+  # 后端的**唯一规范前缀是 `robot_backend_*`**（ISSUE #72 统一双轨命名；
+  # 历史订单 16 的 `robot_monitor_*` 已作废/并入，见 backend_ingestion/app/metrics.py 头注释）。
   - job_name: robot_backend
     metrics_path: /metrics
     static_configs:

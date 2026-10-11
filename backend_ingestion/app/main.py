@@ -148,7 +148,7 @@ async def healthz() -> HealthResponse:
     }
 
 
-# 当前活跃 WS 连接数（订单 16 T1b 的 `robot_monitor_ws_connections`）。
+# 当前活跃 WS 连接数（订单 16 T1b 的 `robot_backend_ws_connections`，ISSUE #72 改名）。
 # 进程内整数而非 Gauge 直写：Gauge.set 在 /metrics 里统一刷新（拉模型），
 # 这里维护的"事实"必须在**连接真正建立/回收**时更新，两个时点不能混。
 # 用 try/finally 保证异常路径也会回收，否则连接数只增不减（假告警）。
@@ -194,9 +194,8 @@ async def prometheus_metrics():
     """
     # 瞬时量（Gauge）必须在暴露前刷新：拉模型下没人替我们定期 set，
     # 不刷新的话 queue_depth 会停在最后一次写入的时刻，抓到的永远是过期值。
-    # 订单 16 验收要求 `robot_monitor_batch_queue_size` 压测时有真实波动（非常量 0），
-    # 正是靠这一次 set —— 少了它，Gauge 初值是 0 且永不变。
-    metrics.queue_depth.set(writer.queue.qsize())
+    # 订单 16 验收要求队列水位压测时有真实波动（非常量 0），正是靠这一次 set ——
+    # 少了它，Gauge 初值是 0 且永不变。ISSUE #72 后仅剩这一套 Gauge（无重复刷新）。
     metrics.refresh_gauges(writer.queue.qsize(), _ws_active)
     body, ctype = metrics.render()
     # ctype 由 prometheus_client 给出（`text/plain; version=0.0.4; charset=utf-8`），

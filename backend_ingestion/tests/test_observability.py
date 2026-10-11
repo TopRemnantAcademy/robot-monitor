@@ -7,9 +7,8 @@
     pytest backend_ingestion/tests/
 
 覆盖：
-  T1b  /metrics 免鉴权且含 6 个 robot_monitor_* 指标；5 个 robot_backend_* 必须保留
-       （订单 13/19 的现网 PromQL 依赖它们，删掉会静默失效）
-       queue_size Gauge 随队列真实变化（验收明确要求"不是常量 0"）
+  T1b  /metrics 免鉴权；ISSUE #72 后**只有** robot_backend_* 一套命名（无 robot_monitor_*，
+       双轨重复指标已删）；queue Gauge 随队列真实变化（验收要求"不是常量 0"）
   T1b  禁止按 robot_id 分 label（高基数）—— 用指标名断言而非人工检查
   T3   OTel 未配置时 no-op；_traces_url 归一化；缺包时可降级
   T4   日志是单行 JSON，`json.loads` 可解析且含 ts/level/logger/msg
@@ -28,24 +27,21 @@ from app import metrics, telemetry_tracing
 from app.logging_json import JsonFormatter, configure_json_logging
 from app.main import app
 
-# 订单 16 §1 T1b 要求的 6 个指标名（逐字对照派工单表格）
-REQUIRED_MONITOR_METRICS = (
-    "robot_monitor_batch_queue_size",
-    "robot_monitor_batch_flush_total",
-    "robot_monitor_batch_rows_total",
-    "robot_monitor_mqtt_messages_total",
-    "robot_monitor_ws_connections",
-    "robot_monitor_history_latency_seconds",
-)
-
-# 订单 13/19 已落地、**不得**被本单删除的既有指标
-LEGACY_BACKEND_METRICS = (
+# ISSUE #72：唯一规范命名。robot_backend_* 被现网 PromQL 与抓取目标引用，
+# 必须保留；订单 16 新增的 ws_connections / history_latency_seconds 已改名并入。
+REQUIRED_BACKEND_METRICS = (
     "robot_backend_telemetry_written_total",
     "robot_backend_batch_flushes_total",
     "robot_backend_queue_depth",
     "robot_backend_mqtt_received_total",
     "robot_backend_mqtt_dropped_total",
+    "robot_backend_ws_connections",
+    "robot_backend_history_latency_seconds",
 )
+
+# 双轨命名统一（ISSUE #72）后，这些前缀**不得**再出现在 /metrics 里。
+# 用前缀整体断言而非逐名断言：防止日后又有人「顺手」新建一个 robot_monitor_*。
+FORBIDDEN_MONITOR_PREFIX = "robot_monitor_"
 
 
 @pytest.fixture
@@ -65,21 +61,35 @@ class TestMetricsEndpoint:
         """
         assert client.get("/metrics").status_code == 200
 
-    def test_all_six_monitor_metrics_exposed(self, client):
+    def test_all_backend_metrics_exposed(self, client):
+        """ISSUE #72 验收：唯一命名 robot_backend_* 的 7 个指标全部暴露。"""
         body = client.get("/metrics").text
-        missing = [n for n in REQUIRED_MONITOR_METRICS if n not in body]
+        missing = [n for n in REQUIRED_BACKEND_METRICS if n not in body]
         assert not missing, f"缺失指标: {missing}"
 
     def test_legacy_metrics_preserved(self, client):
-        """既有 5 指标必须仍在 —— 本单是**新增**，不是改名替换。"""
+        """现网 PromQL/抓取目标依赖的 5 个 robot_backend_* 必须仍在（严禁删除）。"""
         body = client.get("/metrics").text
-        missing = [n for n in LEGACY_BACKEND_METRICS if n not in body]
+        missing = [n for n in REQUIRED_BACKEND_METRICS[:5] if n not in body]
         assert not missing, f"既有指标被误删: {missing}"
+
+    def test_no_dual_track_monitor_prefix(self, client):
+        """ISSUE #72：双轨命名统一后，/metrics 里不得再有任何 robot_monitor_* 指标。
+
+        断言的是**指标名**（行首或 label 名），不是注释 —— 注释里提到历史命名是允许的，
+        因为那是迁移记录；只有真正注册进 registry 的时序才算违规。
+        """
+        body = client.get("/metrics").text
+        leaked = [
+            line for line in body.splitlines()
+            if line.startswith(FORBIDDEN_MONITOR_PREFIX)
+        ]
+        assert not leaked, f"残留 robot_monitor_* 指标: {leaked}"
 
     def test_flush_counter_has_reason_label(self, client):
         """按触发原因分 label 是"双重触发是否按设计工作"的唯一证据。
 
-        注意 Counter 的 label 系列是**惰性注册**的：`robot_monitor_batch_flush_total{...}`
+        注意 Counter 的 label 系列是**惰性注册**的：`robot_backend_batch_flushes_total{...}`
         只有在第一次 `labels(reason=...).inc()` 之后才出现（Prometheus 官方行为，
         不是本实现的缺陷）。因此这里必须先**制造一次观测**，再断言 label 存在 ——
         直接抓取空 registry 会拿到 0 行，从而误报"没有 label"。
@@ -88,14 +98,14 @@ class TestMetricsEndpoint:
 
         metrics.observe_flush("count", 7)
         body = client.get("/metrics").text
-        assert 'robot_monitor_batch_flush_total{reason="count"}' in body
+        assert 'robot_backend_batch_flushes_total{reason="count"}' in body
 
     def test_observe_flush_rejects_unknown_reason(self, client):
         """脏 reason 归一到 'unknown' 而不是静默丢弃 —— 让拼写错误在面板上可见。"""
         from app import metrics
 
         metrics.observe_flush("typo-value", 1)
-        assert 'robot_monitor_batch_flush_total{reason="unknown"}' in client.get(
+        assert 'robot_backend_batch_flushes_total{reason="unknown"}' in client.get(
             "/metrics"
         ).text
 
@@ -122,9 +132,9 @@ class TestMetricsEndpoint:
 
         def read_gauge() -> float:
             for line in client.get("/metrics").text.splitlines():
-                if line.startswith("robot_monitor_batch_queue_size "):
+                if line.startswith("robot_backend_queue_depth "):
                     return float(line.split()[1])
-            raise AssertionError("robot_monitor_batch_queue_size 未暴露")
+            raise AssertionError("robot_backend_queue_depth 未暴露")
 
         before = read_gauge()
         for _ in range(5):
