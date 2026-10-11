@@ -40,6 +40,7 @@
 | 19 `robot_alert` 身份 + ack 字段 | ✅ **已回收并反向验证** | 产出 `auto/alert-identity-759f` @ `d27b972`；ORM DDL 与 `init.sql` 逐字同为 `PRIMARY KEY (time, alert_id)`；测试 25 → **29 passed**；注入缺陷实测会红 |
 | 上游参考源下载 | ✅ **22/22 齐备**（此前只有 14） | `external/fetch-sources.sh` 声明 22 个，磁盘实存 22 个，缺失/多余均为 0；`external/` 现 **123 MB**。此前「已下载 22 个」的说法**是错的** |
 | 15 认证与 RBAC | ⏳ **CNB 执行中** | issue **#36** / `cnb-e2k-1k4jf5tfo`，基线 `main@58bafb5`，workMode=true 已核验。派前复验修正 4 处过期表述 |
+| 26 前端健壮性（I-20） | ✅ **已交付，待回收** | 见 issue **#47**。`react-error-boundary@6.1.6` 包 App 外层 + `@tanstack/react-query@5.104.1` 管 Drawer `/history` 缓存/重试；**不替换 zustand**（query 管服务端、zustand 管 WS 客户端状态）。实证：`tsc --noEmit` 0 错误、`vite build` 成功、新增 e2e 7/7 通过 |
 
 本地 HEAD = CNB `main` = **`58bafb5`**（已推送同步）。
 远端 **22 个分支**已全部对账完毕（第二轮），实际有价值的独有贡献仅 5 处，均已落地。
@@ -135,6 +136,7 @@
 | 两服务 `/metrics` 端点 | ✅ 后端 `:8011` 与告警 `:8012` 均返回 200，`content_type=text/plain; version=0.0.4` |
 | `.gitignore` 覆盖 `.venv-ci` | ✅ `git check-ignore .venv-ci/pyvenv.cfg` → 命中 `.gitignore:14:.venv*/` |
 | 假覆盖测试文件 | ✅ 全仓扫描 **0 个**（`test_*.py` 均含真实 `test_*` 函数） |
+| 前端错误边界 + react-query（订单 26） | ✅ `.e2e/run_order26.mjs` **7/7 通过**：子组件抛错被 ErrorBoundary 兜住（不白屏+重试按钮）、`/history` 500 自动重试至成功（后端命中 3 次）、staleTime 内重复查询命中缓存不再打后端 |
 
 本机验证环境（已打通）：Python **3.13.14** 隔离 venv，
 `aiomqtt 2.5.1 / asyncpg 0.32.0 / fastapi 0.143.0 / redis 8.1.0 / pydantic 2.14.0`。
