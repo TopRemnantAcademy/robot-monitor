@@ -21,6 +21,22 @@ docker compose \
 | `infra/docker-compose.app.yml` | backend + alert-engine | 应用要进同一网络，否则 Prometheus 的目标名解析不到 |
 | `infra/observability/…` | prometheus + alertmanager + 2 个 exporter | 运维增强层，按需叠加 |
 
+## 1.1 为什么 exporter 必须与 base 组件同网（订单 22 / I-12）
+
+四个 exporter/prometheus 的目标地址全是 **Docker service DNS**（`timescaledb:5432`、
+`redis:6379`、`backend:8000` …）。这些名字只有在**同一张网络**里才解析得到。
+
+本仓库的做法是**三层都不声明 `networks:`**，让 Compose 把三个文件的所有 service
+一起投进默认网络 `{project}_default`。`verify_wiring.sh` 的第 5 步会守住这条：
+一旦有人在 observability 文件里加了 `networks:`，检查立即变红。
+
+踩过的坑（这正是 I-12 反复强调的原因）：
+exporter 容器会**正常起来**、端口也正常监听，但 `/metrics` 里没有任何业务指标 ——
+因为 `DATA_SOURCE_NAME` 里的 `timescaledb` 解析失败。只看 `docker ps` 完全发现不了。
+
+拼命令时 project 名必须一致：用**一条** `docker compose -f a -f b up`，或给每条命令
+都加同一个 `-p <project>`。否则会造出两张网络，DNS 互不可见。
+
 ## 2. 端口与入口
 
 | 服务 | 地址 | 用途 |
@@ -79,3 +95,5 @@ curl -s localhost:9090/api/v1/rules | grep -o '"name":"[A-Za-z]*"' | head
 | `robot_backend` 一直 down | 应用跑在宿主机，`backend` 域名解析不到 | 用 `docker-compose.app.yml` 让应用进网络 |
 | `emqx` down | `/api/v5/prometheus/stats` 需 API key | 该端点未验证；不要伪报 up=1，改用 emqtt-bench `--prometheus` |
 | `queue_depth` 抓取后不变 | Gauge 只在写入时 set | 已有修正：`/metrics` 处理函数抓取前刷新（`main.py:86`） |
+| postgres/redis-exporter 起来了但无业务指标 | exporter 与 timescaledb/redis **不同网**，`DATA_SOURCE_NAME` 的 host 解析失败 | 确认三个 compose 都没声明 `networks:`、且用同一条命令（或同一 `-p`）拉起 |
+| 启动即报 `POSTGRES_PASSWORD 未设置` | `${POSTGRES_PASSWORD:?…}` 按设计拦住了无凭据启动 | 在宿主机 `cp .env.example .env` 并填写（见 `.env.example` 的 TimescaleDB 凭据段） |

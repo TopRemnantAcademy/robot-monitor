@@ -15,7 +15,7 @@ fail=0
 ok()  { echo "  [ok]   $1"; }
 bad() { echo "  [FAIL] $1"; fail=1; }
 
-echo "==> [1/4] YAML 语法"
+echo "==> [1/5] YAML 语法"
 for f in infra/docker-compose.yml infra/docker-compose.app.yml \
          infra/observability/docker-compose.observability.yml \
          infra/observability/prometheus.yml infra/observability/alertmanager.yml \
@@ -27,7 +27,7 @@ for f in infra/docker-compose.yml infra/docker-compose.app.yml \
   fi
 done
 
-echo "==> [2/4] 抓取目标可达性（三层 merge）"
+echo "==> [2/5] 抓取目标可达性（三层 merge）"
 python3 - <<'PY' || fail=1
 import yaml, re, sys
 base = yaml.safe_load(open('infra/docker-compose.yml'))
@@ -45,7 +45,7 @@ if bad:
     sys.exit(1)
 PY
 
-echo "==> [3/4] 规则指标名 ↔ 代码 实存性"
+echo "==> [3/5] 规则指标名 ↔ 代码 实存性"
 for m in robot_backend_queue_depth robot_backend_mqtt_dropped_total \
          robot_backend_telemetry_written_total; do
   if grep -rq "$m" backend_ingestion/app/metrics.py; then ok "$m (backend)"; else bad "$m 未定义"; fi
@@ -54,7 +54,7 @@ for m in robot_alert_emitted_total robot_alert_robots_online; do
   if grep -rq "$m" alert_engine/app/metrics.py; then ok "$m (alert)"; else bad "$m 未定义"; fi
 done
 
-echo "==> [4/4] 上游 env 变量名对齐"
+echo "==> [4/5] 上游 env 变量名对齐"
 if grep -q "DATA_SOURCE_NAME" external/postgres_exporter/README.md 2>/dev/null \
    && grep -q "DATA_SOURCE_NAME" infra/observability/docker-compose.observability.yml; then
   ok "DATA_SOURCE_NAME (postgres_exporter/README.md:223)"
@@ -67,6 +67,46 @@ if grep -q "REDIS_ADDR" external/redis_exporter/README.md 2>/dev/null \
 else
   echo "  [skip] external/redis_exporter 未下载，跳过"
 fi
+
+# 订单 22 / I-12：exporter 同网 + 无明文密码。这两条是「起来了但拉不到」的根因，
+# 光看容器状态发现不了，必须在配置层卡住。
+echo "==> [5/5] exporter 同网 + 无明文密码"
+python3 - <<'PY2' || fail=1
+import yaml, sys
+obs = yaml.safe_load(open('infra/observability/docker-compose.observability.yml'))
+base = yaml.safe_load(open('infra/docker-compose.yml'))
+fails = []
+
+# a) 本文件不得声明自有网络：一旦声明，base 的 timescaledb/redis 不会自动落进来，
+#    exporter 就成了网络孤岛（DNS 解析不到，/metrics 无业务指标）。
+if obs.get('networks'):
+    fails.append("observability 文件声明了 networks，exporter 会与 base 服务分网")
+
+# b) exporter 的 depends_on 目标必须在 base compose 里真实存在（否则 DNS 名字是空的）
+base_svc = set(base['services'])
+for name in ('postgres-exporter', 'redis-exporter'):
+    svc = obs['services'].get(name)
+    if not svc:
+        fails.append(f"{name} 缺失")
+        continue
+    for dep in svc.get('depends_on', []) or []:
+        if dep not in base_svc:
+            fails.append(f"{name} depends_on {dep}，但 base compose 里没有该 service")
+
+# c) DATA_SOURCE_NAME 必须用 ${...} 变量引用，且不得出现字面量密码
+dsn = obs['services']['postgres-exporter']['environment']['DATA_SOURCE_NAME']
+if '${POSTGRES_PASSWORD' not in dsn:
+    fails.append("DATA_SOURCE_NAME 未用 ${POSTGRES_PASSWORD} 变量引用")
+# 出网主机名必须是 base 的 service 名（同网才解析得到）
+if '@timescaledb:' not in dsn:
+    fails.append("DATA_SOURCE_NAME 目标主机不是 timescaledb（非同网 DNS）")
+
+for f in fails:
+    print(f"  [FAIL] {f}")
+if fails:
+    sys.exit(1)
+print("  [ok]   无自有网络 / depends_on 目标存在 / 密码走变量")
+PY2
 
 echo
 if [ "$fail" -eq 0 ]; then echo "全部通过 ✅"; else echo "存在失败项 ❌"; fi
