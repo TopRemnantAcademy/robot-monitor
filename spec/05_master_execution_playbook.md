@@ -56,7 +56,7 @@
 指令：
 > 读取 `spec/01_backend_data_ingestion_and_storage.md`。
 > 依次生成：
-> 1. `backend_ingestion/__init__.py`（**必须**，否则 Docker CMD 的 `backend_ingestion.app.main:app` 导入失败）
+> 1. `backend_ingestion/__init__.py`（顶层包标记；2026-10-11 起 Docker CMD 为 WORKDIR /app/backend_ingestion + `app.main:app`）
 > 2. `app/db/models.py`（SQLAlchemy 模型；`robot_telemetry` 复合主键 `(time, robot_id)`）
 > 3. `app/services/batch_writer.py`（核心：异步队列 + 双重触发批量落库 + graceful_shutdown）
 > 4. `app/services/mqtt_subscriber.py`（MQTT 接收 + 自动重连）

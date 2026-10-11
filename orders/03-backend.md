@@ -48,7 +48,7 @@ backend_ingestion/
 3. **生命周期**：startup 启动 MQTT 订阅 + batch_writer 消费 + Redis `robot:alerts` 订阅；shutdown 调 `graceful_shutdown()`。
 
 ## Dockerfile
-多阶段 `python:3.11-slim`；CMD `uvicorn backend_ingestion.app.main:app --host 0.0.0.0 --port 8000`。
+多阶段 `python:3.11-slim`；CMD `uvicorn app.main:app --host 0.0.0.0 --port 8000`（WORKDIR /app/backend_ingestion，2026-10-11 修正，与代码 `from app import ...` 风格一致）。
 仓库根 `.dockerignore` 必须排除 `.env`（已存在，不得删除）。
 
 ## 验收标准（模拟器已在 02 就绪，可执行）

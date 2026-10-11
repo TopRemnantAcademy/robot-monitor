@@ -119,11 +119,14 @@ FROM python:3.11-slim
 WORKDIR /app
 COPY --from=builder /install /usr/local
 COPY backend_ingestion /app/backend_ingestion
+WORKDIR /app/backend_ingestion
 EXPOSE 8000
-CMD ["uvicorn", "backend_ingestion.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
 > 必须在仓库根目录提供 `.dockerignore`，排除 `.env`、`__pycache__`、`.git`，**严禁把密钥烘焙进镜像**（见 00 §6）。
+> （2026-10-11 修正：原 CMD `backend_ingestion.app.main:app` 与代码内部 `from app import ...` 冲突，
+> 容器启动即 ModuleNotFoundError —— e2e 取证实录；WORKDIR 已指进 backend_ingestion。）
 
 ## 6. AI 编写指令（交给 NPC 的 prompt）
 

@@ -8,7 +8,7 @@
 pip install -r requirements.txt
 # 本地（需先起 infra/docker-compose.yml）
 uvicorn app.main:app --host 0.0.0.0 --port 8000
-# Docker（注意：CMD 用 backend_ingestion.app.main:app，故 __init__.py 必须存在）
+# Docker（CMD 与本地一致：WORKDIR /app/backend_ingestion + app.main:app）
 docker build -t robot-monitor-backend ..
 ```
 
