@@ -109,25 +109,29 @@ main:
             rm -f package-lock.json
             npm install
             npm test
-    - name: sync-to-github
-      # 单向同步 CNB main -> github.com/TopRemnantAcademy/robot-monitor（Issue #64 / C4）
-      # 凭据只从密钥仓库 imports 注入（GIT_USERNAME / GIT_ACCESS_TOKEN），禁止明文写入本文件。
-      imports:
-        - https://cnb.cool/flow.237/RobotMonitor-secrets/-/blob/main/github-sync.yml
-      stages:
-        - name: push main to github origin
-          if: '[ "$CNB_PIPELINE_KEY" != "pipeline-0" ]'
-          image: tencentcom/git-sync
-          settings:
-            target_url: https://github.com/TopRemnantAcademy/robot-monitor.git
-            auth_type: https
-            username: ${GIT_USERNAME}
-            password: ${GIT_ACCESS_TOKEN}
-            branch: main
-            force: false
-            push_tags: false
-            git_user: RobotMonitor Sync
-            git_email: robot-monitor@users.noreply.github.com
+    # ⏸️ sync-to-github 暂停（2026-10-11）：imports 引用的 flow.237/RobotMonitor-secrets
+    # 仓不存在（API 404 实证）→ 本 pipeline 每次 prepare 即 error，把本已全绿的
+    # push 构建整体拖成 error，掩盖真实回归。恢复条件：建 secrets 仓并注入
+    # github-sync.yml（GIT_USERNAME / GIT_ACCESS_TOKEN）后，取消下面注释即可。
+    #   - name: sync-to-github
+    #     # 单向同步 CNB main -> github.com/TopRemnantAcademy/robot-monitor（Issue #64 / C4）
+    #     # 凭据只从密钥仓库 imports 注入（GIT_USERNAME / GIT_ACCESS_TOKEN），禁止明文写入本文件。
+    #     imports:
+    #       - https://cnb.cool/flow.237/RobotMonitor-secrets/-/blob/main/github-sync.yml
+    #     stages:
+    #       - name: push main to github origin
+    #         if: '[ "$CNB_PIPELINE_KEY" != "pipeline-0" ]'
+    #         image: tencentcom/git-sync
+    #         settings:
+    #           target_url: https://github.com/TopRemnantAcademy/robot-monitor.git
+    #           auth_type: https
+    #           username: ${GIT_USERNAME}
+    #           password: ${GIT_ACCESS_TOKEN}
+    #           branch: main
+    #           force: false
+    #           push_tags: false
+    #           git_user: RobotMonitor Sync
+    #           git_email: robot-monitor@users.noreply.github.com
     # ============================================================
     # e2e：端到端 30,000 行落库验证（ISSUE #60）—— 锚点定义处（&e2e-env / &e2e-stages）
     #
