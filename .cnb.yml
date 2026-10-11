@@ -77,6 +77,12 @@ main:
         - name: pytest
           script: |
             set -eu
+            # tests/load/test_payload_contract.py 需要 node 实跑 payload.js 取样例报文
+            # （订单 23 契约：payload 复用 mock_fleet 真实 24 关节结构，漏跑=契约裸奔）。
+            # python:3.11 镜像无 node；Debian bookworm 的 nodejs 18 支持 --input-type=module。
+            # 2026-10-11 首次实跑（CI 修复后）实证：3 failed, 68 passed —— 失败全因缺 node。
+            apt-get update -qq && apt-get install -y -qq --no-install-recommends nodejs >/dev/null
+            node --version
             python -m pip install --no-cache-dir -r alert_engine/requirements.txt
             python -m pip install --no-cache-dir -r backend_ingestion/requirements.txt
             # fakeredis 是**测试期**依赖：订单 04 的验收用例要验去重器的 SET NX 幂等
@@ -193,6 +199,12 @@ main:
         - name: pytest
           script: |
             set -eu
+            # tests/load/test_payload_contract.py 需要 node 实跑 payload.js 取样例报文
+            # （订单 23 契约：payload 复用 mock_fleet 真实 24 关节结构，漏跑=契约裸奔）。
+            # python:3.11 镜像无 node；Debian bookworm 的 nodejs 18 支持 --input-type=module。
+            # 2026-10-11 首次实跑（CI 修复后）实证：3 failed, 68 passed —— 失败全因缺 node。
+            apt-get update -qq && apt-get install -y -qq --no-install-recommends nodejs >/dev/null
+            node --version
             python -m pip install --no-cache-dir -r alert_engine/requirements.txt
             python -m pip install --no-cache-dir -r backend_ingestion/requirements.txt
             # fakeredis 是**测试期**依赖：订单 04 的验收用例要验去重器的 SET NX 幂等
