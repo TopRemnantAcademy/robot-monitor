@@ -25,7 +25,7 @@ docker compose \
 
 | 服务 | 地址 | 用途 |
 |---|---|---|
-| backend | `:8000` | `/healthz`、`/robots`、`/ws/robots`、**`/metrics`** |
+| backend | `:8000` | `/healthz`、`/robots`、`/ws/robots`、**`/metrics`**（均免鉴权；`/robots` 等业务 REST 需 Bearer） |
 | alert-engine | `:8001` | **`/metrics`**（独立 HTTP 服务，不是 FastAPI） |
 | Prometheus | `:9090` | UI / PromQL / `/-/rules` |
 | Alertmanager | `:9093` | UI / 静默 / 抑制 |
@@ -54,6 +54,18 @@ prometheus.yml
 `robot_alert` 回答「哪台机器人坏了」；Prometheus 回答「监控系统还有没有资格回答前一个问题」。
 后者失灵时，前者的所有结论都不可信。
 
+### 4.1 两个「WS 指标」不是一回事（易混）
+
+| 指标 | 视角 | 谁能回答 | 谁在写 |
+|---|---|---|---|
+| `robot_backend_ws_connections` | **服务端** | 有几个客户端挂着 | `main.py` 的 `ws_robots` 连接/断开时增删 |
+| `robot_backend_ws_probe_alive` | **客户端** | 这条连接真的还能收到首帧 snapshot 吗 | `app/ws_probe.py` 的合成探针循环 |
+| `robot_backend_ws_probe_failures_total` | **客户端** | 断过几次（`increase()` 看抖动） | 同上 |
+
+判据：**连接数 ≥ 1 且探针为 0** ⇒ 看板「假的绿」—— 网关卡了升级 / snapshot 抛异常 /
+Redis Pub/Sub 断了，但连接对象还在。这正是缺口 G-3 要抓的事故。
+探针免鉴权（自签 token 打 loopback）、≥30s 一次、可降级（`WS_PROBE_ENABLED=false` 即 no-op）。
+
 ## 5. 快速自检
 
 ```bash
@@ -79,3 +91,4 @@ curl -s localhost:9090/api/v1/rules | grep -o '"name":"[A-Za-z]*"' | head
 | `robot_backend` 一直 down | 应用跑在宿主机，`backend` 域名解析不到 | 用 `docker-compose.app.yml` 让应用进网络 |
 | `emqx` down | `/api/v5/prometheus/stats` 需 API key | 该端点未验证；不要伪报 up=1，改用 emqtt-bench `--prometheus` |
 | `queue_depth` 抓取后不变 | Gauge 只在写入时 set | 已有修正：`/metrics` 处理函数抓取前刷新（`main.py:86`） |
+| `robot_backend_ws_probe_alive` 恒为 0 | 探针目标写错 / 端口不对 / 服务在 gateway 后 | 探针默认打 `ws://127.0.0.1:${WS_PORT}${WS_PROBE_PATH}`；容器内需与 `--port` 一致；关掉探针用 `WS_PROBE_ENABLED=false`（此时该指标不出现） |

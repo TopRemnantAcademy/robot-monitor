@@ -89,7 +89,7 @@
 |---|---|---|---|
 | G-1 | 全仓无 `/metrics` | 仅 `/healthz` 裸 JSON（`backend_ingestion/app/main.py:66-75`）；`alert_engine` 连 HTTP 都没有 | 引入 `prometheus/client_python` 挂 `/metrics` |
 | G-2 | 1000 msg/s 无历史曲线 | `/healthz` 全是瞬时值 | 同上，改成 Counter/Gauge |
-| G-3 | 「看板假的绿」无人识别 | 无客户端视角探针 | 已铺 `mqtt-probe`；待补 WS 合成探针 |
+| G-3 | 「看板假的绿」无人识别 | 无客户端视角探针 | `mqtt-probe` 已铺；WS 合成探针已落地（`robot_backend_ws_probe_alive` / `robot_backend_ws_probe_failures_total`，ISSUE #58） |
 | G-4 | 告警落库失败静默 | `alert_engine/app/store.py:53` 只 `log.exception` | 用 postgres_exporter 指标 + Prometheus 规则 |
 | G-5 | 零备份（≈8.64M 行/天） | `infra/ops/pgbackrest/` 只有配置契约 | 换带 pgbackrest 的镜像或起边车 |
 | G-6 | `robot_metadata` 的 `last_seen`/`is_online` 从没人写 | `infra/init.sql:39-40` 建了列 | 与 `offline` 规则耦合，单独一单 |
