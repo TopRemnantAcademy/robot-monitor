@@ -6,13 +6,50 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
-import Ajv2020 from 'ajv/dist/2020.js';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { dirname, join, resolve } from 'node:path';
+import { createRequire } from 'node:module';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SCHEMA_PATH = resolve(here, '../../docs/contracts/ws-envelope.schema.json');
 const schema = JSON.parse(readFileSync(SCHEMA_PATH, 'utf8'));
+
+// 【为什么不用裸写 `import Ajv2020 from 'ajv/dist/2020.js'`】
+// 裸导入走 Node 的 ESM 解析：从本文件所在目录逐级向上找 node_modules，
+// **只认「本地 node_modules」这一种位置**。此前 CI 的前端依赖是**全局安装**的
+// （ajv 在 /usr/local/lib/node_modules/ajv，workspace 挂载里没有 node_modules），
+// ESM 解析器从不查全局目录，于是真机报：
+//   Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'ajv'
+//   imported from /workspace/frontend_dashboard/tests/ws-envelope.test.mjs
+// （构建 cnb-1tc-1k4k4ng86-002）。
+// 试过 NODE_PATH：**无效** —— 它只作用于 CJS 的 require，ESM 解析器完全忽略（已实测）。
+// 现 CI 已改为运行时 `npm ci`（ci/contract-gate.sh stage 2），本地 node_modules 齐了，
+// 裸导入本可工作；这里仍显式解析，是为了**不依赖安装方式**：
+// 用 createRequire（CJS 解析器，认全局目录）按「本地 → 全局」顺序定位入口，
+// 再用 pathToFileURL 转成 ESM 可 import 的 file:// URL，与 gen-types.mjs 同一套做法，
+// 两端（本地 / CI，本地装 / 全局装）行为一致。
+const require_ = createRequire(import.meta.url);
+const AJV_CANDIDATES = [
+  join(here, '..', 'node_modules', 'ajv', 'dist', '2020.js'),
+  join('/usr/local/lib/node_modules', 'ajv', 'dist', '2020.js'),
+];
+let ajvEntry = null;
+for (const candidate of AJV_CANDIDATES) {
+  try {
+    ajvEntry = require_.resolve(candidate);
+    break;
+  } catch {
+    // 换下一个候选位置
+  }
+}
+if (!ajvEntry) {
+  console.error('[ws-envelope] 未找到 ajv/dist/2020.js，已尝试：');
+  for (const c of AJV_CANDIDATES) console.error('  - ' + c);
+  console.error('[ws-envelope] 本地：cd frontend_dashboard && npm ci');
+  process.exit(1);
+}
+// 动态 import 拿到默认导出（ajv 8.x 为 CJS，ESM 侧 default 即 Ajv 构造器）。
+const { default: Ajv2020 } = await import(pathToFileURL(ajvEntry).href);
 const ajv = new Ajv2020({ allErrors: true, strict: false });
 const validate = ajv.compile(schema);
 

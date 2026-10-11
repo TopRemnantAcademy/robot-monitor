@@ -62,18 +62,10 @@ cd frontend_dashboard
 #   真机报错原文：`Could not find '/workspace/frontend_dashboard/tests/*.test.mjs'`
 #   （构建 cnb-pm7-1k4k4emnd）。本机 node 24 能过是因为 24 会展开 glob ——
 #   典型「本地绿、CI 红」，别再把引号加回来。
-#
-# ⚠️ 必须写 `./tests/` 而不是裸 `tests/` —— 与「引号」同一个坑的另一半：
-#   sh 把 `tests/*.test.mjs` 展开成 `tests/ws-envelope.test.mjs`（无 ./ 前缀），
-#   node 据此把 `tests` 当成 **CommonJS 包名**去 node_modules 里找（即使本文件是
-#   ESM 的 .mjs），报 `MODULE_NOT_FOUND`。真机失败原文（构建 cnb-1tc-1k4k4ng86）：
-#     Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'ajv' imported from
-#       /workspace/frontend_dashboard/tests/ws-envelope.test.mjs
-#     node:internal/modules/esm/resolve:873
-#   注意报的是 ajv「找不到」，但 ajv 其实装在镜像里 —— 真正被误判成包名的是
-#   路径首段 `tests`，它一死，其 import 的 ajv 自然也没机会被解析。加上 `./`
-#   前缀后 node 确定走文件路径，不再包解析。
-#   （package.json 的 test:ws-contract 已同步同一个写法，别再退回 `tests/`。）
+# `./` 前缀非必需（node 对 `tests/ws-...mjs` 也能按路径解析，已在本机实测），
+# 写上只是为了明确「这是相对路径、不是包名」，杜绝歧义。真正让本步可过的是
+# 上面把 node_modules 接回工作区 —— ajv 解析不到时，加不加 `./` 都会报同一句
+# `Cannot find package 'ajv'`。
 node --test ./tests/*.test.mjs
 cd ..
 
@@ -86,6 +78,7 @@ cd frontend_dashboard
 #   **直接报错**（`npm error could not determine executable to run`），
 #   不像 npm 10.9 会回落联网取包。显式入口同时钉死「用的是哪份 tsc」，
 #   避免 npx 的隐式解析在别的环境挑到另一份。
+node ./node_modules/typescript/bin/tsc --noEmit
 cd ..
 
 echo
