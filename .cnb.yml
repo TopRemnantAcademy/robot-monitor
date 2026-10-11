@@ -59,7 +59,6 @@ $:
           script: sh ci/contract-gate.sh
 
 main:
-main:
   # ── 订单 24 T3：测试门禁 ─────────────────────────────────────────────
   # 目的：把 STATUS.md 里手写的「11/11」「20/20」「25 passed」变成 CI 可复现数字。
   # 失败即红：任何一步非 0 退出都会中断 stages 并置流水线为 error ——
@@ -113,6 +112,79 @@ main:
             push_tags: false
             git_user: RobotMonitor Sync
             git_email: robot-monitor@users.noreply.github.com
+    # ============================================================
+    # e2e：端到端 30,000 行落库验证（ISSUE #60）—— 锚点定义处（&e2e-env / &e2e-stages）
+    #
+    # 为什么单独一条 pipeline：它需要 **Docker-in-Docker**（services: [docker]）
+    # 才能起 emqx + timescaledb:2.13.1 + redis + backend + mock_fleet。
+    # 判定与产出：起栈前先探 docker、再探 python；缺任一则打印【E2E SKIP】原因并以 0 退出。
+    # （2026-10-11 修复：本 pipeline 原先被写成了第二个顶层 push:/pull_request: 键，
+    #  YAML 重复键导致整条 main 的 push/PR 流水线在 prepare 阶段就 error —— duration 0、无日志。
+    #  现并入唯一 push:/pull_request: 键下；锚点定义在 push（文档序最先），pull_request/crontab 用别名引用。）
+    # ============================================================
+    - name: e2e-30k-landing
+      # ---- 为什么必须钉 image（2026-10 CI 实测教训）----
+      # 不写 image 时用缺省镜像 `cnbcool/default-build-env`，该镜像**没有 python3**：
+      # 首次实跑报 `sh: line 21: python3: command not found`（返回码 127），
+      # 而此时 docker 探测已经通过（日志里的 `docker 可用：Docker version 29.6.2`），
+      # 即「环境判定全绿 → 脚本起不来」，属于最坏的一类失败（红得莫名其妙）。
+      # 所以这里把运行环境写死成有 python3 的镜像，而不是靠默认镜像碰运气。
+      # 同理，脚本里也**不再**用 `python3` 裸命令，见下方 runner 探测。
+      docker:
+        image: python:3.11-slim
+      services: [docker]
+      env: &e2e-env
+        # 40s × 100 台 × 10Hz ≈ 40,000 帧，相对 30,000 阈值留足余量。
+        E2E_DURATION: "40"
+        E2E_ROBOTS: "100"
+        E2E_MIN_ROWS: "30000"
+      stages: &e2e-stages
+        - name: e2e
+          script: |
+            set -uo pipefail
+            echo "== e2e 30k 落库验证（ISSUE #60）=="
+
+            # ---- 环境判定：无 Docker 即明确 skip，绝不 red ----
+            if ! command -v docker >/dev/null 2>&1; then
+              echo "【E2E SKIP】PATH 内找不到 docker 命令。"
+              echo "本 job 需要真实 Docker（emqx + timescaledb:2.13.1 + redis + backend + mock_fleet），"
+              echo "且 ISSUE #60 禁止用 mock 替身冒充真实 TimescaleDB。"
+              echo "需要：在提供 docker 的构建机/自托管 runner 上运行本 job，或本地执行"
+              echo "  python -m pytest tests/e2e/test_e2e_30k.py -v -s"
+              exit 0
+            fi
+            if ! docker info >/dev/null 2>&1; then
+              echo "【E2E SKIP】docker daemon 不可达（docker info 非 0）。原始输出（尾部）："
+              docker info 2>&1 | tail -5 || true
+              exit 0
+            fi
+            echo "docker 可用：$(docker --version)"
+
+            # ---- 运行环境判定：连 python 都没有就明确 skip，绝不 red ----
+            # 这一层是实跑打出来的：首次 CI 里 docker 可用，但缺省镜像无 python3，
+            # 脚本根本没起来（返回码 127）。所以顺序必须是
+            # 「先探 docker（本 job 的核心依赖）→ 再探 python（脚本自身的依赖）」，
+            # 两层都给出原因与解法，读者不必翻配置就知道卡在哪一层。
+            if command -v python3 >/dev/null 2>&1; then
+              PY=python3
+            elif command -v python >/dev/null 2>&1; then
+              PY=python
+            else
+              echo "【E2E SKIP】镜像内 PATH 找不到 python3/python（当前镜像：${CNB_BUILD_IMAGE:-缺省镜像}）。"
+              echo "本 job 需要 python 来驱动 tests/e2e/test_e2e_30k.py（只用标准库，无需 pip 安装）。"
+              echo "修复：在本 pipeline 上声明 docker.image（如 python:3.11-slim），不要沿用缺省镜像。"
+              exit 0
+            fi
+            echo "python 可用：$($PY --version 2>&1)"
+
+            # 依赖：e2e 脚本只用标准库（subprocess/urllib），无需 pip 安装。
+            $PY tests/e2e/test_e2e_30k.py
+            rc=$?
+            if [ "$rc" = "3" ]; then
+              echo "【E2E SKIP】脚本自判环境不具备（退出码 3），非代码失败。"
+              exit 0
+            fi
+            exit "$rc"
   pull_request:
     - name: test
       docker:
@@ -137,6 +209,13 @@ main:
             cd frontend_dashboard
             npm ci
             npm test
+    # e2e 与 push 共用同一份 stages/env（锚点定义在 push 块，此处按文档序用别名引用）
+    - name: e2e-30k-landing
+      docker:
+        image: python:3.11-slim
+      services: [docker]
+      env: *e2e-env
+      stages: *e2e-stages
 
   "crontab: 0 0,6,12,18 * * *":
     - stages:
@@ -216,94 +295,6 @@ main:
               负责端到端联调：docker-compose 起栈 + 后端 + 告警引擎 + 模拟器压测 30s + 校验写入与告警。
             user_prompt: |
               定时巡检。先用 bash 读取 ./spec/ci/integration-call.md，严格按其程序执行，不要自创流程。
-
-  # ============================================================
-  # e2e：端到端 30,000 行落库验证（ISSUE #60）
-  #
-  # 为什么单独一条 pipeline：它需要 **Docker-in-Docker**（services: [docker]）
-  # 才能起 emqx + timescaledb:2.13.1 + redis + backend + mock_fleet。
-  # CNB 的默认构建机不一定提供可用 docker daemon，所以这一条**必须**
-  # 在缺失时「明确 skip」而不是红 —— 否则环境问题会被误读成代码回归
-  # （ISSUE #60 §4、AGENTS.md §6 都要求区分「环境」与「代码」）。
-  #
-  # 判定与产出：起栈前先探 docker、再探 python；缺任一则打印【E2E SKIP】原因并以 0 退出。
-  # 构建镜像必须自带 python3（实跑发现缺省镜像没有，见 pipeline 内注释）。
-  # 可用则跑 tests/e2e/test_e2e_30k.py（自带超时守卫与取证报告），
-  # 退出码 3 视同 skip（脚本内部已判过环境），其余非 0 才是真失败。
-  #
-  # 触发面：PR（拦回归）+ push main（合入后复核）+ 每日 crontab（漂移巡检）
-  # 共用同一份 stages 定义（锚点 &e2e-stages），避免三处脚本各自演化。
-  # ============================================================
-  pull_request:
-    - name: e2e-30k-landing
-      # ---- 为什么必须钉 image（2026-10 CI 实测教训）----
-      # 不写 image 时用缺省镜像 `cnbcool/default-build-env`，该镜像**没有 python3**：
-      # 首次实跑报 `sh: line 21: python3: command not found`（返回码 127），
-      # 而此时 docker 探测已经通过（日志里的 `docker 可用：Docker version 29.6.2`），
-      # 即「环境判定全绿 → 脚本起不来」，属于最坏的一类失败（红得莫名其妙）。
-      # 所以这里把运行环境写死成有 python3 的镜像，而不是靠默认镜像碰运气。
-      # 同理，脚本里也**不再**用 `python3` 裸命令，见下方 runner 探测。
-      docker:
-        image: python:3.11-slim
-      services: [docker]
-      env: &e2e-env
-        # 40s × 100 台 × 10Hz ≈ 40,000 帧，相对 30,000 阈值留足余量。
-        E2E_DURATION: "40"
-        E2E_ROBOTS: "100"
-        E2E_MIN_ROWS: "30000"
-      stages: &e2e-stages
-        - name: e2e
-          script: |
-            set -uo pipefail
-            echo "== e2e 30k 落库验证（ISSUE #60）=="
-
-            # ---- 环境判定：无 Docker 即明确 skip，绝不 red ----
-            if ! command -v docker >/dev/null 2>&1; then
-              echo "【E2E SKIP】PATH 内找不到 docker 命令。"
-              echo "本 job 需要真实 Docker（emqx + timescaledb:2.13.1 + redis + backend + mock_fleet），"
-              echo "且 ISSUE #60 禁止用 mock 替身冒充真实 TimescaleDB。"
-              echo "需要：在提供 docker 的构建机/自托管 runner 上运行本 job，或本地执行"
-              echo "  python -m pytest tests/e2e/test_e2e_30k.py -v -s"
-              exit 0
-            fi
-            if ! docker info >/dev/null 2>&1; then
-              echo "【E2E SKIP】docker daemon 不可达（docker info 非 0）。原始输出（尾部）："
-              docker info 2>&1 | tail -5 || true
-              exit 0
-            fi
-            echo "docker 可用：$(docker --version)"
-
-            # ---- 运行环境判定：连 python 都没有就明确 skip，绝不 red ----
-            # 这一层是实跑打出来的：首次 CI 里 docker 可用，但缺省镜像无 python3，
-            # 脚本根本没起来（返回码 127）。所以顺序必须是
-            # 「先探 docker（本 job 的核心依赖）→ 再探 python（脚本自身的依赖）」，
-            # 两层都给出原因与解法，读者不必翻配置就知道卡在哪一层。
-            if command -v python3 >/dev/null 2>&1; then
-              PY=python3
-            elif command -v python >/dev/null 2>&1; then
-              PY=python
-            else
-              echo "【E2E SKIP】镜像内 PATH 找不到 python3/python（当前镜像：${CNB_BUILD_IMAGE:-缺省镜像}）。"
-              echo "本 job 需要 python 来驱动 tests/e2e/test_e2e_30k.py（只用标准库，无需 pip 安装）。"
-              echo "修复：在本 pipeline 上声明 docker.image（如 python:3.11-slim），不要沿用缺省镜像。"
-              exit 0
-            fi
-            echo "python 可用：$($PY --version 2>&1)"
-
-            # 依赖：e2e 脚本只用标准库（subprocess/urllib），无需 pip 安装。
-            $PY tests/e2e/test_e2e_30k.py
-            rc=$?
-            if [ "$rc" = "3" ]; then
-              echo "【E2E SKIP】脚本自判环境不具备（退出码 3），非代码失败。"
-              exit 0
-            fi
-            exit "$rc"
-
-  push:
-    - name: e2e-30k-landing
-      services: [docker]
-      env: *e2e-env
-      stages: *e2e-stages
 
   "crontab: 0 3 * * *":
     - name: e2e-30k-landing
