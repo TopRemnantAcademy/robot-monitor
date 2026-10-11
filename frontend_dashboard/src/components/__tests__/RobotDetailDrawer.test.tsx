@@ -51,8 +51,14 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+// 签名刻意**带第二个形参**（`RequestInit`），尽管默认实现用不到它：
+// 下游 `Authorization` 用例要用 `init.headers` 断言请求头，若这里只声明 1 个参数，
+// `mockImplementation(async (_input, init) => ...)` 的第二参就退化成隐式 any
+// （TS7006），并且整体签名不兼容（TS2345）—— 这是 `npm run build` 里
+// `tsc --noEmit` 长期存在 3 个错误的唯一来源（ISSUE #62 验收要求 0 错误）。
+// 形参名前导下划线是"我真的不用它"的约定，不是笔误。
 const fetchMock = vi.fn(
-  async (_input: RequestInfo | URL): Promise<Response> => jsonResponse(SAMPLE_HISTORY),
+  async (_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> => jsonResponse(SAMPLE_HISTORY),
 );
 
 beforeAll(() => {

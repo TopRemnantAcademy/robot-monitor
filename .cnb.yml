@@ -109,6 +109,15 @@ main:
             rm -f package-lock.json
             npm install
             npm test
+            # ISSUE #62 补的两道防线（此前 npm-test 只有 `npm test`，所以没人发现
+            # tsc 已经红了 3 个错）：
+            #   ① typecheck —— `npm run build` 是 `tsc --noEmit && vite build`，
+            #      第一步失败 = 生产构建脚本实际是坏的，而 main 一直显示全绿。
+            #   ② bundle 体积 + 裸 ECharts 引入守卫（scripts/report-bundle-size.mjs），
+            #      阈值 gzip < 320 kB（issue #62 验收口径）。
+            npm run typecheck
+            npx vite build
+            node scripts/report-bundle-size.mjs
     # ⏸️ sync-to-github 暂停（2026-10-11）：imports 引用的 flow.237/RobotMonitor-secrets
     # 仓不存在（API 404 实证）→ 本 pipeline 每次 prepare 即 error，把本已全绿的
     # push 构建整体拖成 error，掩盖真实回归。恢复条件：建 secrets 仓并注入
@@ -245,6 +254,11 @@ main:
             rm -f package-lock.json
             npm install
             npm test
+            # 同 push 分支：ISSUE #62 的 typecheck + bundle 守卫，口径必须两边一致，
+            # 否则会出现「PR 绿了但合到 main 变红」的错位。
+            npm run typecheck
+            npx vite build
+            node scripts/report-bundle-size.mjs
     # e2e 与 push 共用同一份 stages/env（锚点定义在 push 块，此处按文档序用别名引用）
     - name: e2e-30k-landing
       docker:
