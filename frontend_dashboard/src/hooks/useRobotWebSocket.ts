@@ -13,6 +13,7 @@ import { useEffect, useRef } from 'react';
 import { useRobotStore } from '../store/robotStore';
 import { getToken } from '../auth/session';
 import { useAuthStore } from '../auth/authStore';
+import { countStoreCommit, countWsMessage } from '../lib/observability';
 import type { RobotAlert, RobotTelemetry, WsEnvelope } from '../types/robot';
 
 /** 节流刷库间隔：100ms = 10Hz（spec/03 §6） */
@@ -76,6 +77,10 @@ export function useRobotWebSocket(): void {
       // telemetry / snapshot 用同一入口批量合并
       if (latestDataRef.current.size > 0) {
         store.applyTelemetryBatch(Array.from(latestDataRef.current.values()));
+        // 订单 16 T2：只有在**真的提交了非空批次**时才计一次 storeCommit。
+        // 若把计数放在 if 外面，空帧也计入 → 分母虚高 → ratio 被低估，
+        // "节流生效"的证据反而变弱。计数语义必须与"这次提交是否发生"严格对齐。
+        countStoreCommit();
         latestDataRef.current.clear();
       }
 
@@ -121,6 +126,9 @@ export function useRobotWebSocket(): void {
         case 'telemetry': {
           const item = envelope.data;
           if (item && typeof item.robot_id === 'string') {
+            // 订单 16 T2：计"WS 收到多少条 telemetry"。这是 ratio 的分子 ——
+            // 它统计的是**入站消息**，与"React 被通知几次"（storeCommits）解耦。
+            countWsMessage();
             latestDataRef.current.set(item.robot_id, item);
           }
           break;

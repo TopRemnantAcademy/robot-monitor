@@ -63,6 +63,13 @@ class Settings(BaseSettings):
     # 过期后由前端 401 拦截清 token 回登录页，由当班人重新登录。
     jwt_lifetime_seconds: int = 8 * 3600
 
+    # ---- OpenTelemetry（订单 16 T3）----
+    # 留空 = **关闭**（默认）。工厂内网常无 OTLP collector，为空即 no-op，
+    # 绝不因未配置而启动失败（见 app/telemetry_tracing.py 的分层降级）。
+    # 填 `http://collector:4318` 即启用，本模块会补全 /v1/traces 路径。
+    otel_exporter_otlp_endpoint: str = ""
+    otel_service_name: str = "robot_backend"
+
     # ---- Redis 频道（spec/00 §5.2/§5.4）----
     chan_stream_all: str = "robot:stream:all"
     chan_stream_one: str = "robot:stream:{robot_id}"
