@@ -282,7 +282,7 @@
         "type": "object"
       },
       "RobotTelemetryOut": {
-        "description": "单台机器人最新遥测（与 `state_cache._decode()` 的返回逐字段一致）。\n\n来源是 Redis Hash `robot:state:{robot_id}` 经 `_decode()` 还原类型后的 dict\n（`backend_ingestion/app/services/state_cache.py:76`）。\n注意 `joint_positions` 必须在这份契约里 —— 它正是 STATUS.md §六第 2 条\n那次事故（Drawer 第三条折线恒空）缺的字段。",
+        "description": "单台机器人最新遥测（与 `state_cache._decode()` 的返回逐字段一致）。\n\n来源是 Redis Hash `robot:state:{robot_id}` 经 `_decode()` 还原类型后的 dict\n（`backend_ingestion/app/services/state_cache.py`）。\n注意 `joint_positions` 必须在这份契约里 —— 它正是 STATUS.md §六第 2 条\n那次事故（Drawer 第三条折线恒空）缺的字段。\n\n`is_online` / `last_seen` 是 ISSUE #77 追加的两个**新增可选字段**（非 breaking：\n老前端不读即忽略）。它们的来源不是遥测 Hash，而是 `app/services/liveness.py`\n的接收侧台账，由 `state_cache.snapshot()` 批量补齐。",
         "properties": {
           "battery_pct": {
             "title": "Battery Pct",
@@ -331,6 +331,25 @@
             "default": 0,
             "title": "Ts",
             "type": "integer"
+          },
+          "is_online": {
+            "default": false,
+            "description": "后端判定：距最后一次收到遥测是否在阈值内（ISSUE #77）",
+            "title": "Is Online",
+            "type": "boolean"
+          },
+          "last_seen": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "最后一次收到该机器人遥测的 epoch 秒；从未上报为 null",
+            "title": "Last Seen"
           }
         },
         "required": [

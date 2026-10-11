@@ -339,9 +339,13 @@ export interface components {
          * @description 单台机器人最新遥测（与 `state_cache._decode()` 的返回逐字段一致）。
          *
          *     来源是 Redis Hash `robot:state:{robot_id}` 经 `_decode()` 还原类型后的 dict
-         *     （`backend_ingestion/app/services/state_cache.py:76`）。
+         *     （`backend_ingestion/app/services/state_cache.py`）。
          *     注意 `joint_positions` 必须在这份契约里 —— 它正是 STATUS.md §六第 2 条
          *     那次事故（Drawer 第三条折线恒空）缺的字段。
+         *
+         *     `is_online` / `last_seen` 是 ISSUE #77 追加的两个**新增可选字段**（非 breaking：
+         *     老前端不读即忽略）。它们的来源不是遥测 Hash，而是 `app/services/liveness.py`
+         *     的接收侧台账，由 `state_cache.snapshot()` 批量补齐。
          */
         RobotTelemetryOut: {
             /** Battery Pct */
@@ -377,6 +381,18 @@ export interface components {
              * @default 0
              */
             ts: number;
+            /**
+             * Is Online
+             * @description 后端判定：距最后一次收到遥测是否在阈值内（ISSUE #77）
+             * @default false
+             */
+            is_online: boolean;
+            /**
+             * Last Seen
+             * @description 最后一次收到该机器人遥测的 epoch 秒；从未上报为 null
+             * @default null
+             */
+            last_seen: number | null;
         };
         /**
          * UserCreate

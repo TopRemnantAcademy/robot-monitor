@@ -2,7 +2,17 @@
 // grid-cols-5 md:grid-cols-10 gap-2，每卡 aspect-[4/3]，颜色全部走 theme/tokens。
 
 import { memo, useMemo, useRef } from 'react';
-import { COLORS, FONT, STATUS_COLOR, STATUS_LABEL, batteryColor, tempColor } from '../theme/tokens';
+import {
+  COLORS,
+  DISPLAY_COLOR,
+  DISPLAY_LABEL,
+  FONT,
+  batteryColor,
+  hasEverReported,
+  isOfflineDisplay,
+  robotDisplayState,
+  tempColor,
+} from '../theme/tokens';
 import { useRobotStore } from '../store/robotStore';
 import { countCardRender } from '../lib/observability';
 import type { RobotTelemetry } from '../types/robot';
@@ -15,9 +25,15 @@ interface RobotCardProps {
 }
 
 const RobotCard = memo(function RobotCard({ robot, selected, onOpen }: RobotCardProps) {
-  const statusColor = STATUS_COLOR[robot.status_code];
+  // ISSUE #77：着色与文案都走 robotDisplayState，**在线与否只认 is_online**。
+  // 旧实现用 `status_code === 0` 判断，于是停报的机器人保持最后一次的颜色与温度 ——
+  // 一台 1 小时前断电的"预警"机器人会一直亮着黄灯。现在它是灰色的「失联」。
+  const state = robotDisplayState(robot.is_online === true, robot.status_code, hasEverReported(robot));
+  const statusColor = DISPLAY_COLOR[state];
+  const statusLabel = DISPLAY_LABEL[state];
+  const offlineDisplay = isOfflineDisplay(state);
   const battColor = batteryColor(robot.battery_pct);
-  const tempClr = robot.status_code === 0 ? COLORS.statusOffline : tempColor(robot.max_joint_temp);
+  const tempClr = offlineDisplay ? COLORS.statusOffline : tempColor(robot.max_joint_temp);
   const battWidth = Math.max(0, Math.min(100, robot.battery_pct));
 
   return (
@@ -39,7 +55,7 @@ const RobotCard = memo(function RobotCard({ robot, selected, onOpen }: RobotCard
         {/* 2. Robot ID（H-042 短名，13px/600） */}
         <span
           className="truncate"
-          style={{ ...FONT.cardId, color: robot.status_code === 0 ? COLORS.textSecondary : COLORS.textPrimary }}
+          style={{ ...FONT.cardId, color: statusColor === COLORS.statusOffline ? COLORS.textSecondary : COLORS.textPrimary }}
         >
           H-{robot.robot_id.replace(/^humanoid-/, '')}
         </span>
@@ -56,12 +72,12 @@ const RobotCard = memo(function RobotCard({ robot, selected, onOpen }: RobotCard
 
         {/* 4. 最高关节温度（16px/700，按温区着色） */}
         <span className="tabular-nums" style={{ fontSize: '16px', fontWeight: 700, color: tempClr }}>
-          {robot.status_code === 0 ? '--' : `${robot.max_joint_temp.toFixed(0)}°C`}
+          {offlineDisplay ? '--' : `${robot.max_joint_temp.toFixed(0)}°C`}
         </span>
 
-        {/* 5. 状态文字 */}
+        {/* 5. 状态文字（ISSUE #77：掉线显示「失联」，不保留旧 status_code 的文案） */}
         <span className="mt-auto" style={{ ...FONT.metric, color: statusColor }}>
-          {STATUS_LABEL[robot.status_code]}
+          {statusLabel}
         </span>
       </div>
     </button>

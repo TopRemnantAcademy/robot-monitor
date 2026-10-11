@@ -4,20 +4,28 @@
   "title": "RobotMonitor WS envelope",
   "description": "ws://{host}:8000/ws/robots 出站信封（spec/00 §5.2）。OpenAPI 不描述 WebSocket，故单独成文：本文件是 WS 契约的机器可读事实来源，前端 src/lib/wsEnvelope.ts 在开发模式下用 ajv 校验它（生产不校验）。三条分支的判定顺序与 backend_ingestion/app/main.py 的 ws_robots() 出站顺序一致：① snapshot（首帧）② telemetry ③ alert。",
   "oneOf": [
-    { "$ref": "#/$defs/SnapshotEnvelope" },
-    { "$ref": "#/$defs/TelemetryEnvelope" },
-    { "$ref": "#/$defs/AlertEnvelope" }
+    {
+      "$ref": "#/$defs/SnapshotEnvelope"
+    },
+    {
+      "$ref": "#/$defs/TelemetryEnvelope"
+    },
+    {
+      "$ref": "#/$defs/AlertEnvelope"
+    }
   ],
   "$defs": {
     "JointDict": {
       "type": "object",
       "description": "关节名 → 数值。键名为 spec/00 §5.5 的 24 个标准键。",
       "minProperties": 1,
-      "additionalProperties": { "type": "number" }
+      "additionalProperties": {
+        "type": "number"
+      }
     },
     "RobotTelemetry": {
       "type": "object",
-      "description": "与后端 /openapi.json 的 RobotTelemetryOut 逐字段一致（joint_positions 必须在内，见 STATUS.md §六第 2 条事故）。",
+      "description": "与后端 /openapi.json 的 RobotTelemetryOut 逐字段一致（joint_positions 必须在内，见 STATUS.md §六第 2 条事故）。is_online（required）/ last_seen（optional，可为 null）由 ISSUE #77 追加：在线判定的事实源从「机器人自述的 status_code」换成「后端接收侧的 last_seen」。",
       "required": [
         "robot_id",
         "status_code",
@@ -27,47 +35,113 @@
         "joint_positions",
         "joint_torques",
         "error_code",
-        "ts"
+        "ts",
+        "is_online"
       ],
       "properties": {
-        "robot_id": { "type": "string", "pattern": "^humanoid-[0-9]{3}$" },
-        "status_code": { "type": "integer", "enum": [0, 1, 2, 3] },
-        "error_code": { "type": "integer" },
-        "battery_pct": { "type": "number", "minimum": 0, "maximum": 100 },
-        "max_joint_temp": { "type": "number" },
-        "joint_temperatures": { "$ref": "#/$defs/JointDict" },
-        "joint_positions": { "$ref": "#/$defs/JointDict" },
-        "joint_torques": { "$ref": "#/$defs/JointDict" },
-        "ts": { "type": "integer" }
+        "robot_id": {
+          "type": "string",
+          "pattern": "^humanoid-[0-9]{3}$"
+        },
+        "status_code": {
+          "type": "integer",
+          "enum": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        "error_code": {
+          "type": "integer"
+        },
+        "battery_pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "max_joint_temp": {
+          "type": "number"
+        },
+        "joint_temperatures": {
+          "$ref": "#/$defs/JointDict"
+        },
+        "joint_positions": {
+          "$ref": "#/$defs/JointDict"
+        },
+        "joint_torques": {
+          "$ref": "#/$defs/JointDict"
+        },
+        "ts": {
+          "type": "integer"
+        },
+        "is_online": {
+          "type": "boolean",
+          "description": "后端判定的在线标志（ISSUE #77）：距最后一次收到遥测是否在阈值内。前端只认它，不再用 status_code 反推在线。"
+        },
+        "last_seen": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "后端最后一次收到该机器人遥测的 epoch 秒（接收侧事实）；从未上报为 null。"
+        }
       }
     },
     "RobotAlert": {
       "type": "object",
       "description": "告警（spec/00 §5.2 ③），经 Redis robot:alerts 转发。",
-      "required": ["robot_id", "rule_id", "severity", "message", "ts"],
+      "required": [
+        "robot_id",
+        "rule_id",
+        "severity",
+        "message",
+        "ts"
+      ],
       "properties": {
-        "robot_id": { "type": "string" },
-        "rule_id": { "type": "string" },
-        "severity": { "type": "integer", "minimum": 1, "maximum": 3 },
-        "message": { "type": "string" },
-        "ts": { "type": "integer" }
+        "robot_id": {
+          "type": "string"
+        },
+        "rule_id": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        },
+        "message": {
+          "type": "string"
+        },
+        "ts": {
+          "type": "integer"
+        }
       }
     },
     "SnapshotEnvelope": {
       "type": "object",
       "description": "① 首帧：100 台全量快照。",
-      "required": ["type", "data"],
+      "required": [
+        "type",
+        "data"
+      ],
       "additionalProperties": false,
       "properties": {
-        "type": { "const": "snapshot" },
+        "type": {
+          "const": "snapshot"
+        },
         "data": {
           "type": "object",
-          "required": ["robots"],
+          "required": [
+            "robots"
+          ],
           "additionalProperties": false,
           "properties": {
             "robots": {
               "type": "array",
-              "items": { "$ref": "#/$defs/RobotTelemetry" }
+              "items": {
+                "$ref": "#/$defs/RobotTelemetry"
+              }
             }
           }
         }
@@ -76,21 +150,35 @@
     "TelemetryEnvelope": {
       "type": "object",
       "description": "② 增量遥测：单台。",
-      "required": ["type", "data"],
+      "required": [
+        "type",
+        "data"
+      ],
       "additionalProperties": false,
       "properties": {
-        "type": { "const": "telemetry" },
-        "data": { "$ref": "#/$defs/RobotTelemetry" }
+        "type": {
+          "const": "telemetry"
+        },
+        "data": {
+          "$ref": "#/$defs/RobotTelemetry"
+        }
       }
     },
     "AlertEnvelope": {
       "type": "object",
       "description": "③ 告警：单条。",
-      "required": ["type", "data"],
+      "required": [
+        "type",
+        "data"
+      ],
       "additionalProperties": false,
       "properties": {
-        "type": { "const": "alert" },
-        "data": { "$ref": "#/$defs/RobotAlert" }
+        "type": {
+          "const": "alert"
+        },
+        "data": {
+          "$ref": "#/$defs/RobotAlert"
+        }
       }
     }
   }

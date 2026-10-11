@@ -12,7 +12,14 @@ import { useQuery } from '@tanstack/react-query';
 import ReactEChartsCore from 'echarts-for-react/lib/core';
 import echarts from '../lib/echartsCore';
 import JointHeatmap from './JointHeatmap';
-import { COLORS, FONT, STATUS_COLOR, STATUS_LABEL } from '../theme/tokens';
+import {
+  COLORS,
+  DISPLAY_COLOR,
+  DISPLAY_LABEL,
+  FONT,
+  hasEverReported,
+  robotDisplayState,
+} from '../theme/tokens';
 import { useRobotStore } from '../store/robotStore';
 import { JOINT_NAMES } from '../types/robot';
 import type { HistoryPoint } from '../types/robot';
@@ -27,6 +34,16 @@ import {
 import { API_BASE } from '../auth/api';
 
 export { API_BASE };
+
+/**
+ * 「最后更新」的毫秒时间戳：优先后端的 `last_seen`（接收侧事实，秒 → 毫秒），
+ * 缺失时才回落到机器人自述的 `ts`（毫秒）。两者都没有 → null（显示 `--`）。
+ */
+function lastSeenMs(robot: { last_seen?: number | null; ts: number } | undefined): number | null {
+  if (!robot) return null;
+  if (typeof robot.last_seen === 'number') return robot.last_seen * 1000;
+  return robot.ts > 0 ? robot.ts : null;
+}
 
 interface ChartSeries {
   name: string;
@@ -137,7 +154,14 @@ export default function RobotDetailDrawer() {
     animation: false,
   };
 
-  const statusColor = robot ? STATUS_COLOR[robot.status_code] : COLORS.statusOffline;
+  // ISSUE #77：Drawer 头部的状态同样只认 is_online。
+  // 旧写法 `STATUS_COLOR[robot.status_code]` 会让一台停报的"预警"机器人
+  // 在 Drawer 里继续保持黄色 —— 与卡片墙上的「失联」灰自相矛盾。
+  const displayState = robot
+    ? robotDisplayState(robot.is_online === true, robot.status_code, hasEverReported(robot))
+    : 'offline';
+  const statusColor = robot ? DISPLAY_COLOR[displayState] : COLORS.statusOffline;
+  const statusText = robot ? DISPLAY_LABEL[displayState] : '无数据';
 
   return (
     <>
@@ -162,9 +186,7 @@ export default function RobotDetailDrawer() {
         >
           <div className="flex items-baseline gap-2 min-w-0">
             <span style={{ ...FONT.title, color: COLORS.textPrimary }}>{selectedRobotId}</span>
-            <span style={{ ...FONT.metric, color: statusColor }}>
-              {robot ? STATUS_LABEL[robot.status_code] : '无数据'}
-            </span>
+            <span style={{ ...FONT.metric, color: statusColor }}>{statusText}</span>
           </div>
           <button
             type="button"
@@ -190,14 +212,20 @@ export default function RobotDetailDrawer() {
               <div className="flex flex-col">
                 <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>最高关节温度</span>
                 <span className="tabular-nums" style={{ color: COLORS.textPrimary, fontWeight: 600 }}>
-                  {robot && robot.status_code !== 0 ? `${robot.max_joint_temp.toFixed(1)}°C` : '--'}
+                  {robot && robot.is_online === true ? `${robot.max_joint_temp.toFixed(1)}°C` : '--'}
                 </span>
               </div>
               <div className="flex flex-col">
+                {/*
+                  「最后更新」优先用后端下发的 last_seen（**我们收到**那一帧的时刻），
+                  而不是机器人自述的 ts：离线诊断时后者是机器人的说法（可能时钟漂移、
+                  也可能是它自己算出来的），前者是坐在服务端这边的物证（ISSUE #77）。
+                  两者都有时优先 last_seen；老后端只给 ts 时回落，不显示空白。
+                */}
                 <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>最后更新</span>
                 <span className="tabular-nums" style={{ color: COLORS.textPrimary, fontWeight: 600 }}>
-                  {robot && robot.ts > 0
-                    ? new Date(robot.ts).toLocaleTimeString('zh-CN', { hour12: false })
+                  {lastSeenMs(robot) !== null
+                    ? new Date(lastSeenMs(robot) as number).toLocaleTimeString('zh-CN', { hour12: false })
                     : '--'}
                 </span>
               </div>

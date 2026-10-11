@@ -65,6 +65,23 @@ export type RobotTelemetry = Omit<Schemas['RobotTelemetryOut'], 'status_code'> &
   status_code: RobotStatus;
 };
 
+/**
+ * 「这台机器人现在还活着吗」—— **只信后端下发的 `is_online`**（ISSUE #77）。
+ *
+ * 为什么不能再用 `status_code === 0` 反推：
+ *   `status_code` 是**机器人自述**的最后一帧状态。机器人停报后没人来改写它，
+ *   它就冻在最后那个值上；于是断电一小时的机器人只要最后上报时是"正常"，
+ *   大屏就把永久把它算作在线（ISSUE #77 的「在线 100 / 离线 0」假象）。
+ *   `is_online` 来自**接收侧事实**（后端 `now - last_seen <= 阈值`，
+ *   见 backend_ingestion/app/services/liveness.py），停报即不再前进。
+ *
+ * 老数据/老后端兼容：字段缺失时 `Boolean(undefined) === false` —— 保守判离线，
+ * 不谎报在线。这与「宁可漏报在线」的取舍一致（谎报在线会掩盖真实掉线）。
+ */
+export function isRobotOnline(robot: Pick<RobotTelemetry, 'is_online'>): boolean {
+  return robot.is_online === true;
+}
+
 /** GET /robots 响应（生成自 `RobotListResponse`）。 */
 export type RobotListResponse = Omit<Schemas['RobotListResponse'], 'robots'> & {
   robots: RobotTelemetry[];

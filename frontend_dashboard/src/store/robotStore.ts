@@ -8,7 +8,7 @@
 
 import { create } from 'zustand';
 import type { RobotAlert, RobotStatus, RobotTelemetry } from '../types/robot';
-import { JOINT_NAMES } from '../types/robot';
+import { JOINT_NAMES, isRobotOnline } from '../types/robot';
 
 /** 告警流滚动上限，防止长时间运行内存无限增长（200px 高度可见约 6 行） */
 export const ALERT_BUFFER_LIMIT = 200;
@@ -36,6 +36,11 @@ export function offlinePlaceholder(robotId: string): RobotTelemetry {
     joint_positions: { ...zeros },
     error_code: 0,
     ts: 0,
+    // ISSUE #77：占位卡**必须**显式声明 is_online=false，而不是靠"status_code 是 0"
+    // 让下游去猜。占位与真实离线是两件事（前者=从未收到数据，后者=收到过但停了），
+    // 但两者的在线标志都是 false —— 只有这一个字段是全站唯一的在线权威。
+    is_online: false,
+    last_seen: null,
   };
 }
 
@@ -120,19 +125,39 @@ export const useRobotStore = create<RobotState>((set) => ({
   selectRobot: (selectedRobotId) => set({ selectedRobotId }),
 }));
 
-/** 供组件按需派生的选择器（避免在组件内写 Map 遍历逻辑） */
+/**
+ * 供组件按需派生的选择器（避免在组件内写 Map 遍历逻辑）。
+ *
+ * ISSUE #77：在线与否**只读后端下发的 `is_online`**（见 `isRobotOnline`），
+ * 不再用 `r.status_code === 0` 反推。旧写法把「机器人自述的最后一帧状态」当成在线证据，
+ * 于是停报的机器人每次都被算作在线 —— 大屏「在线 100 / 离线 0」正是这么来的。
+ *
+ * 语义三分（不要合成一个 `offline` 数字）：
+ *   - online  —— 后端在窗口内收到过遥测；
+ *   - offline —— **收到过、但已经停了**（失联，需要运维去现场）；
+ *   - never   —— 从未收到过任何遥测（init.sql 预置的 100 台，大部分开局即此态）。
+ * 后两者在「在线率」里合并，但在卡片上必须区分：「离线」会被误读为"本来就是关着的"，
+ * 而"失联"是"刚才还在干活、现在联系不上了"，处置动作完全不同。
+ */
 export function selectStatusCounts(state: { robots: Map<string, RobotTelemetry> }): {
   total: number;
   online: number;
   offline: number;
+  /** 收到过遥测、但已超出在线阈值（后端 is_online=false 且 last_seen 非空） */
+  stale: number;
 } {
   let online = 0;
+  let stale = 0;
   let offline = 0;
   for (const r of state.robots.values()) {
-    if (r.status_code === 0) offline += 1;
-    else online += 1;
+    if (isRobotOnline(r)) {
+      online += 1;
+    } else {
+      offline += 1;
+      if (r.last_seen !== null && r.last_seen !== undefined) stale += 1;
+    }
   }
-  return { total: state.robots.size, online, offline };
+  return { total: state.robots.size, online, offline, stale };
 }
 
 export type { RobotStatus };

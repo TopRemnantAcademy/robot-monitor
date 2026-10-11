@@ -111,6 +111,15 @@ ws_connections = Gauge(
     registry=registry,
 )
 
+# 当前在线台数（ISSUE #77）。语义是「距最后一次收到遥测 ≤ robot_offline_threshold_s」，
+# 而不是「status_code != 0」—— 停报的机器人 status_code 会冻在最后一帧，
+# 用它统计会稳定虚高。刷新点：`/healthz`（编排以秒级频率打，顺带维护，不另起定时器）。
+robots_online = Gauge(
+    "robot_monitor_robots_online",
+    "在线机器人数（now - last_seen <= 阈值，ISSUE #77；停报者不计入）",
+    registry=registry,
+)
+
 # /history 耗时分布。Histogram 而非 Gauge：要的是 p50/p95/p99，不是瞬时值。
 # 桶边界依据：Drawer 打开是**用户交互**，1s 是体感阈值；小于 10ms 是本地缓存命中量级。
 # 上限 2.5s 处若仍堆积，说明查询已在拖垮交互，需要走连续聚合表而非原始表 time_bucket。

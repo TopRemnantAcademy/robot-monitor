@@ -2,7 +2,7 @@
 
 import { useMemo } from 'react';
 import { COLORS, FONT } from '../theme/tokens';
-import { useRobotStore } from '../store/robotStore';
+import { selectStatusCounts, useRobotStore } from '../store/robotStore';
 
 function Kpi({ label, value, unit, color }: { label: string; value: string; unit?: string; color?: string }) {
   return (
@@ -22,22 +22,24 @@ export default function HealthSummaryHeader() {
   const wsStatus = useRobotStore((s) => s.wsStatus);
 
   const stats = useMemo(() => {
-    let online = 0;
+    // ISSUE #77：在线数与「当前告警」一样，**从后端下发的 is_online 来**，
+    // 不再用 `status_code !== 0` 自己数 —— 后者把停报机器人永久算作在线，
+    // 于是顶栏的「在线率 100.0%」在整条产线断电时依然绿得理直气壮。
+    const counts = selectStatusCounts({ robots });
     let batterySum = 0;
     let batteryCount = 0;
     for (const r of robots.values()) {
-      if (r.status_code !== 0) {
-        online += 1;
+      if (r.is_online === true) {
         batterySum += r.battery_pct;
         batteryCount += 1;
       }
     }
-    const total = robots.size;
-    // 在线率 = 在线数 / 100（spec/03 §5.2），离线机器人不计入平均电量
+    // 在线率 = 在线数 / 100（spec/03 §5.2），离线/失联机器人不计入平均电量
     return {
-      onlineRate: total === 0 ? 0 : (online / total) * 100,
-      online,
-      total,
+      onlineRate: counts.total === 0 ? 0 : (counts.online / counts.total) * 100,
+      online: counts.online,
+      total: counts.total,
+      stale: counts.stale,
       avgBattery: batteryCount === 0 ? 0 : batterySum / batteryCount,
     };
   }, [robots]);
@@ -65,7 +67,9 @@ export default function HealthSummaryHeader() {
         <Kpi
           label="在线率"
           value={stats.onlineRate.toFixed(1)}
-          unit={`% (${stats.online}/${stats.total})`}
+          // 失联台数直接挂在括号里：只看百分比看不出"是有 1 台还是 40 台掉了"，
+          // 而这两者的处置动作完全不同（前者去现场，后者先查 Redis/MQTT 链路）。
+          unit={`% (${stats.online}/${stats.total}${stats.stale > 0 ? ` · 失联 ${stats.stale}` : ''})`}
           color={stats.onlineRate >= 90 ? COLORS.statusNormal : COLORS.statusWarning}
         />
         <Kpi

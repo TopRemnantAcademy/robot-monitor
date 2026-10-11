@@ -75,6 +75,12 @@ function telemetry(over: Partial<RobotTelemetry> = {}): RobotTelemetry {
     joint_positions: { ...zeros, left_elbow_pitch: 0.55 },
     error_code: 0,
     ts: Date.parse('2026-10-10T23:49:10Z'),
+    // ISSUE #77：is_online 现在是生成契约里的 required 字段。
+    // 取 `true` 是刻意的：本文件的用例全部在验「有数据的机器人」的渲染，
+    // 取 false 会让 Drawer 显示「失联」并隐藏温度，与断言意图无关地改变输出。
+    // 真正的离线/失联渲染断言在 src/store/__tests__/robotStore.liveness.test.ts。
+    is_online: true,
+    last_seen: Math.floor(Date.parse('2026-10-10T23:49:10Z') / 1000),
     ...over,
   };
 }

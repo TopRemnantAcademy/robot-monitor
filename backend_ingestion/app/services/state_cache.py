@@ -13,6 +13,7 @@ import logging
 from app.config import settings
 from app.db.redis import get_redis
 from app.schemas.telemetry import Telemetry
+from app.services import liveness
 
 log = logging.getLogger("state_cache")
 
@@ -49,6 +50,11 @@ async def write_and_publish(t: Telemetry) -> None:
         # 必须发布**还原类型后**的载荷：Redis Hash 只存字符串，
         # 直接广播会让前端收到 status_code="1"(字符串) 而非 1(数字)，
         # 违反 spec/03 §7 的 RobotTelemetry 类型，导致状态色与热力图判断全错。
+        # 在线台账（ISSUE #77）：与 Hash/PUBLISH 同一处、同一 try。
+        # 它是「接收侧事实」（我们何时收到这一帧），与机器人自述的 status_code 不同源 ——
+        # 停报的机器人不会再来这里，last_seen 自然不再前进。O(1) Redis 写，不碰数据库。
+        await liveness.record(t.robot_id, t.status_code)
+
         payload = json.dumps(_decode(mapping), separators=(",", ":"))
         await r.publish(settings.chan_stream_all, payload)
         await r.publish(settings.chan_stream_one.format(robot_id=t.robot_id), payload)
@@ -57,7 +63,16 @@ async def write_and_publish(t: Telemetry) -> None:
 
 
 async def snapshot(robot_ids: list[str]) -> list[dict]:
-    """拉取一批机器人的最新状态（WS 首帧快照用）。"""
+    """拉取一批机器人的最新状态（WS 首帧快照 + `GET /robots`）。
+
+    **必须枚举全部 robot_ids、不能只回 Redis 里存在的 Hash**（ISSUE #77 的连带问题）：
+    Hash 带 10s TTL，机器人一停报就过期消失，只回存在的那些等于
+    「掉线的机器人从大屏上凭空消失」——比误报在线更难排查。
+    缺失的回落为离线占位（status_code=0 + is_online=false），
+    与前端 `offlinePlaceholder()` 的首屏语义一致。
+
+    `is_online` / `last_seen` 由 `liveness.enrich()` 批量补齐（2 个网络往返，非按台数）。
+    """
     r = await get_redis()
     out: list[dict] = []
     for rid in robot_ids:
@@ -65,14 +80,35 @@ async def snapshot(robot_ids: list[str]) -> list[dict]:
             h = await r.hgetall(f"robot:state:{rid}")
         except Exception:
             continue
-        if not h:
-            continue
-        out.append(_decode(h))
-    return out
+        out.append(_decode(h) if h else offline_placeholder(rid))
+    return await liveness.enrich(out)
+
+
+def offline_placeholder(robot_id: str) -> dict:
+    """无遥测时的离线占位（后端侧与前端 `offlinePlaceholder` 字段逐一对齐）。
+
+    与 `RobotTelemetryOut` 的必填字段一致：关节字典给空 dict 而非缺字段，
+    否则前端 `Object.entries(joint_temperatures)` 会抛错。
+    """
+    return {
+        "robot_id": robot_id,
+        "status_code": 0,
+        "error_code": 0,
+        "battery_pct": 0.0,
+        "max_joint_temp": 0.0,
+        "joint_temperatures": {},
+        "joint_positions": {},
+        "joint_torques": {},
+        "ts": 0,
+    }
 
 
 def _decode(h: dict[str, str]) -> dict:
-    """把 Hash 里的字符串还原为前端期望的类型（spec/03 §7）。"""
+    """把 Hash 里的字符串还原为前端期望的类型（spec/03 §7）。
+
+    `is_online` / `last_seen` 不在这里给：它们不在遥测 Hash 里，而是
+    「接收侧事实」，由 `liveness.enrich()` 从独立的台账补齐（ISSUE #77）。
+    """
     import json as _json
 
     def num(v: str | None, default=0.0) -> float:

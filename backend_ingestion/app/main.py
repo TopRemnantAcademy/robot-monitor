@@ -43,7 +43,7 @@ from app.schemas.api import (
     RobotHistoryResponse,
     RobotListResponse,
 )
-from app.services import mqtt_subscriber, state_cache
+from app.services import liveness, mqtt_subscriber, state_cache
 from app.services.batch_writer import BatchWriter
 from app import ws_probe
 
@@ -129,6 +129,11 @@ async def healthz() -> HealthResponse:
       而依赖恢复后本服务能自愈，重启反而丢在飞数据。依赖不健康由 `status` 字段表达。
     """
     db_ok = await _db_healthy()
+    # 在线数（ISSUE #77）在这里顺带刷新：`/healthz` 本来就是编排系统以秒级频率打的探针，
+    # 借它的节奏维护 Gauge，就不必再为 Prometheus 单独起一个定时器（拉模型下
+    # 没人 set 的 Gauge 会永远停在初值，正是"常量 0"的假绿来源）。
+    online = await liveness.online_count()
+    metrics.robots_online.set(online)
     return {
         "status": "ok" if db_ok else "degraded",
         "db": "up" if db_ok else "down",
@@ -205,7 +210,11 @@ async def prometheus_metrics():
 
 @app.get("/robots", response_model=RobotListResponse)
 async def list_robots(_user: RobotUser = Depends(current_active_user)):
-    """100 台最新状态。只读端点：viewer 起可访问，返回体与加鉴权前逐字段一致。"""
+    """100 台最新状态。只读端点：viewer 起可访问，返回体与加鉴权前逐字段一致。
+
+    ISSUE #77：返回体新增 `is_online` / `last_seen` 两个可选字段，并**恒定返回 100 台**
+    （停报的机器人回落为离线占位，而不是从列表里消失）。
+    """
     return {"robots": await state_cache.snapshot(settings.robot_ids)}
 
 
@@ -314,6 +323,10 @@ async def history(
     # 注意：这里**刻意不校验 robot_metadata**。init.sql 预置了 100 台机器人，
     # 但「从未上报过数据的机器人」查历史必然是空数组——这是正常语义而非错误。
     # 若改成 404，Drawer 对刚上线的机器人会弹错误提示，反而误导运维。
+    #
+    # 同理（ISSUE #77）：**不能**用「history 为空」反推 offline —— 停报的机器人
+    # 历史里是有折线的，它只是"最近这段没有新点"。在线态的唯一事实源是
+    # `/robots` 与 WS snapshot 的 `is_online`，本端点不参与判定。
 
     return {
         "robot_id": robot_id,

@@ -68,6 +68,11 @@ const goodTelemetry = {
     joint_positions: joint,
     joint_torques: joint,
     ts: 1712000000000,
+    // ISSUE #77：is_online 现在是 required —— 前端只认它判在线，
+    // 缺了它整个 telemetry 信封会被 ajv 拒掉（这正是我们想要的：宁可开发期报错，
+    // 也不要让"在线态"悄悄退回用 status_code 猜）。
+    is_online: true,
+    last_seen: 1712000000,
   },
 };
 
@@ -132,4 +137,27 @@ test('错误信封 6：alert severity 超范围（0）被拒', () => {
 
 test('错误信封 7：信封缺 data 字段被拒', () => {
   assert.equal(validate({ type: 'snapshot' }), false);
+});
+
+test('错误信封 8（ISSUE #77）：telemetry 缺 is_online 被拒', () => {
+  const bad = structuredClone(goodTelemetry);
+  delete bad.data.is_online;
+  assert.equal(validate(bad), false, '缺 is_online 必须被拒 —— 否则在线判定会悄悄退回 status_code 猜');
+  const missing = validate.errors
+    .filter((e) => e.keyword === 'required')
+    .map((e) => e.params?.missingProperty);
+  assert.ok(missing.includes('is_online'), `required 错误应点名 is_online，实际 ${JSON.stringify(validate.errors)}`);
+});
+
+test('错误信封 9（ISSUE #77）：is_online 是字符串 "false" 被拒（类型漂移会让 Boolean() 恒真）', () => {
+  const bad = structuredClone(goodTelemetry);
+  bad.data.is_online = 'false';
+  assert.equal(validate(bad), false);
+});
+
+test('合法变体（ISSUE #77）：last_seen 允许为 null（从未上报）', () => {
+  const env = structuredClone(goodTelemetry);
+  env.data.is_online = false;
+  env.data.last_seen = null;
+  assert.equal(validate(env), true, `last_seen=null 应通过，实际：${JSON.stringify(validate.errors)}`);
 });

@@ -50,6 +50,17 @@ class Settings(BaseSettings):
     # ---- Redis 最新状态缓存（spec/01 §4.3）----
     state_ttl_seconds: int = 10
 
+    # ---- 在线判定阈值（ISSUE #77）----
+    # 「现在还活着吗」只由后端判定：前端此前拿 `status_code === 0` 猜在线，
+    # 于是停报的机器人把最后一帧的 status_code 冻在那里，永远显示在线。
+    #
+    # 30s 的依据（不是拍脑袋）：正常上报是 10Hz（100ms 一条），30s = 连续丢 300 帧，
+    # 远大于网络抖动/MQTT 重连/JS 事件循环阻塞的量级；而 AGENTS.md 的验收要求
+    # 「避免 10Hz 正常抖动误判」。与 alert_engine 的 offline_after_s(10s) **刻意不同**：
+    # 那个是**告警阈值**（早报=早处置），这个是**展示阈值**（晚划=不闪）。
+    # 两者语义不同，不要为了"看着一致"把它们并成一个值。
+    robot_offline_threshold_s: float = 30.0
+
     # ---- HTTP ----
     ws_host: str = "0.0.0.0"
     ws_port: int = 8000
