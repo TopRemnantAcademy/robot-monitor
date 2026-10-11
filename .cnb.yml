@@ -108,7 +108,8 @@ main:
   # 在缺失时「明确 skip」而不是红 —— 否则环境问题会被误读成代码回归
   # （ISSUE #60 §4、AGENTS.md §6 都要求区分「环境」与「代码」）。
   #
-  # 判定与产出：起栈前先探 docker；不可用则打印【E2E SKIP】原因并以 0 退出。
+  # 判定与产出：起栈前先探 docker、再探 python；缺任一则打印【E2E SKIP】原因并以 0 退出。
+  # 构建镜像必须自带 python3（实跑发现缺省镜像没有，见 pipeline 内注释）。
   # 可用则跑 tests/e2e/test_e2e_30k.py（自带超时守卫与取证报告），
   # 退出码 3 视同 skip（脚本内部已判过环境），其余非 0 才是真失败。
   #
@@ -117,6 +118,15 @@ main:
   # ============================================================
   pull_request:
     - name: e2e-30k-landing
+      # ---- 为什么必须钉 image（2026-10 CI 实测教训）----
+      # 不写 image 时用缺省镜像 `cnbcool/default-build-env`，该镜像**没有 python3**：
+      # 首次实跑报 `sh: line 21: python3: command not found`（返回码 127），
+      # 而此时 docker 探测已经通过（日志里的 `docker 可用：Docker version 29.6.2`），
+      # 即「环境判定全绿 → 脚本起不来」，属于最坏的一类失败（红得莫名其妙）。
+      # 所以这里把运行环境写死成有 python3 的镜像，而不是靠默认镜像碰运气。
+      # 同理，脚本里也**不再**用 `python3` 裸命令，见下方 runner 探测。
+      docker:
+        image: python:3.11-slim
       services: [docker]
       env: &e2e-env
         # 40s × 100 台 × 10Hz ≈ 40,000 帧，相对 30,000 阈值留足余量。
@@ -145,8 +155,25 @@ main:
             fi
             echo "docker 可用：$(docker --version)"
 
+            # ---- 运行环境判定：连 python 都没有就明确 skip，绝不 red ----
+            # 这一层是实跑打出来的：首次 CI 里 docker 可用，但缺省镜像无 python3，
+            # 脚本根本没起来（返回码 127）。所以顺序必须是
+            # 「先探 docker（本 job 的核心依赖）→ 再探 python（脚本自身的依赖）」，
+            # 两层都给出原因与解法，读者不必翻配置就知道卡在哪一层。
+            if command -v python3 >/dev/null 2>&1; then
+              PY=python3
+            elif command -v python >/dev/null 2>&1; then
+              PY=python
+            else
+              echo "【E2E SKIP】镜像内 PATH 找不到 python3/python（当前镜像：${CNB_BUILD_IMAGE:-缺省镜像}）。"
+              echo "本 job 需要 python 来驱动 tests/e2e/test_e2e_30k.py（只用标准库，无需 pip 安装）。"
+              echo "修复：在本 pipeline 上声明 docker.image（如 python:3.11-slim），不要沿用缺省镜像。"
+              exit 0
+            fi
+            echo "python 可用：$($PY --version 2>&1)"
+
             # 依赖：e2e 脚本只用标准库（subprocess/urllib），无需 pip 安装。
-            python3 tests/e2e/test_e2e_30k.py
+            $PY tests/e2e/test_e2e_30k.py
             rc=$?
             if [ "$rc" = "3" ]; then
               echo "【E2E SKIP】脚本自判环境不具备（退出码 3），非代码失败。"

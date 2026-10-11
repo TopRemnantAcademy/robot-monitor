@@ -117,7 +117,7 @@ INSERT INTO robot_telemetry (...) SELECT ... FROM telemetry_stg
 | :--- | :--- | :--- |
 | `timescaledb` 压缩策略 | 压缩率与查询计划影响需实测，故在 `init.sql` 中**注释保留** | TimescaleDB 环境跑 `EXPLAIN` 对比 + 实测压缩率 |
 | PG16 容器（`2.13.1-pg16`） | 本环境无 Docker | `docker compose up` 后重跑 `test_db_integration.py` |
-| 端到端 30,000 行（含 MQTT/模拟器） | 需 EMQX + Redis + 容器；ISSUE #60 已备好容器化 harness（`tests/e2e/`），但本开发环境无 docker daemon，该 harness 尚未在真实 Docker 上产出实测数字 | `python -m pytest tests/e2e/test_e2e_30k.py -v -s`（ISSUE #60），或 `bash test_integration.sh`（订单 06） |
+| 端到端 30,000 行（含 MQTT/模拟器） | 需 EMQX + Redis + 容器；ISSUE #60 已备好容器化 harness（`tests/e2e/`），但本开发环境无 docker daemon，该 harness 尚未在真实 Docker 上产出实测数字 | `python -m pytest tests/e2e/test_e2e_30k.py -v -s`（ISSUE #60），或 `bash test_integration.sh`（订单 06）。CI job 见 `.cnb.yml` 的 `e2e-30k-landing`（已钉 `python:3.11-slim` 镜像） |
 | 保留策略**实际删除**行为 | 要等 30 天或被删 chunk 存在才能观察 | 手动 `INSERT` 31 天前数据 → 跑 `run_job` 验证 |
 
 ## 7. 回归命令

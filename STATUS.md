@@ -142,7 +142,7 @@
 
 | 项 | 所需条件 |
 |---|---|
-| 端到端 30,000 行落库 | **harness 已就绪**（ISSUE #60：`tests/e2e/docker-compose.e2e.yml` + `tests/e2e/test_e2e_30k.py`），但**尚未在真实 Docker 上跑过** —— 本开发环境无 docker daemon，脚本按设计 skip（退出码 3）。需在提供 docker 的机器/runner 上执行 `python -m pytest tests/e2e/test_e2e_30k.py -v -s` 才产生实测数字 |
+| 端到端 30,000 行落库 | **harness 已就绪**（ISSUE #60：`tests/e2e/docker-compose.e2e.yml` + `tests/e2e/test_e2e_30k.py`），但**尚未在真实 Docker 上跑过** —— 本开发环境无 docker daemon，脚本按设计 skip（退出码 3）。需在提供 docker 的机器/runner 上执行 `python -m pytest tests/e2e/test_e2e_30k.py -v -s` 才产生实测数字。CI 侧 `e2e-30k-landing`（`.cnb.yml`）已按实跑报错修正：显式钉 `docker.image: python:3.11-slim`（缺省镜像无 python3，首次实跑返回码 127）、补 `docker compose` 插件探测、并给压测加发送量下限（见 `tests/e2e/README.md`） |
 | I-2 / I-3 的**运行时**行为 | 需真实 broker；导入期已验证 |
 | 告警去重幂等 / `robot:alerts` 发布 | 同上 |
 

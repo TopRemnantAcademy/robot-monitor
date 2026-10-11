@@ -55,6 +55,15 @@
     E2E_KEEP=1             结束后保留栈（排查用）
     E2E_UP_TIMEOUT=300     起栈+等健康的超时（秒）
     E2E_COMPOSE=<path>     覆盖 compose 文件路径
+
+压测自身的发送量下限
+--------------------
+脚本会按 `E2E_ROBOTS * 10 * E2E_DURATION * 0.5` 算出下限并作为 `FLEET_MIN_SENT`
+注入 `mock_fleet`（`simulator/mock_fleet.py --min-sent`）。
+为什么必须有这条：`--duration` 只保证跑满时长，不保证发送量，而
+`docker compose run --rm` **不会**清掉 compose 里为同一变量设的默认值 ——
+台数被静默覆盖时压测照样退 0，失败要到断言阶段才暴露（甚至被阈值放过）。
+下限让压测阶段自己先红，且失败信息直指原因。
 """
 
 from __future__ import annotations
@@ -91,6 +100,10 @@ PYTEST_SKIP_MARKER = "E2E-SKIP"
 UP_TIMEOUT_S = UP_TIMEOUT
 HEALTH_TIMEOUT_S = 180
 STRESS_TIMEOUT_S = DURATION + 120
+# 发送量下限：理论值 台数×10Hz×秒数 的一半。留一半余量是因为
+# 起栈初期 broker 未就绪会有重连空转，真正的**回归**（broker 写错、台数被覆盖、
+# 发布侧持续报错）会让它掉到零头，两者区分度极大，不需要扣得很精确。
+MIN_SENT = int(ROBOTS * 10 * DURATION * 0.5)
 PSQL_TIMEOUT_S = 60
 
 
@@ -136,6 +149,17 @@ def require_docker() -> None:
         )
     if not COMPOSE_FILE.is_file():
         raise E2ESkip(f"compose 文件不存在：{COMPOSE_FILE}")
+    # `docker compose`（插件版）必须可用：老式 `docker-compose`（独立二进制）
+    # 与脚本调用的命令格式不同，混用会在起栈时才炸成「代码失败」。
+    # 这一条**不能**放进下面的 try 里 —— 那里捕获的是 docker daemon 未就绪（E2ESkip），
+    # 而这里是环境缺件（有 docker 但没 compose 插件），必须显式 skip 且带原因。
+    probe = subprocess.run(["docker", "compose", "version"], capture_output=True, text=True)
+    if probe.returncode != 0:
+        raise E2ESkip(
+            "`docker compose`（插件版）不可用，`docker compose version` 非 0。"
+            "本用例整套起栈/执行/取证都走 compose。原始输出："
+            f"{(probe.stderr or probe.stdout).strip()[:400]}"
+        )
 
 
 # ------------------------------------------------------------------ 探针
@@ -204,11 +228,14 @@ def run_e2e() -> dict:
     # 4) 容器内跑受控时长压测。用 `compose run` 而不是 `up`：
     #    run 是前台阻塞、退出码即压测成败，天然给出同步点，
     #    不必靠轮询容器状态猜「跑完了没」。
+    print(f"[e2e] 压测发送量下限 = {MIN_SENT} 条（理论 {ROBOTS * 10 * DURATION} 的一半）",
+          flush=True)
     stress_started = time.monotonic()
     compose(
         "run", "--rm", "-T",
         "-e", f"FLEET_DURATION={DURATION}",
         "-e", f"FLEET_ROBOTS={ROBOTS}",
+        "-e", f"FLEET_MIN_SENT={MIN_SENT}",
         "mock_fleet",
         timeout=STRESS_TIMEOUT_S,
     )

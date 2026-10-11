@@ -12,6 +12,16 @@
 | `Dockerfile.mock_fleet` | 模拟器镜像（`simulator/` 原本只有裸跑，没有 Dockerfile） |
 | `test_e2e_30k.py` | 驱动 + 断言 + 取证报告；无 Docker 时 **skip（退出码 3）**，绝不红 |
 
+## CI 里怎么跑
+
+`.cnb.yml` 的 `e2e-30k-landing` pipeline（PR / push main / 每日 crontab 三触发共用同一份 stages）
+挂 `services: [docker]`，并**显式钉 `docker.image: python:3.11-slim`**。
+
+为什么必须钉镜像：首次实跑时没写 `image`，缺省镜像 `cnbcool/default-build-env` **没有 python3**，
+日志里 docker 探测已经通过，紧接着 `sh: line 21: python3: command not found`（返回码 127）——
+job 变红但和代码毫无关系。脚本里也做了两层探测（docker → python），
+任一层缺失都打印【E2E SKIP】+ 原因 + 解法并以 0 退出，绝不把环境问题伪装成回归。
+
 ## 跑法
 
 ```bash
@@ -45,6 +55,9 @@ docker compose -f tests/e2e/docker-compose.e2e.yml down -v
 | `E2E_KEEP` | — | `1` 则结束后保留栈，便于人工排查 |
 | `E2E_COMPOSE` | `tests/e2e/docker-compose.e2e.yml` | 覆盖 compose 文件路径 |
 
+`E2E_ROBOTS` / `E2E_DURATION` 会被换算成 `FLEET_MIN_SENT = 台数 × 10 × 秒数 × 0.5`
+注入 `mock_fleet`（见下条）。
+
 ## 断言口径（为什么这么写）
 
 1. **行数用 `>=`，不用 `==`**：网络/调度抖动允许向下浮动（ISSUE #60 明令）。
@@ -58,6 +71,11 @@ docker compose -f tests/e2e/docker-compose.e2e.yml down -v
    防止误连到普通 PostgreSQL 时断言假绿。mock 替身被 ISSUE #60 点名禁止。
 4. **等 `/healthz` 的 `db=up` 再开跑**：`/healthz` 是存活探针语义，依赖不可达时仍返回 200，
    只判端口会提前开跑；结束时等到 `rows_submitted` 连续两次不变才算落定（队列排空）。
+5. **压测阶段自带发送量下限**：`mock_fleet --min-sent`（由脚本按 `台数×10×秒数×0.5` 注入）。
+   只有 `--duration` 时，模拟器**跑满时长就退 0**，发不出去也不吭声：
+   `docker compose run --rm` 不会清掉 compose 里为同一变量设的默认值，
+   台数被静默覆盖、broker 写错、发布侧持续报错，都会一路苟到断言阶段甚至被阈值放过。
+   加了下限，失败发生在**离因最近的地方**，日志直接点名原因。
 
 ## 与 `test_integration.sh`（订单 06）的关系
 

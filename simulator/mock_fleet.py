@@ -19,6 +19,10 @@
 `--duration N`：跑到第 N 秒即自行退出（用于 e2e/CI 受控压测，见 tests/e2e/）。
 `--no-ui`：关掉 rich 面板，改用每秒一行的普通日志；容器里没有 TTY 时 Live 会退化成
 逐帧刷屏日志，把面板关掉才能让 `docker compose logs` 可读（e2e harness 用这条）。
+`--min-sent M`：退出时若 `sent < M` 则打印原因并以**非 0** 退出。为什么需要它 ——
+`--duration` 只保证「跑满 N 秒」，不保证「真发出去了多少条」：broker 地址写错、
+台数被环境变量静默覆盖、发布侧持续报错，都会让模拟器安然退 0，
+把失败推迟到断言阶段甚至被阈值判定放过（静默假绿）。给了下限，压测阶段自己先红。
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ import contextlib
 import json
 import random
 import signal
+import sys
 import time
 from dataclasses import dataclass, field
 
@@ -290,7 +295,7 @@ def pick_overheat_robots(states: list[RobotState], fault_rate: float) -> None:
 
 # ---------------------------------------------------------------- 入口
 
-async def amain(args: argparse.Namespace) -> None:
+async def amain(args: argparse.Namespace) -> int:
     states = [RobotState(robot_id=f"humanoid-{i:03d}") for i in range(1, args.robots + 1)]
     pick_overheat_robots(states, args.fault_rate)
 
@@ -330,6 +335,15 @@ async def amain(args: argparse.Namespace) -> None:
                 with contextlib.suppress(asyncio.CancelledError):
                     await t
 
+    # 发送量自检放在 finally 之后：无论正常收尾还是被取消，都要如实报数。
+    if args.min_sent > 0 and counters.sent < args.min_sent:
+        print(f"[mock_fleet] 发送量不达标：sent={counters.sent} < --min-sent="
+              f"{args.min_sent}（publish 失败 {counters.publish_errors} 次）。"
+              "常见原因：broker 不可达/端口不对、台数被环境变量覆盖、发布侧持续报错。",
+              flush=True)
+        return 1
+    return 0
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="RobotMonitor 100 台人形机器人遥测模拟器")
@@ -341,12 +355,17 @@ def main() -> None:
                         help="受控压测秒数；>0 时到点自行退出（0=永久运行，默认）")
     parser.add_argument("--no-ui", action="store_true",
                         help="关闭 rich 面板，改为每秒一行日志（无 TTY 的容器/CI 场景）")
+    parser.add_argument("--min-sent", type=int, default=0,
+                        help="发送量下限；>0 时退出时 sent 少于该值即以非 0 退出（0=不设卡，默认）")
     args = parser.parse_args()
+
+    if args.min_sent < 0:
+        parser.error("--min-sent 不能为负")
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: None)   # 交由 finally 统一取消任务
 
-    asyncio.run(amain(args))
+    sys.exit(asyncio.run(amain(args)))
 
 
 if __name__ == "__main__":

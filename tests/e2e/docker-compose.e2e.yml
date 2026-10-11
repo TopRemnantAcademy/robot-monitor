@@ -116,6 +116,13 @@ services:
       # 故改由 entrypoint 在**容器内**读环境变量再 exec，`-e` 才真正生效。
       FLEET_DURATION: "40"
       FLEET_ROBOTS: "100"
+      # 发送量下限（默认 0=不设卡）：由 e2e 脚本按 E2E_ROBOTS×10×E2E_DURATION×0.5 算出并注入。
+      # 为什么需要它：发送量与 STACK_HARD_LIMIT 共用一套环境变量时，
+      # `docker compose run --rm` **不会**清掉 compose 里的环境值，只是把它换成
+      # 宿主机的值 —— 于是「脚本给 100 台」会被 compose 里的 5 台静默覆盖，
+      # 跑出 1000~2000 行却被 `--min-sent 0` 放行，是标准的静默假绿。
+      # 加上下限后，压测阶段自身就会以非 0 退出，不会把问题掩盖到断言阶段。
+      FLEET_MIN_SENT: "0"
       MQTT_BROKER: emqx
       MQTT_PORT: "1883"
     entrypoint:
@@ -128,7 +135,8 @@ services:
           --port "$${MQTT_PORT}" \
           --duration "$${FLEET_DURATION}" \
           --no-ui \
-          --fault-rate 0.02
+          --fault-rate 0.02 \
+          --min-sent "$${FLEET_MIN_SENT:-0}"
     # 容器内无 TTY，rich 的 Live 控制序列会把 logs 刷乱，故 --no-ui 走每秒一行日志。
     depends_on:
       emqx:
