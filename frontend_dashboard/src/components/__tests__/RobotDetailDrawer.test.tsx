@@ -167,9 +167,15 @@ describe('RobotDetailDrawer', () => {
     openDrawer();
     render(<RobotDetailDrawer />);
 
-    expect(await screen.findByText(/历史数据不可用/)).toBeInTheDocument();
+    // 5xx 会走 queryClient 的重试（lib/queryClient.ts:27：4xx 不重试，其余重试到 2 次），
+    // retryDelay = min(1000 * 2^attempt, 8000) → 1s + 2s ≈ 3s 后才落到 error 态。
+    // 默认 findByText 只有 1s，会在重试途中判失败。这里显式放宽到 6s（留足余量），
+    // 断言内容不变 —— 仍要求错误文案带 HTTP 状态码。
+    expect(
+      await screen.findByText(/历史数据不可用/, undefined, { timeout: 6000 }),
+    ).toBeInTheDocument();
     expect(screen.getByText(/HTTP 500/)).toBeInTheDocument();
-  });
+  }, 10_000);
 
   it('关闭按钮把 selectedRobotId 置空（Drawer 卸载）', async () => {
     const user = userEvent.setup();
