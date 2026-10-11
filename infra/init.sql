@@ -70,6 +70,11 @@ ON CONFLICT (robot_id) DO NOTHING;
 --      ALTER TABLE robot_alert ADD COLUMN ack_by TEXT;
 --      ALTER TABLE robot_alert ADD PRIMARY KEY (time, alert_id);
 --    （TimescaleDB 侧上述语句未在本机验证，见文件尾部说明。）
+--
+--    订单 17 追加 escalated（升级标记）列，存量库补迁移：
+--      ALTER TABLE robot_alert ADD COLUMN escalated BOOLEAN NOT NULL DEFAULT FALSE;
+--    本机已在纯 PG15.19 上实测该语句（见 PR「实测」章节）；ack_by/ack_at
+--    由订单 19 加过，本单**不重复 ADD COLUMN**。
 CREATE TABLE IF NOT EXISTS robot_alert (
     time      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     -- alert_id 紧跟分区列 time：列序与 ORM 声明序、PK 序三者一致，便于逐列比对。
@@ -82,6 +87,9 @@ CREATE TABLE IF NOT EXISTS robot_alert (
     ack       BOOLEAN     NOT NULL DEFAULT FALSE,
     ack_at    TIMESTAMPTZ,
     ack_by    TEXT,
+    -- escalated：severity=3 且超时未 ack 时置 TRUE（订单 17 升级闭环）。
+    -- 由 alert_engine/app/escalation.py 的 ticker 写入；前端据此显示「⚠ 已升级」。
+    escalated BOOLEAN     NOT NULL DEFAULT FALSE,
     -- 主键必须含分区列 time（TimescaleDB 硬性要求）
     PRIMARY KEY (time, alert_id)
 );
@@ -193,6 +201,10 @@ END $$;
 CREATE INDEX IF NOT EXISTS idx_telemetry_robot_time ON robot_telemetry (robot_id, time DESC);
 CREATE INDEX IF NOT EXISTS idx_alert_robot_time ON robot_alert (robot_id, time DESC);
 CREATE INDEX IF NOT EXISTS idx_alert_ack ON robot_alert (ack) WHERE ack = FALSE;
+-- 升级扫描（订单 17 escalation ticker）：只扫 severity=3 且未确认、未升级的窄集。
+-- 谓词与 escalation.py 的 WHERE 逐字对齐，否则索引不被使用（部分索引只在谓词蕴含时命中）。
+CREATE INDEX IF NOT EXISTS idx_alert_escalation ON robot_alert (time)
+    WHERE ack = FALSE AND escalated = FALSE AND severity = 3;
 
 
 -- 8. 认证用户表（订单 15：fastapi-users + 两级 RBAC）

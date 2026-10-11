@@ -1,9 +1,10 @@
 // spec/03 §5.1 —— 100 卡片墙
 // grid-cols-5 md:grid-cols-10 gap-2，每卡 aspect-[4/3]，颜色全部走 theme/tokens。
 
-import { memo, useMemo } from 'react';
+import { memo, useMemo, useRef } from 'react';
 import { COLORS, FONT, STATUS_COLOR, STATUS_LABEL, batteryColor, tempColor } from '../theme/tokens';
 import { useRobotStore } from '../store/robotStore';
+import { countCardRender } from '../lib/observability';
 import type { RobotTelemetry } from '../types/robot';
 
 /** 卡片只吃自己的机器人对象，配合 memo 让「本帧没变的卡」不重渲染 */
@@ -73,6 +74,23 @@ const RobotCard = memo(function RobotCard({ robot, selected, onOpen }: RobotCard
  * 网格自身只在 robots / selectedRobotId 引用变化时重渲染（即 100ms 刷库帧）。
  */
 const RobotGrid = memo(function RobotGrid() {
+  // 订单 16 T2：卡片墙渲染计数。
+  //
+  // 用 useRef 而不是 state —— 这是本计数能存在的前提：放 state 会 setState →
+  // 触发本组件重渲染 → 计数又 +1 → 无限循环。useRef 是渲染期可安全写的可变盒子，
+  // 写它不产生任何 React 订阅通知（不触发额外渲染，满足订单 16 的硬约束）。
+  //
+  // 计数点选在 **RobotGrid 本体**而不是 100 个 RobotCard：验收问的是
+  // "卡片墙整块重渲染了几次"，那对应的是"store 通知本组件几次"。
+  // 逐卡计数会被 memo 命中的卡混入（那些卡根本没重渲染），数字没有对照意义。
+  //
+  // ⚠️ React.StrictMode（main.tsx）在**开发模式**下会双调用组件函数，
+  // 故 dev 下 cardRenders 约为真实值的 2 倍。生产构建（vite build）无此行为，
+  // 对照 storeCommits 时应以生产数据为准；dev 下看两者"同比例"即可。
+  const renderCountRef = useRef(0);
+  renderCountRef.current += 1;
+  countCardRender(renderCountRef.current);
+
   // 只订阅 robots 这一个字段；100ms 批量刷库时本组件最多 10 次/秒重渲染
   const robots = useRobotStore((s) => s.robots);
   const selectedRobotId = useRobotStore((s) => s.selectedRobotId);

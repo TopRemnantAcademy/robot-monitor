@@ -1,0 +1,1154 @@
+{
+  "components": {
+    "schemas": {
+      "BearerResponse": {
+        "properties": {
+          "access_token": {
+            "title": "Access Token",
+            "type": "string"
+          },
+          "token_type": {
+            "title": "Token Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "access_token",
+          "token_type"
+        ],
+        "title": "BearerResponse",
+        "type": "object"
+      },
+      "Body_auth_jwt_login_auth_jwt_login_post": {
+        "properties": {
+          "client_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Id"
+          },
+          "client_secret": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Secret"
+          },
+          "grant_type": {
+            "anyOf": [
+              {
+                "pattern": "password",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grant Type"
+          },
+          "password": {
+            "title": "Password",
+            "type": "string"
+          },
+          "scope": {
+            "default": "",
+            "title": "Scope",
+            "type": "string"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ],
+        "title": "Body_auth_jwt_login_auth_jwt_login_post",
+        "type": "object"
+      },
+      "ErrorModel": {
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              }
+            ],
+            "title": "Detail"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "ErrorModel",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HealthResponse": {
+        "description": "`GET /healthz` 存活探针。\n\n`status` 表达**依赖可达性**而非进程存活，故 HTTP 恒 200（见 main.py 的 docstring）。\n字段与 `main.py` healthz() 的返回逐字一致，含 ISSUE #19 的丢行三元组。",
+        "properties": {
+          "db": {
+            "description": "up | down",
+            "title": "Db",
+            "type": "string"
+          },
+          "flushes": {
+            "title": "Flushes",
+            "type": "integer"
+          },
+          "mqtt_dropped": {
+            "title": "Mqtt Dropped",
+            "type": "integer"
+          },
+          "mqtt_received": {
+            "title": "Mqtt Received",
+            "type": "integer"
+          },
+          "queue_depth": {
+            "title": "Queue Depth",
+            "type": "integer"
+          },
+          "rejected": {
+            "title": "Rejected",
+            "type": "integer"
+          },
+          "retries": {
+            "title": "Retries",
+            "type": "integer"
+          },
+          "rows_skipped": {
+            "title": "Rows Skipped",
+            "type": "integer"
+          },
+          "rows_submitted": {
+            "title": "Rows Submitted",
+            "type": "integer"
+          },
+          "rows_written": {
+            "title": "Rows Written",
+            "type": "integer"
+          },
+          "status": {
+            "description": "ok（DB/Redis 可达）| degraded（进程活着但依赖不可达）",
+            "title": "Status",
+            "type": "string"
+          },
+          "written": {
+            "title": "Written",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "db",
+          "written",
+          "flushes",
+          "retries",
+          "rejected",
+          "queue_depth",
+          "mqtt_received",
+          "mqtt_dropped",
+          "rows_submitted",
+          "rows_written",
+          "rows_skipped"
+        ],
+        "title": "HealthResponse",
+        "type": "object"
+      },
+      "HistoryPointOut": {
+        "description": "`/history` 的单个时间桶（`main.py` history() 的 points[] 元素）。",
+        "properties": {
+          "battery_pct": {
+            "title": "Battery Pct",
+            "type": "number"
+          },
+          "joint_positions": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Joint Positions",
+            "type": "object"
+          },
+          "joint_temperatures": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Joint Temperatures",
+            "type": "object"
+          },
+          "joint_torques": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Joint Torques",
+            "type": "object"
+          },
+          "max_joint_temp": {
+            "title": "Max Joint Temp",
+            "type": "number"
+          },
+          "status_code": {
+            "title": "Status Code",
+            "type": "integer"
+          },
+          "time": {
+            "description": "ISO8601 时间桶起点",
+            "title": "Time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "time",
+          "status_code",
+          "battery_pct",
+          "max_joint_temp",
+          "joint_temperatures",
+          "joint_torques",
+          "joint_positions"
+        ],
+        "title": "HistoryPointOut",
+        "type": "object"
+      },
+      "RobotHistoryResponse": {
+        "description": "`GET /robots/{robot_id}/history`（spec/00 §5.3）。",
+        "properties": {
+          "points": {
+            "items": {
+              "$ref": "#/components/schemas/HistoryPointOut"
+            },
+            "title": "Points",
+            "type": "array"
+          },
+          "resolution": {
+            "title": "Resolution",
+            "type": "string"
+          },
+          "robot_id": {
+            "title": "Robot Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "robot_id",
+          "resolution",
+          "points"
+        ],
+        "title": "RobotHistoryResponse",
+        "type": "object"
+      },
+      "RobotListResponse": {
+        "description": "`GET /robots` —— 100 台最新状态（WS 之外的兜底/首屏）。",
+        "properties": {
+          "robots": {
+            "items": {
+              "$ref": "#/components/schemas/RobotTelemetryOut"
+            },
+            "title": "Robots",
+            "type": "array"
+          }
+        },
+        "required": [
+          "robots"
+        ],
+        "title": "RobotListResponse",
+        "type": "object"
+      },
+      "RobotTelemetryOut": {
+        "description": "单台机器人最新遥测（与 `state_cache._decode()` 的返回逐字段一致）。\n\n来源是 Redis Hash `robot:state:{robot_id}` 经 `_decode()` 还原类型后的 dict\n（`backend_ingestion/app/services/state_cache.py:76`）。\n注意 `joint_positions` 必须在这份契约里 —— 它正是 STATUS.md §六第 2 条\n那次事故（Drawer 第三条折线恒空）缺的字段。",
+        "properties": {
+          "battery_pct": {
+            "title": "Battery Pct",
+            "type": "number"
+          },
+          "error_code": {
+            "default": 0,
+            "title": "Error Code",
+            "type": "integer"
+          },
+          "joint_positions": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Joint Positions",
+            "type": "object"
+          },
+          "joint_temperatures": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Joint Temperatures",
+            "type": "object"
+          },
+          "joint_torques": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Joint Torques",
+            "type": "object"
+          },
+          "max_joint_temp": {
+            "title": "Max Joint Temp",
+            "type": "number"
+          },
+          "robot_id": {
+            "title": "Robot Id",
+            "type": "string"
+          },
+          "status_code": {
+            "description": "0 离线 / 1 正常 / 2 预警 / 3 故障",
+            "title": "Status Code",
+            "type": "integer"
+          },
+          "ts": {
+            "default": 0,
+            "title": "Ts",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "robot_id",
+          "status_code",
+          "battery_pct",
+          "max_joint_temp",
+          "joint_temperatures",
+          "joint_positions",
+          "joint_torques"
+        ],
+        "title": "RobotTelemetryOut",
+        "type": "object"
+      },
+      "UserCreate": {
+        "additionalProperties": false,
+        "description": "注册请求。\n\n**刻意不接受 `role` 字段**：允许请求体指定角色等于开了一个自助提权后门\n（`POST /auth/register {\"email\":…, \"role\":\"admin\"}`）。\n`extra=\"forbid\"` 让它显式报 422，而不是静默忽略。",
+        "properties": {
+          "email": {
+            "format": "email",
+            "title": "Email",
+            "type": "string"
+          },
+          "is_active": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": true,
+            "title": "Is Active"
+          },
+          "is_superuser": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": false,
+            "title": "Is Superuser"
+          },
+          "is_verified": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": false,
+            "title": "Is Verified"
+          },
+          "password": {
+            "title": "Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "password"
+        ],
+        "title": "UserCreate",
+        "type": "object"
+      },
+      "UserRead": {
+        "description": "当前用户信息。`role` 供前端做 UI 级权限裁剪（真正的判定在后端）。",
+        "properties": {
+          "email": {
+            "format": "email",
+            "title": "Email",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "is_active": {
+            "default": true,
+            "title": "Is Active",
+            "type": "boolean"
+          },
+          "is_superuser": {
+            "default": false,
+            "title": "Is Superuser",
+            "type": "boolean"
+          },
+          "is_verified": {
+            "default": false,
+            "title": "Is Verified",
+            "type": "boolean"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "role"
+        ],
+        "title": "UserRead",
+        "type": "object"
+      },
+      "UserUpdate": {
+        "additionalProperties": false,
+        "description": "更新请求。同样禁止改 `role`（提权只能由运维改库）。",
+        "properties": {
+          "email": {
+            "anyOf": [
+              {
+                "format": "email",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "is_active": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Active"
+          },
+          "is_superuser": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Superuser"
+          },
+          "is_verified": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Verified"
+          },
+          "password": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Password"
+          }
+        },
+        "title": "UserUpdate",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "OAuth2PasswordBearer": {
+        "flows": {
+          "password": {
+            "scopes": {},
+            "tokenUrl": "auth/jwt/login"
+          }
+        },
+        "type": "oauth2"
+      }
+    }
+  },
+  "info": {
+    "title": "RobotMonitor Ingestion",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/auth/jwt/login": {
+      "post": {
+        "operationId": "auth_jwt_login_auth_jwt_login_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_auth_jwt_login_auth_jwt_login_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiOTIyMWZmYzktNjQwZi00MzcyLTg2ZDMtY2U2NDJjYmE1NjAzIiwiYXVkIjoiZmFzdGFwaS11c2VyczphdXRoIiwiZXhwIjoxNTcxNTA0MTkzfQ.M10bjOe45I5Ncu_uXvOmVV8QxnL-nZfcH96U90JaocI",
+                  "token_type": "bearer"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/BearerResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "examples": {
+                  "LOGIN_BAD_CREDENTIALS": {
+                    "summary": "Bad credentials or the user is inactive.",
+                    "value": {
+                      "detail": "LOGIN_BAD_CREDENTIALS"
+                    }
+                  },
+                  "LOGIN_USER_NOT_VERIFIED": {
+                    "summary": "The user is not verified.",
+                    "value": {
+                      "detail": "LOGIN_USER_NOT_VERIFIED"
+                    }
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Auth:Jwt.Login",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/auth/jwt/logout": {
+      "post": {
+        "operationId": "auth_jwt_logout_auth_jwt_logout_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Missing token or inactive user."
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Auth:Jwt.Logout",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/auth/register": {
+      "post": {
+        "operationId": "register_register_auth_register_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "examples": {
+                  "REGISTER_INVALID_PASSWORD": {
+                    "summary": "Password validation failed.",
+                    "value": {
+                      "detail": {
+                        "code": "REGISTER_INVALID_PASSWORD",
+                        "reason": "Password should beat least 3 characters"
+                      }
+                    }
+                  },
+                  "REGISTER_USER_ALREADY_EXISTS": {
+                    "summary": "A user with this email already exists.",
+                    "value": {
+                      "detail": "REGISTER_USER_ALREADY_EXISTS"
+                    }
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Register:Register",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/healthz": {
+      "get": {
+        "description": "健康检查。\n\n`status` 反映**依赖可达性**，不只是「进程活着」：\n- `ok`       —— DB 与 Redis 都可达\n- `degraded` —— 进程活着但依赖不可达（此时写入会堆积到队列，需立刻告警）\n- 仍返回 HTTP 200：这是**存活探针**语义，改为 503 会让容器被重启掉，\n  而依赖恢复后本服务能自愈，重启反而丢在飞数据。依赖不健康由 `status` 字段表达。",
+        "operationId": "healthz_healthz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Healthz"
+      }
+    },
+    "/metrics": {
+      "get": {
+        "description": "Prometheus 抓取端点（`infra/observability/prometheus.yml` 的 `robot_backend` job）。\n\n与 `/healthz` 的区别是**模型**而不是内容：`/healthz` 回瞬时快照，\n抓取端拿到的永远是\"上一次写入那一刻\"的值；这里的 Counter 是单调累加的，\nPrometheus 才能算出 `rate()` / `increase()`，让 1000 msg/s 有历史曲线。\n\n函数名**不能叫 `metrics`** —— 那会遮蔽模块名 `app.metrics`（`from app import metrics`）。",
+        "operationId": "prometheus_metrics_metrics_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Prometheus Metrics"
+      }
+    },
+    "/robots": {
+      "get": {
+        "description": "100 台最新状态。只读端点：viewer 起可访问，返回体与加鉴权前逐字段一致。",
+        "operationId": "list_robots_robots_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RobotListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Robots"
+      }
+    },
+    "/robots/{robot_id}/history": {
+      "get": {
+        "description": "最近 N 分钟历史（供 Drawer 折线 + 关节热力图）。\n\n说明：spec/00 §4.3 的连续聚合 `robot_status_10s` **不含 JSONB 关节列**，\n而 Drawer 的热力图需要 joint_temperatures，故此处直接对原始表做 time_bucket，\n一次性取回标量 + 关节字典，避免二次查询。",
+        "operationId": "history_robots__robot_id__history_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "robot_id",
+            "required": true,
+            "schema": {
+              "title": "Robot Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "minutes",
+            "required": false,
+            "schema": {
+              "default": 5,
+              "title": "Minutes",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "resolution",
+            "required": false,
+            "schema": {
+              "default": "10s",
+              "title": "Resolution",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RobotHistoryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "History"
+      }
+    },
+    "/users/me": {
+      "get": {
+        "operationId": "users_current_user_users_me_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Missing token or inactive user."
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Users:Current User",
+        "tags": [
+          "users"
+        ]
+      },
+      "patch": {
+        "operationId": "users_patch_current_user_users_me_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "examples": {
+                  "UPDATE_USER_EMAIL_ALREADY_EXISTS": {
+                    "summary": "A user with this email already exists.",
+                    "value": {
+                      "detail": "UPDATE_USER_EMAIL_ALREADY_EXISTS"
+                    }
+                  },
+                  "UPDATE_USER_INVALID_PASSWORD": {
+                    "summary": "Password validation failed.",
+                    "value": {
+                      "detail": {
+                        "code": "UPDATE_USER_INVALID_PASSWORD",
+                        "reason": "Password should beat least 3 characters"
+                      }
+                    }
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "description": "Missing token or inactive user."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Users:Patch Current User",
+        "tags": [
+          "users"
+        ]
+      }
+    },
+    "/users/{id}": {
+      "delete": {
+        "operationId": "users_delete_user_users__id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Missing token or inactive user."
+          },
+          "403": {
+            "description": "Not a superuser."
+          },
+          "404": {
+            "description": "The user does not exist."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Users:Delete User",
+        "tags": [
+          "users"
+        ]
+      },
+      "get": {
+        "operationId": "users_user_users__id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Missing token or inactive user."
+          },
+          "403": {
+            "description": "Not a superuser."
+          },
+          "404": {
+            "description": "The user does not exist."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Users:User",
+        "tags": [
+          "users"
+        ]
+      },
+      "patch": {
+        "operationId": "users_patch_user_users__id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "examples": {
+                  "UPDATE_USER_EMAIL_ALREADY_EXISTS": {
+                    "summary": "A user with this email already exists.",
+                    "value": {
+                      "detail": "UPDATE_USER_EMAIL_ALREADY_EXISTS"
+                    }
+                  },
+                  "UPDATE_USER_INVALID_PASSWORD": {
+                    "summary": "Password validation failed.",
+                    "value": {
+                      "detail": {
+                        "code": "UPDATE_USER_INVALID_PASSWORD",
+                        "reason": "Password should beat least 3 characters"
+                      }
+                    }
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "description": "Missing token or inactive user."
+          },
+          "403": {
+            "description": "Not a superuser."
+          },
+          "404": {
+            "description": "The user does not exist."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Users:Patch User",
+        "tags": [
+          "users"
+        ]
+      }
+    }
+  }
+}

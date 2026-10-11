@@ -28,6 +28,28 @@ groups:
           summary: "1 分钟内丢弃 {{ $value }} 条 MQTT 消息"
           description: "payload 不符合 spec/01 telemetry schema，检查模拟器/固件版本。"
 
+      # WS 合成探针（缺口 G-3「看板假的绿」）：`up=1` 只证明 /metrics 抓得到，
+      # 不证明实时流还能用。探针从**客户端**真连一次 /ws/robots 并等首帧 snapshot，
+      # 失败=网关卡升级 / snapshot 抛异常 / 广播断了 —— 这些情况下连接数可能仍非 0。
+      - alert: WsStreamProbeFailing
+        expr: robot_backend_ws_probe_alive == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "WS 合成探针连续失败（客户端视角的实时流已断）"
+          description: "探针目标 backend:8000/ws/robots。看板可能仍显示绿色，但已收不到 snapshot/telemetry/alert。"
+
+      # 探针累计失败在增长（偶发抖动），与上一条的「持续为 0」互补。
+      - alert: WsStreamProbeFlapping
+        expr: increase(robot_backend_ws_probe_failures_total[5m]) > 2
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: "WS 合成探针 5 分钟内失败 {{ $value }} 次"
+          description: "实时流不稳定（网络抖动/后端过载），尚未到持续不可用，先于用户感知告警。"
+
       - alert: BackendDown
         expr: up{job="robot_backend"} == 0
         for: 15s
@@ -43,6 +65,23 @@ groups:
           severity: critical
         annotations:
           summary: "告警引擎 down（此时机器人告警全部停摆）"
+
+      # 告警的告警：判定出来了却没写进 robot_alert（G-4）。
+      # 为什么用 increase 而不是 > 0：Counter 单调，进程活着的整个生命周期
+      # `robot_alert_store_errors_total > 0` 一旦触发就永不复位，成了永远在响的
+      # 死警报；increase(...[5m]) 只看最近 5 分钟**又在失败**，故障恢复后自动静默。
+      # for: 0s —— 落库失败不是抖动，不需要"连续 N 秒"再确认。
+      - alert: AlertStoreFailing
+        expr: increase(robot_alert_store_errors_total[5m]) > 0
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "5 分钟内 {{ $value }} 条告警写库失败"
+          description: >-
+            robot_alert 落库异常（connection / permission / 磁盘）。
+            注意此时前端告警流可能照常滚动（PUBLISH 与 INSERT 解耦），
+            看板变绿不代表告警已被持久化 —— 以 DB 对账为准。
 
       - alert: TimescaleDown
         expr: up{job="postgres"} == 0

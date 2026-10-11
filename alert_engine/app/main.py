@@ -6,8 +6,11 @@
 2. **ticker 线**：每秒遍历 100 台机器人跑 offline 规则
    —— **不依赖 Redis Key 过期事件**（keyspace notification 默认关闭）。
 
-告警先经**抑制**（inhibition，见 spec 对照 Alertmanager `inhibit_rules`）、
-再由 deduplicator 去重过滤后，由 store 写入 robot_alert 并 PUBLISH robot:alerts。
+告警先经**三层过滤**，顺序固定为 **silence → inhibition → dedup**
+（理由见 `emit()` 的 docstring），再由 store 写入 robot_alert 并 PUBLISH robot:alerts。
+
+另有一条 **escalation 线**（订单 17 T2）：周期性扫描"severity=3 且超时未 ack"
+的告警，标记 escalated 并重发，对应 Alertmanager 的 `repeat_interval` 语义。
 """
 
 from __future__ import annotations
@@ -21,6 +24,8 @@ from collections import deque
 from app.config import settings
 from app.db import close_all, get_redis
 from app.deduplicator import should_emit
+from app.escalation import escalation_loop
+from app.silence import is_silenced
 from app.rules.battery import BatteryLowRule
 from app.rules.joint_stuck import JointStuckRule
 from app.rules.motor_temp import MotorTempRule
@@ -85,6 +90,34 @@ def is_inhibited(alert: Alert) -> bool:
 
 
 async def emit(alert: Alert) -> None:
+    """告警出口。三层过滤，**顺序不可调换**：silence → inhibition → dedup。
+
+    为什么必须是这个顺序（订单 17 T3 要求写清理由）：
+
+    1. **silence 最先**。静默是运维显式下达的"此刻不要打扰我"指令，
+       优先级高于一切自动判定。若放在 inhibition/dedup 之后，会带来两个后果：
+       - 被静默的告警仍会**写 dedup Key**，于是静默解除后的第一秒内，
+         本该报出的告警被"静默期内留下的去重窗口"二次压制 —— 静默产生了
+         它在语义上不该有的后效。
+       - 静默的意图是"不处理"，而 inhibition/dedup 都需要先读状态（Redis/内存），
+         多一次无谓的判定。
+    2. **inhibition 次之**。抑制是"根因已知，衍生告警无价值"（机器人离线时，
+       电量低/关节卡死不必报）。它必须在 dedup **之前**，否则衍生告警会先
+       占掉 dedup 窗口，等根因恢复后真实告警可能被去重挡掉 —— 订单 10 的
+       原设计即如此（`emit` 里 inhibition 在 `should_emit` 之前），本单保留。
+    3. **dedup 最后**。去重窗口是一次"计数副作用"（写 Redis Key），
+       只有确定这条告警真的要发出去，才配消耗窗口。前两层都不该浪费它。
+
+    换言之：silence 决定"要不要看"，inhibition 决定"这条有没有价值"，
+    dedup 决定"这条本窗口内发过没有"。由粗到细，每层只处理"上一层放行"的告警。
+    """
+    if await is_silenced(alert):
+        # 静默计数单独埋点：与抑制同理，`alerts_emitted` 的下降必须可归因
+        # —— 是静默挡掉的，还是抑制挡掉的，运维动作完全不同。
+        metrics.alerts_silenced.labels(rule_id=alert.rule_id).inc()
+        log.debug("alert silenced: %s %s (silence key active)", alert.robot_id,
+                  alert.rule_id)
+        return
     if is_inhibited(alert):
         # 抑制计数必须单独埋：否则 `alerts_emitted` 的**下降**无法归因 ——
         # 到底是机器人真的健康了，还是被抑制层挡掉了。二者运维含义完全不同。
@@ -167,7 +200,9 @@ async def ticker() -> None:
 
 async def amain() -> None:
     try:
-        await asyncio.gather(consume(), ticker())
+        # escalation_loop 与另两条驱动线并发：它不对应"输入流"，而是周期性
+        # 扫描"已发出、severity=3、超时仍未 ack"的告警，重发升级（订单 17 T2）。
+        await asyncio.gather(consume(), ticker(), escalation_loop())
     finally:
         for t in list(_tasks):
             t.cancel()

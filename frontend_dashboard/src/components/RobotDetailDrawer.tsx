@@ -4,7 +4,8 @@
 //   1) 实时增量：直接从 Zustand 的 robots Map 取（该机器人 10Hz 更新）
 //   2) 历史折线：GET {VITE_API_BASE}/robots/{id}/history?minutes=5&resolution=10s（spec/00 §5.3）
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 // 订单 09：走 echarts-for-react 的 core 入口 + 按需注册的 echarts 实例，
 // 取代默认入口（默认入口内部 require 整个 echarts 包，无法 tree-shake）。
 // 注册清单见 src/lib/echartsCore.ts（只含本 Drawer 用到的折线图相关模块）。
@@ -14,15 +15,18 @@ import JointHeatmap from './JointHeatmap';
 import { COLORS, FONT, STATUS_COLOR, STATUS_LABEL } from '../theme/tokens';
 import { useRobotStore } from '../store/robotStore';
 import { JOINT_NAMES } from '../types/robot';
-import type { HistoryPoint, RobotHistoryResponse } from '../types/robot';
-import { notifyUnauthorized } from '../auth/api';
-import { authHeaders } from '../auth/session';
+import type { HistoryPoint } from '../types/robot';
+import {
+  HISTORY_MINUTES,
+  HISTORY_RESOLUTION,
+  fetchRobotHistory,
+  robotHistoryKey,
+} from '../api/robotHistory';
 
-/** REST 基址：Vite 只暴露 VITE_ 前缀（orders/05 禁止项） */
-export const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
+// 订单 26：Drawer 不再自持 REST 基址，统一从 auth/api 取（同时 re-export 兼容既有引用点）。
+import { API_BASE } from '../auth/api';
 
-const HISTORY_MINUTES = 5;
-const HISTORY_RESOLUTION = '10s';
+export { API_BASE };
 
 interface ChartSeries {
   name: string;
@@ -40,53 +44,30 @@ export default function RobotDetailDrawer() {
   const selectRobot = useRobotStore((s) => s.selectRobot);
 
   const [selectedJoint, setSelectedJoint] = useState<string>(JOINT_NAMES[0]);
-  const [history, setHistory] = useState<HistoryPoint[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   // 每次打开 Drawer 重置选中关节，避免残留上一台机器人的选择
   useEffect(() => {
-    if (selectedRobotId) {
-      setSelectedJoint(JOINT_NAMES[0]);
-      setHistory([]);
-      setError(null);
-    }
+    if (selectedRobotId) setSelectedJoint(JOINT_NAMES[0]);
   }, [selectedRobotId]);
 
-  // 拉取最近 5 分钟历史（10s 分辨率）
-  const abortRef = useRef<AbortController | null>(null);
-  useEffect(() => {
-    if (!selectedRobotId) return;
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
+  // 订单 26（I-20）：历史查询交给 react-query 管缓存与重试。
+  //   - 同机器人重复打开：staleTime 内直接命中缓存，不打后端；
+  //   - 失败自动重试（4xx 除外，见 lib/queryClient.ts）；
+  //   - 切换机器人 / 关闭 Drawer 时 react-query 自动取消在途请求（signal 透传给 fetch）。
+  const historyQuery = useQuery({
+    queryKey: robotHistoryKey(selectedRobotId ?? ''),
+    queryFn: ({ signal }) => fetchRobotHistory(selectedRobotId as string, signal),
+    enabled: selectedRobotId !== null,
+  });
 
-    const url = `${API_BASE}/robots/${encodeURIComponent(selectedRobotId)}/history?minutes=${HISTORY_MINUTES}&resolution=${HISTORY_RESOLUTION}`;
-    setLoading(true);
-    setError(null);
-
-    // 订单 15：这是全仓唯一的 REST 调用点，改漏就是全漏 ——
-    // 必须带 Authorization: Bearer <token>（禁止用 query 传 token，会进访问日志）。
-    fetch(url, { signal: controller.signal, headers: authHeaders() })
-      .then((res) => {
-        if (res.status === 401) {
-          // token 过期/被吊销：走全局出口清 token 回登录页，
-          // 而不是把"HTTP 401"当一次普通加载失败显示在 Drawer 里。
-          notifyUnauthorized();
-          throw new Error('登录已过期，请重新登录');
-        }
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json() as Promise<RobotHistoryResponse>;
-      })
-      .then((payload) => setHistory(Array.isArray(payload.points) ? payload.points : []))
-      .catch((err: unknown) => {
-        if (err instanceof DOMException && err.name === 'AbortError') return;
-        setError(err instanceof Error ? err.message : 'history 请求失败');
-      })
-      .finally(() => setLoading(false));
-
-    return () => controller.abort();
-  }, [selectedRobotId]);
+  const history: HistoryPoint[] = historyQuery.data ?? [];
+  // enabled=false（未选中机器人）时 isPending 恒为 true 但并未发请求，故用 fetchStatus 区分。
+  const loading = historyQuery.isPending && historyQuery.fetchStatus !== 'idle';
+  const error = historyQuery.isError
+    ? historyQuery.error instanceof Error
+      ? historyQuery.error.message
+      : 'history 请求失败'
+    : null;
 
   const robot = selectedRobotId ? robots.get(selectedRobotId) : undefined;
 

@@ -54,6 +54,19 @@ class Settings(BaseSettings):
     ws_host: str = "0.0.0.0"
     ws_port: int = 8000
 
+    # ---- WS 合成探针（缺口 G-3「看板假的绿」）----
+    # 探针是**旁观者**：关掉它、或它跑挂，都不影响遥测写入与 WS 广播。
+    # 默认开启，因为「没有它就没有客户端视角」；企业内网只需 loopback，无外网依赖。
+    ws_probe_enabled: bool = True
+    # 探针间隔。下限 30s 被 `ws_probe.py:MIN_INTERVAL_S` 钳住 ——
+    # 这里配更小也不会更快（探针自己也是 WS 客户端，会与 1000 msg/s 抢 loopback）。
+    ws_probe_interval_s: float = 60.0
+    # 探针目标路径。写成配置是为了将来出现「多路 WS」时不必改代码。
+    ws_probe_path: str = "/ws/robots"
+    # 启动宽限：uvicorn 的 lifespan startup 里就会把探针任务创建出来，
+    # 此时端口尚未 accept，立刻探必然失败。给一个窗口避免开局一次假失败。
+    ws_probe_startup_grace_s: float = 5.0
+
     # ---- 认证 / RBAC（订单 15）----
     # JWT 签名密钥。**必须**由 .env 注入，不设默认值 —— 有空默认值等于库里带着
     # 一个人人可签的密钥，任何拿到源码的人都能伪造 admin token（AGENTS.md §5）。
@@ -62,6 +75,13 @@ class Settings(BaseSettings):
     # token 有效期：8 小时 = 一个班次。大屏是 7×24 公共终端，
     # 过期后由前端 401 拦截清 token 回登录页，由当班人重新登录。
     jwt_lifetime_seconds: int = 8 * 3600
+
+    # ---- OpenTelemetry（订单 16 T3）----
+    # 留空 = **关闭**（默认）。工厂内网常无 OTLP collector，为空即 no-op，
+    # 绝不因未配置而启动失败（见 app/telemetry_tracing.py 的分层降级）。
+    # 填 `http://collector:4318` 即启用，本模块会补全 /v1/traces 路径。
+    otel_exporter_otlp_endpoint: str = ""
+    otel_service_name: str = "robot_backend"
 
     # ---- Redis 频道（spec/00 §5.2/§5.4）----
     chan_stream_all: str = "robot:stream:all"

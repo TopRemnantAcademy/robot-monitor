@@ -322,7 +322,7 @@ HEAD 变为 `c8f8248`）。切回后 `docs/reconnection.md` 与
 |---|---|---|---|---|
 | N21 | 保留/压缩/连续聚合（每天 ~130 GB 定时炸弹） | `timescale/timescaledb` | 64 MB | `add_retention_policy` / `add_compression_policy` 主体 |
 | N22 | 高级时序函数（gapfill 等，看板可用） | `timescale/timescaledb-toolkit` | 3.9 MB | 扩展 SQL 函数 |
-| N23 | PG 备份 | `pgbackrest/pgbackrest` | 22 MB | 官方 |
+| N23 | PG 备份 | `pgbackrest/pgbackrest`（**源码仓，非镜像仓**） | 22 MB | 官方源码。⚠️ 2026-10-11 实测 `pgbackrest/pgbackrest` **无 Docker 镜像**（Docker Hub 返回 object not found）；灾备镜像须自建于 PGDG 包，见 `infra/ops/pgbackrest/Dockerfile` 与 `docs/DR-RUNBOOK.md §1` |
 | N24 | WAL 归档备份（云对象存储） | `wal-g/wal-g` | 35 MB | 官方 |
 
 ### 6.3 替代评估（**「即使完全替换也要找到更完美的」**）

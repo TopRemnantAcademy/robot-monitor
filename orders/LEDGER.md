@@ -81,3 +81,44 @@
 3. **订单 23（#44 / cnb-ml1）** 仍 pending 且无明确分支，需跟进（k6 mqtt_pub.js + mock_fleet）。
 4. **订单 16（#55）/ 18（#40）** 构建 pending，等产出分支。
 5. STATUS.md 的 e2e 30k（#60 已覆盖）、第三方 D-xxx 缺陷属另一清单，未随本批派工。
+
+## 八、集成合并结果（integrate/round1，2026-10-11 落地）
+
+> 策略：无 PR（NPC 只推分支未开 PR）→ 建本地 `integrate/round1`（从 main@1f6fc9f）逐分支 `git merge --no-ff`，每分支 `git diff --stat main...<branch>` 核验范围后合并；冲突按「并存/union」原则手工解决。最后回归 + 合入 main + Bearer 推送 cnb。
+
+### 8.1 已合并分支（全部经三点 diff 核验范围）
+
+| 批次 | 分支 | 合并提交 | 冲突解决要点 |
+|------|------|---------|------------|
+| 第一轮 | feat/order-20-passlib-pkgresources | 09f69f1 | 无（仅 requirements.txt） |
+| 第一轮 | feat/order-21-tsdb-tune-env | e95403c | 无 |
+| 第一轮 | auto/observability-exporters-471a（订单22） | 802d41c | 无 |
+| 第一轮 | feat/order-25-dr | dceb7ed | 无 |
+| 第一轮 | cb/order16-observability-t1b-t2-t3-t4 | b9243d8 | .env.example（TimescaleDB 段 ∪ OTel 段） |
+| 第一轮 | auto/alert-closure-2e09（订单17） | 0e6a4a9 | main.py import（metrics,telemetry_tracing ∪ alerts_router） |
+| 第一轮 | auto/contract-as-code-18（订单18） | 280329b | main.py import（logging_json ∪ schemas.api） |
+| 第一轮 | feat/ws-synthetic-probe-58（#58） | ad7eb1d | main.py lifespan（telemetry ∪ probe_task）、README、verify_wiring.sh（并存） |
+| 第一轮 | feat/issue-59-alert-store-metrics（#59） | — | robot-alerts.yml / verify_wiring.sh（ort 自动并存） |
+| 第一轮 | feat/order-24-test-framework（订单24） | b456cff | package.json（contract 脚本 ∪ test 脚本）、devDeps（openapi-typescript ∪ msw）；package-lock.json 用 `npm install --package-lock-only` 重新生成 |
+| 第一轮 | auto/order26-frontend-resilience（订单26） | 4e47904 | package-lock.json 重新生成；App.tsx / ErrorFallback 自动合并 |
+| 第一轮 | auto/e2e-30k-harness-7687（#60） | — | .cnb.yml / STATUS.md（ort 自动并存） |
+| 第一轮 | auto/cnb-github-sync-34b2（#64） | 5dfe971 | .cnb.yml：`main:` 块合并，push 下列表含 test（订单24）∪ sync-to-github（#64） |
+| 第一轮 | feat/order62-echarts-gauge-bar（#62） | — | 无（echartsCore.ts + README） |
+| 第一轮 | codebuddy/order23-k6-load（订单23） | — | 无（tests/load/ 全新 + .gitignore） |
+
+（#59/#60/#62/#23 合并提交哈希随 `--no-ff` 一并进入 integrate/round1，上表仅列显式验证过的提交。）
+
+### 8.2 回归结果
+
+- **前端**：`tsc --noEmit` ✅ 0 错误；`vite build` ✅（954 modules，dist 750KB / gzip 250KB）。
+- **后端**：`python -m py_compile` ✅ 全部 backend_ingestion/alert_engine `.py` 语法通过；`main.py` 合并引入的符号（`telemetry_tracing.*` / `logging_json.configure_json_logging` / `alerts.router` / `schemas.api.*` / `ws_probe.run`）逐项确认在各自模块有定义；`batch_writer`/`mqtt_subscriber` 的指标调用与 `metrics.py` 导出对齐。
+- **后端 `import app.main` 实测 ⚠️ 环境阻断**：本机 Win-ARM64 + Python 3.13 无 `pydantic-core` 轮子且需 Rust 编译，venv 安装失败。**此步骤留待 CNB CI（python:3.11 镜像有现成轮子）或兼容主机复跑**，不视为代码缺陷。
+
+### 8.3 待决 / 风险（需用户拍板或跟进）
+
+1. **🔴 订单 16 命名偏差（robot_monitor_* 并存）**：派工 doc（orders/16-dispatch.md）写明「原稿 robot_monitor_* 命名已作废」，但 @codebuddy 的分支在 `metrics.py` 新增 6 个 `robot_monitor_*` 指标（batch_queue_size / batch_flush_total / batch_rows_total / mqtt_messages_total / ws_connections / history_latency_seconds），与订单 19 已落地的 5 个 `robot_backend_*` **并存**。其中 batch_queue_size / batch_rows_total / mqtt_messages_total 与既有 robot_backend_* **语义重复**（同一计数源）；仅 ws_connections / history_latency_seconds 是 T1b 真正新增。分支内注释主张「两套语义不同、并存不替换」。→ 待用户决定：接受并存，或合并为 robot_backend_* 单一命名（推荐后者以消重）。
+2. **🟡 #61（G-6 last_seen/is_online）分支缺失**：`ls-remote` 中无对应分支，构建 #61（cnb-hn1）状态 pending → 需回查 build 日志或重新派发。
+3. **🟡 #63（G-7 任务级多机器人协同仿真）分支缺失**：同上，分支未入远端的 `simulator/task_sim.py` 形态，构建 #63（cnb-d5s）pending → 需跟进。
+4. **🟢 #60 e2e 30k / #64 GitHub 同步**：已合并，但二者构建在派发时标记 pending；落地后建议各跑一次 CNB CI 确认门禁绿。
+5. **🟢 .cnb.yml `main:` 分支作用域**：订单 24 的测试门禁与 #64 同步均挂在根级 `main:` 键下（理解为「main 分支作用域」）。若 CNB grammar 不认 `main:` 作分支作用域，则测试门禁/sync 可能不触发；建议首次推送后查一次 CNB 构建日志确认。
+

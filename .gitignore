@@ -30,6 +30,14 @@ external/*
 !external/fetch-sources.sh
 !external/ORDER12-VERIFICATION.md
 
+# k6 / 压测（订单 23）：二进制与本地运行产物不入库 —— 47 MB 的 k6 扩展二进制
+# 属「工具」而非「源码」，tarball 不入 git；运行摘要由脚本产出，属本地证据。
+# 获取方式见 tests/load/README.md §3。
+k6-mqtt
+k6
+tests/load/last-run.json
+tests/load/last-ws-run.json
+
 # OS
 .DS_Store
 

@@ -13,7 +13,10 @@ import { useEffect, useRef } from 'react';
 import { useRobotStore } from '../store/robotStore';
 import { getToken } from '../auth/session';
 import { useAuthStore } from '../auth/authStore';
+import { countStoreCommit, countWsMessage } from '../lib/observability';
 import type { RobotAlert, RobotTelemetry, WsEnvelope } from '../types/robot';
+// 订单 18 T4：WS 信封的开发模式校验（生产不校验，见 wsEnvelope.ts 的性能说明）
+import { checkEnvelope, initWsValidator } from '../lib/wsEnvelope';
 
 /** 节流刷库间隔：100ms = 10Hz（spec/03 §6） */
 export const FLUSH_INTERVAL_MS = 100;
@@ -76,6 +79,10 @@ export function useRobotWebSocket(): void {
       // telemetry / snapshot 用同一入口批量合并
       if (latestDataRef.current.size > 0) {
         store.applyTelemetryBatch(Array.from(latestDataRef.current.values()));
+        // 订单 16 T2：只有在**真的提交了非空批次**时才计一次 storeCommit。
+        // 若把计数放在 if 外面，空帧也计入 → 分母虚高 → ratio 被低估，
+        // "节流生效"的证据反而变弱。计数语义必须与"这次提交是否发生"严格对齐。
+        countStoreCommit();
         latestDataRef.current.clear();
       }
 
@@ -100,14 +107,26 @@ export function useRobotWebSocket(): void {
       }
     };
 
+    // 开发模式：先把 ajv 校验器预热好（动态 import，生产分支不会执行）。
+    void initWsValidator();
+
     const handleEnvelope = (raw: string) => {
       let envelope: WsEnvelope;
+      let parsed: unknown;
       try {
-        envelope = JSON.parse(raw) as WsEnvelope;
+        parsed = JSON.parse(raw);
       } catch {
         // 非法 JSON 直接丢弃，不污染状态树
         return;
       }
+      // 开发模式契约校验：**只警告不丢弃** —— 丢弃会让开发期页面白屏，
+      // 而"契约漂移"这件事应该是看得见的告警，不该伪装成"没收到数据"。
+      // checkEnvelope 在生产模式恒返回 {ok:true} 且零开销（见 wsEnvelope.ts）。
+      const check = checkEnvelope(parsed);
+      if (!check.ok) {
+        console.error('[ws-contract] 信封不符合 docs/contracts/ws-envelope.schema.json:', check.errors);
+      }
+      envelope = parsed as WsEnvelope;
       if (!envelope || typeof envelope !== 'object' || !('type' in envelope)) return;
 
       switch (envelope.type) {
@@ -121,6 +140,9 @@ export function useRobotWebSocket(): void {
         case 'telemetry': {
           const item = envelope.data;
           if (item && typeof item.robot_id === 'string') {
+            // 订单 16 T2：计"WS 收到多少条 telemetry"。这是 ratio 的分子 ——
+            // 它统计的是**入站消息**，与"React 被通知几次"（storeCommits）解耦。
+            countWsMessage();
             latestDataRef.current.set(item.robot_id, item);
           }
           break;

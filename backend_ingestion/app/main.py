@@ -5,6 +5,8 @@
                         且必须订阅 Redis `robot:alerts` 转发告警（否则前端告警流永远空白）
 - REST `GET /robots`                     —— 100 台最新状态（WS 之外兜底）
 - REST `GET /robots/{id}/history`        —— Drawer 的 ECharts 折线与关节热力图数据源
+- REST `GET /alerts`                     —— 告警分页（订单 17，viewer 起可读）
+- REST `POST /alerts/{id}/ack|unack`     —— 告警确认/撤回（订单 17，需 admin）
 - REST `GET /healthz`                    —— 健康检查
 - REST `GET /metrics`                    —— Prometheus 抓取（**必须免鉴权**）
 
@@ -21,25 +23,34 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse
 
-from app import metrics
+from app import metrics, telemetry_tracing
+from app.alerts.router import router as alerts_router
 from app.auth.deps import authenticate_ws_token, current_active_user
 from app.auth.router import router as auth_router
 from app.auth.users import RobotUser, close_engine
 from app.config import settings
 from app.db.redis import close_redis, get_redis
 from app.db.session import close_pool, ping
+from app.logging_json import configure_json_logging
+from app.schemas.api import (
+    HealthResponse,
+    RobotHistoryResponse,
+    RobotListResponse,
+)
 from app.services import mqtt_subscriber, state_cache
 from app.services.batch_writer import BatchWriter
+from app import ws_probe
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
+# 订单 16 T4：单行 JSON 日志，供订单 07 的 openobserve/loki 直接采集。
+# 必须在**其它 logger 首次输出之前**配置 —— uvicorn 的启动日志会经由根 logger，
+# 晚配的话前几行仍是文本，采集侧就会看到混合格式。
+configure_json_logging(logging.INFO)
 log = logging.getLogger("main")
 
 writer = BatchWriter()
@@ -50,9 +61,25 @@ async def lifespan(app: FastAPI):
     # startup
     writer_task = asyncio.create_task(writer.run())
     mqtt_task = asyncio.create_task(mqtt_subscriber.run(writer))
+    # WS 合成探针：客户端视角验活（缺口 G-3）。它只读指标，不碰数据流；
+    # 关闭时 `run()` 立刻 return，任务自灭，无需在 shutdown 里特判。
+    probe_task = asyncio.create_task(ws_probe.run())
     app.state.writer_task = writer_task
     app.state.mqtt_task = mqtt_task
-    log.info("backend started: mqtt=%s:%d", settings.mqtt_broker, settings.mqtt_port)
+    app.state.probe_task = probe_task
+    # 订单 16 T3：endpoint 为空则 no-op，返回 False 也不影响启动（可降级）。
+    # 放在 yield 之前：instrument 必须早于第一个请求到达。
+    tracing_on = telemetry_tracing.configure_tracing(
+        settings.otel_exporter_otlp_endpoint, settings.otel_service_name
+    )
+    if tracing_on:
+        telemetry_tracing.instrument_fastapi(app)
+    log.info(
+        "backend started: mqtt=%s:%d tracing=%s",
+        settings.mqtt_broker,
+        settings.mqtt_port,
+        "on" if tracing_on else "off",
+    )
     yield
     # shutdown —— 顺序不可调换，官方模式见
     # external/aiomqtt/docs/alongside-fastapi-and-co.md @ v2.5.1
@@ -65,11 +92,16 @@ async def lifespan(app: FastAPI):
     #      最后一批遥测（订单 06 验收关注的 30000 行附近）会丢。
     await writer.graceful_shutdown()
     await asyncio.gather(writer_task, return_exceptions=True)
+    #   ③ 探针只是旁观者，没有存量要冲刷，直接取消（它 slept 在 interval 上）。
+    probe_task.cancel()
+    await asyncio.gather(probe_task, return_exceptions=True)
     await close_pool()
     await close_redis()
     # auth 的 ORM engine 是独立于 asyncpg 业务池的（fastapi-users 要 SQLAlchemy 会话），
     # 同样要在收尾时释放，否则容器退出时连接会挂到服务端超时为止。
     await close_engine()
+    # 最后再收尾 trace：BatchSpanProcessor 队列里可能还压着关闭阶段的 span。
+    telemetry_tracing.shutdown_tracing()
     log.info("backend stopped")
 
 
@@ -79,11 +111,15 @@ app = FastAPI(title="RobotMonitor Ingestion", lifespan=lifespan)
 # 它们**不加**任何鉴权依赖 —— 登录端点自己再要求 token 就成了死循环。
 app.include_router(auth_router)
 
+# 告警闭环（订单 17）—— GET /alerts 分页 + POST /alerts/{id}/ack|unack。
+# 挂在同一 app 下，路径为绝对路径（/alerts…），不带前缀。
+app.include_router(alerts_router)
+
 
 # ------------------------------------------------------------------ REST
 
-@app.get("/healthz")
-async def healthz():
+@app.get("/healthz", response_model=HealthResponse)
+async def healthz() -> HealthResponse:
     """健康检查。
 
     `status` 反映**依赖可达性**，不只是「进程活着」：
@@ -112,6 +148,13 @@ async def healthz():
     }
 
 
+# 当前活跃 WS 连接数（订单 16 T1b 的 `robot_monitor_ws_connections`）。
+# 进程内整数而非 Gauge 直写：Gauge.set 在 /metrics 里统一刷新（拉模型），
+# 这里维护的"事实"必须在**连接真正建立/回收**时更新，两个时点不能混。
+# 用 try/finally 保证异常路径也会回收，否则连接数只增不减（假告警）。
+_ws_active = 0
+
+
 _db_probe: tuple[float, bool] | None = None
 
 
@@ -130,7 +173,16 @@ async def _db_healthy() -> bool:
     return ok
 
 
-@app.get("/metrics")
+@app.get(
+    "/metrics",
+    # 显式声明 text/plain：Prometheus exposition format 不是 JSON。
+    # 不声明时 FastAPI 会默认插入 `application/json` + 空 schema，
+    # 快照里的契约就写成 JSON —— 与真实响应体不符，
+    # 正是本订单要消灭的"文档与契约漂移"。
+    # 用 response_class=PlainTextResponse 才能**替换掉**那个默认 content-type
+    # （只写 responses={...} 只会追加一条，JSON 那条仍在）。
+    response_class=PlainTextResponse,
+)
 async def prometheus_metrics():
     """Prometheus 抓取端点（`infra/observability/prometheus.yml` 的 `robot_backend` job）。
 
@@ -142,18 +194,23 @@ async def prometheus_metrics():
     """
     # 瞬时量（Gauge）必须在暴露前刷新：拉模型下没人替我们定期 set，
     # 不刷新的话 queue_depth 会停在最后一次写入的时刻，抓到的永远是过期值。
+    # 订单 16 验收要求 `robot_monitor_batch_queue_size` 压测时有真实波动（非常量 0），
+    # 正是靠这一次 set —— 少了它，Gauge 初值是 0 且永不变。
     metrics.queue_depth.set(writer.queue.qsize())
+    metrics.refresh_gauges(writer.queue.qsize(), _ws_active)
     body, ctype = metrics.render()
-    return Response(content=body, media_type=ctype)
+    # ctype 由 prometheus_client 给出（`text/plain; version=0.0.4; charset=utf-8`），
+    # 必须原样透传 —— 版本号是 Prometheus 解析器协商格式的依据，不能丢。
+    return PlainTextResponse(content=body, media_type=ctype)
 
 
-@app.get("/robots")
+@app.get("/robots", response_model=RobotListResponse)
 async def list_robots(_user: RobotUser = Depends(current_active_user)):
     """100 台最新状态。只读端点：viewer 起可访问，返回体与加鉴权前逐字段一致。"""
     return {"robots": await state_cache.snapshot(settings.robot_ids)}
 
 
-@app.get("/robots/{robot_id}/history")
+@app.get("/robots/{robot_id}/history", response_model=RobotHistoryResponse)
 async def history(
     robot_id: str,
     minutes: int = 5,
@@ -193,12 +250,21 @@ async def history(
     from app.db.session import get_pool
 
     pool = await get_pool()
+    # 订单 16 T1b：/history 耗时直方图。
+    # 计时**只覆盖 DB 查询**（含 acquire），不含参数校验与结果序列化 ——
+    # 前者是数据库问题、后者是 CPU 问题，混在一个桶里会让"该不该建连续聚合表"
+    # 这个决策失去依据（序列化耗时不随数据量线性增长，查询耗时才会）。
+    # try/finally 而非只在成功时 observe：**查询失败的那一刻往往正是最慢的一次**
+    # （超时/锁等待），漏掉它会让 p99 被系统性低估。
+    _t0 = time.perf_counter()
     try:
         async with pool.acquire() as conn:
             rows = await conn.fetch(sql, str(res_s), robot_id, str(span_s))
     except Exception as exc:
         log.exception("history query failed")
         return JSONResponse(status_code=503, content={"detail": f"query failed: {exc}"})
+    finally:
+        metrics.history_latency_seconds.observe(time.perf_counter() - _t0)
 
     # 注意：这里**刻意不校验 robot_metadata**。init.sql 预置了 100 台机器人，
     # 但「从未上报过数据的机器人」查历史必然是空数组——这是正常语义而非错误。
@@ -275,6 +341,14 @@ async def ws_robots(ws: WebSocket, token: str | None = Query(default=None)):
         log.warning("ws rejected: missing or invalid token")
         return
 
+    # 订单 16 T1b：连接计数在**鉴权通过之后**才 +1。
+    # 若放在 accept 之后、鉴权之前，被 1008 拒掉的握手也会计入，
+    # 于是"1008 风暴"（前端带着过期 token 反复重连）会表现为连接数虚高，
+    # 掩盖真正的"大屏到底开着几台"这个信号。
+    global _ws_active
+    _ws_active += 1
+    log.info("ws connected", extra={"ws_active": _ws_active})
+
     r = await get_redis()
 
     # ① 首帧：100 台全量快照
@@ -310,3 +384,8 @@ async def ws_robots(ws: WebSocket, token: str | None = Query(default=None)):
             await pubsub.aclose()
         except Exception:
             pass
+        # 配平上面的 +1。必须与计数点成对出现在 finally 里：
+        # 漏掉它的话，客户端异常断开（浏览器崩溃/网络切换）会让计数只增不减，
+        # 面板上"连接数 47"而实际只有 3 台大屏 —— 假数据比没数据更糟。
+        _ws_active -= 1
+        log.info("ws disconnected", extra={"ws_active": _ws_active})

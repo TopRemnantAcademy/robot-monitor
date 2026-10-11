@@ -19,7 +19,121 @@ $:
         max_turns: 200
         workspace_preflight: on
 
+    # -----------------------------------------------------------------------
+    # 订单 18 T2 —— 契约门禁（契约即代码）
+    #
+    # **刻意不做 `|| true` / `continue-on-error` 兜底**：门禁能被吞掉就等于不存在。
+    # 两步判定都必须让构建变红：
+    #   ① generated-types-must-be-committed —— api.gen.ts 与 openapi.snapshot.json 不同步
+    #   ② contract-snapshot-check           —— 后端删字段/改类型但没同步快照（breaking）
+    # 依据：本仓已真实翻车过一次（STATUS.md §六第 2 条 —— `/history` 漏 `joint_positions`
+    # 导致 Drawer 第三条折线恒空）。那次是"人眼比对通过"的，机器一跑就现形。
+    #
+    # 用对象形式声明（`contract-gate:` 是流水线标识），与 NPC 的 `comment@npc:` 平级；
+    # 依据：语法手册「也支持通过对象的形式声明多个流水线」。
+    #
+    # 镜像用 `ci/contract-gate.Dockerfile` 而非裸 node:20 —— 实测 node:20 的 python3
+    # **没有 pip 也没有 ensurepip**（见该 Dockerfile 顶部记录），依赖必须在镜像构建期装好。
+    # 全部逻辑收进 `ci/contract-gate.sh`（POSIX sh），避免几十行内联脚本难维护。
+    # -----------------------------------------------------------------------
+    contract-gate:
+      docker:
+        build:
+          dockerfile: ci/contract-gate.Dockerfile
+          by:
+            - ci/contract-gate.Dockerfile
+            - backend_ingestion/requirements.txt
+            # `by` 是 Dockerfile 可 COPY 文件的**白名单**，未列出的文件不进构建上下文
+            # （官方 grammar.md 明确警告）。这 3 个文件必须与 ci/contract-gate.Dockerfile
+            # 里的 COPY 严格对应，少列一个 → 构建直接
+            # `failed to calculate checksum ... not found`
+            # （实测：缺 package.json 时构建 cnb-jgf-1k4k4c9db 死在这一步）。
+            - frontend_dashboard/package.json
+            - frontend_dashboard/package-lock.json
+      env:
+        # 只为让 `Settings()` 在 import 期实例化成功（jwt_secret 无默认值）。
+        # 是占位串，不参与任何签名；真实密钥绝不入仓（AGENTS.md §5）。
+        JWT_SECRET: ci-openapi-export-placeholder
+      stages:
+        - name: contract-gate
+          script: sh ci/contract-gate.sh
+
 main:
+main:
+  # ── 订单 24 T3：测试门禁 ─────────────────────────────────────────────
+  # 目的：把 STATUS.md 里手写的「11/11」「20/20」「25 passed」变成 CI 可复现数字。
+  # 失败即红：任何一步非 0 退出都会中断 stages 并置流水线为 error ——
+  # 全程**禁止** `|| true` / `continue-on-error`（订单 24 §4.2）。
+  #
+  # ⚠️ 关于 stage 的 shell（本文件曾因此 CI 红）：CNB 用 `sh`（dash）执行 script，
+  #   dash **不支持** `set -o pipefail`；用 `set -eu` 即可。
+  # ⚠️ 关于 `pytest` 的 testpaths（pytest.ini，订单 24 §4.1 禁止修改）：
+  #   `pytest`（裸跑）走 testpaths = tests + alert_engine/tests；
+  #   `backend_ingestion/tests` 刻意**不在**其内，故单独一条命令跑。
+  push:
+    - name: test
+      docker:
+        image: python:3.11
+      stages:
+        - name: pytest
+          script: |
+            set -eu
+            python -m pip install --no-cache-dir -r alert_engine/requirements.txt
+            python -m pip install --no-cache-dir -r backend_ingestion/requirements.txt
+            python -m pip install --no-cache-dir pytest 'httpx<0.28'
+            echo "── pytest（仓库根，testpaths = tests + alert_engine/tests）──"
+            python -m pytest -q
+            echo "── pytest backend_ingestion/tests（顶层 app 包冲突，单独跑）──"
+            python -m pytest backend_ingestion/tests/ -q
+        - name: npm-test
+          image: node:20
+          script: |
+            set -eu
+            cd frontend_dashboard
+            npm ci
+            npm test
+    - name: sync-to-github
+      # 单向同步 CNB main -> github.com/TopRemnantAcademy/robot-monitor（Issue #64 / C4）
+      # 凭据只从密钥仓库 imports 注入（GIT_USERNAME / GIT_ACCESS_TOKEN），禁止明文写入本文件。
+      imports:
+        - https://cnb.cool/flow.237/RobotMonitor-secrets/-/blob/main/github-sync.yml
+      stages:
+        - name: push main to github origin
+          if: '[ "$CNB_PIPELINE_KEY" != "pipeline-0" ]'
+          image: tencentcom/git-sync
+          settings:
+            target_url: https://github.com/TopRemnantAcademy/robot-monitor.git
+            auth_type: https
+            username: ${GIT_USERNAME}
+            password: ${GIT_ACCESS_TOKEN}
+            branch: main
+            force: false
+            push_tags: false
+            git_user: RobotMonitor Sync
+            git_email: robot-monitor@users.noreply.github.com
+  pull_request:
+    - name: test
+      docker:
+        image: python:3.11
+      stages:
+        - name: pytest
+          script: |
+            set -eu
+            python -m pip install --no-cache-dir -r alert_engine/requirements.txt
+            python -m pip install --no-cache-dir -r backend_ingestion/requirements.txt
+            python -m pip install --no-cache-dir pytest 'httpx<0.28'
+            echo "── pytest（仓库根）──"
+            python -m pytest -q
+            echo "── pytest backend_ingestion/tests ──"
+            python -m pytest backend_ingestion/tests/ -q
+        - name: npm-test
+          image: node:20
+          script: |
+            set -eu
+            cd frontend_dashboard
+            npm ci
+            npm test
+
   "crontab: 0 0,6,12,18 * * *":
     - stages:
         - name: pm-call
@@ -98,3 +212,97 @@ main:
               负责端到端联调：docker-compose 起栈 + 后端 + 告警引擎 + 模拟器压测 30s + 校验写入与告警。
             user_prompt: |
               定时巡检。先用 bash 读取 ./spec/ci/integration-call.md，严格按其程序执行，不要自创流程。
+
+  # ============================================================
+  # e2e：端到端 30,000 行落库验证（ISSUE #60）
+  #
+  # 为什么单独一条 pipeline：它需要 **Docker-in-Docker**（services: [docker]）
+  # 才能起 emqx + timescaledb:2.13.1 + redis + backend + mock_fleet。
+  # CNB 的默认构建机不一定提供可用 docker daemon，所以这一条**必须**
+  # 在缺失时「明确 skip」而不是红 —— 否则环境问题会被误读成代码回归
+  # （ISSUE #60 §4、AGENTS.md §6 都要求区分「环境」与「代码」）。
+  #
+  # 判定与产出：起栈前先探 docker、再探 python；缺任一则打印【E2E SKIP】原因并以 0 退出。
+  # 构建镜像必须自带 python3（实跑发现缺省镜像没有，见 pipeline 内注释）。
+  # 可用则跑 tests/e2e/test_e2e_30k.py（自带超时守卫与取证报告），
+  # 退出码 3 视同 skip（脚本内部已判过环境），其余非 0 才是真失败。
+  #
+  # 触发面：PR（拦回归）+ push main（合入后复核）+ 每日 crontab（漂移巡检）
+  # 共用同一份 stages 定义（锚点 &e2e-stages），避免三处脚本各自演化。
+  # ============================================================
+  pull_request:
+    - name: e2e-30k-landing
+      # ---- 为什么必须钉 image（2026-10 CI 实测教训）----
+      # 不写 image 时用缺省镜像 `cnbcool/default-build-env`，该镜像**没有 python3**：
+      # 首次实跑报 `sh: line 21: python3: command not found`（返回码 127），
+      # 而此时 docker 探测已经通过（日志里的 `docker 可用：Docker version 29.6.2`），
+      # 即「环境判定全绿 → 脚本起不来」，属于最坏的一类失败（红得莫名其妙）。
+      # 所以这里把运行环境写死成有 python3 的镜像，而不是靠默认镜像碰运气。
+      # 同理，脚本里也**不再**用 `python3` 裸命令，见下方 runner 探测。
+      docker:
+        image: python:3.11-slim
+      services: [docker]
+      env: &e2e-env
+        # 40s × 100 台 × 10Hz ≈ 40,000 帧，相对 30,000 阈值留足余量。
+        E2E_DURATION: "40"
+        E2E_ROBOTS: "100"
+        E2E_MIN_ROWS: "30000"
+      stages: &e2e-stages
+        - name: e2e
+          script: |
+            set -uo pipefail
+            echo "== e2e 30k 落库验证（ISSUE #60）=="
+
+            # ---- 环境判定：无 Docker 即明确 skip，绝不 red ----
+            if ! command -v docker >/dev/null 2>&1; then
+              echo "【E2E SKIP】PATH 内找不到 docker 命令。"
+              echo "本 job 需要真实 Docker（emqx + timescaledb:2.13.1 + redis + backend + mock_fleet），"
+              echo "且 ISSUE #60 禁止用 mock 替身冒充真实 TimescaleDB。"
+              echo "需要：在提供 docker 的构建机/自托管 runner 上运行本 job，或本地执行"
+              echo "  python -m pytest tests/e2e/test_e2e_30k.py -v -s"
+              exit 0
+            fi
+            if ! docker info >/dev/null 2>&1; then
+              echo "【E2E SKIP】docker daemon 不可达（docker info 非 0）。原始输出（尾部）："
+              docker info 2>&1 | tail -5 || true
+              exit 0
+            fi
+            echo "docker 可用：$(docker --version)"
+
+            # ---- 运行环境判定：连 python 都没有就明确 skip，绝不 red ----
+            # 这一层是实跑打出来的：首次 CI 里 docker 可用，但缺省镜像无 python3，
+            # 脚本根本没起来（返回码 127）。所以顺序必须是
+            # 「先探 docker（本 job 的核心依赖）→ 再探 python（脚本自身的依赖）」，
+            # 两层都给出原因与解法，读者不必翻配置就知道卡在哪一层。
+            if command -v python3 >/dev/null 2>&1; then
+              PY=python3
+            elif command -v python >/dev/null 2>&1; then
+              PY=python
+            else
+              echo "【E2E SKIP】镜像内 PATH 找不到 python3/python（当前镜像：${CNB_BUILD_IMAGE:-缺省镜像}）。"
+              echo "本 job 需要 python 来驱动 tests/e2e/test_e2e_30k.py（只用标准库，无需 pip 安装）。"
+              echo "修复：在本 pipeline 上声明 docker.image（如 python:3.11-slim），不要沿用缺省镜像。"
+              exit 0
+            fi
+            echo "python 可用：$($PY --version 2>&1)"
+
+            # 依赖：e2e 脚本只用标准库（subprocess/urllib），无需 pip 安装。
+            $PY tests/e2e/test_e2e_30k.py
+            rc=$?
+            if [ "$rc" = "3" ]; then
+              echo "【E2E SKIP】脚本自判环境不具备（退出码 3），非代码失败。"
+              exit 0
+            fi
+            exit "$rc"
+
+  push:
+    - name: e2e-30k-landing
+      services: [docker]
+      env: *e2e-env
+      stages: *e2e-stages
+
+  "crontab: 0 3 * * *":
+    - name: e2e-30k-landing
+      services: [docker]
+      env: *e2e-env
+      stages: *e2e-stages

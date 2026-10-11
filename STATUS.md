@@ -40,6 +40,7 @@
 | 19 `robot_alert` 身份 + ack 字段 | ✅ **已回收并反向验证** | 产出 `auto/alert-identity-759f` @ `d27b972`；ORM DDL 与 `init.sql` 逐字同为 `PRIMARY KEY (time, alert_id)`；测试 25 → **29 passed**；注入缺陷实测会红 |
 | 上游参考源下载 | ✅ **22/22 齐备**（此前只有 14） | `external/fetch-sources.sh` 声明 22 个，磁盘实存 22 个，缺失/多余均为 0；`external/` 现 **123 MB**。此前「已下载 22 个」的说法**是错的** |
 | 15 认证与 RBAC | ⏳ **CNB 执行中** | issue **#36** / `cnb-e2k-1k4jf5tfo`，基线 `main@58bafb5`，workMode=true 已核验。派前复验修正 4 处过期表述 |
+| 26 前端健壮性（I-20） | ✅ **已交付，待回收** | 见 issue **#47**。`react-error-boundary@6.1.6` 包 App 外层 + `@tanstack/react-query@5.104.1` 管 Drawer `/history` 缓存/重试；**不替换 zustand**（query 管服务端、zustand 管 WS 客户端状态）。实证：`tsc --noEmit` 0 错误、`vite build` 成功、新增 e2e 7/7 通过 |
 
 本地 HEAD = CNB `main` = **`58bafb5`**（已推送同步）。
 远端 **22 个分支**已全部对账完毕（第二轮），实际有价值的独有贡献仅 5 处，均已落地。
@@ -90,7 +91,7 @@
 |---|---|---|---|
 | G-1 | 全仓无 `/metrics` | 仅 `/healthz` 裸 JSON（`backend_ingestion/app/main.py:66-75`）；`alert_engine` 连 HTTP 都没有 | 引入 `prometheus/client_python` 挂 `/metrics` |
 | G-2 | 1000 msg/s 无历史曲线 | `/healthz` 全是瞬时值 | 同上，改成 Counter/Gauge |
-| G-3 | 「看板假的绿」无人识别 | 无客户端视角探针 | 已铺 `mqtt-probe`；待补 WS 合成探针 |
+| G-3 | 「看板假的绿」无人识别 | 无客户端视角探针 | `mqtt-probe` 已铺；WS 合成探针已落地（`robot_backend_ws_probe_alive` / `robot_backend_ws_probe_failures_total`，ISSUE #58） |
 | G-4 | 告警落库失败静默 | `alert_engine/app/store.py:53` 只 `log.exception` | 用 postgres_exporter 指标 + Prometheus 规则 |
 | G-5 | 零备份（≈8.64M 行/天） | `infra/ops/pgbackrest/` 只有配置契约 | 换带 pgbackrest 的镜像或起边车 |
 | G-6 | `robot_metadata` 的 `last_seen`/`is_online` 从没人写 | `infra/init.sql:39-40` 建了列 | 与 `offline` 规则耦合，单独一单 |
@@ -135,6 +136,7 @@
 | 两服务 `/metrics` 端点 | ✅ 后端 `:8011` 与告警 `:8012` 均返回 200，`content_type=text/plain; version=0.0.4` |
 | `.gitignore` 覆盖 `.venv-ci` | ✅ `git check-ignore .venv-ci/pyvenv.cfg` → 命中 `.gitignore:14:.venv*/` |
 | 假覆盖测试文件 | ✅ 全仓扫描 **0 个**（`test_*.py` 均含真实 `test_*` 函数） |
+| 前端错误边界 + react-query（订单 26） | ✅ `.e2e/run_order26.mjs` **7/7 通过**：子组件抛错被 ErrorBoundary 兜住（不白屏+重试按钮）、`/history` 500 自动重试至成功（后端命中 3 次）、staleTime 内重复查询命中缓存不再打后端 |
 
 本机验证环境（已打通）：Python **3.13.14** 隔离 venv，
 `aiomqtt 2.5.1 / asyncpg 0.32.0 / fastapi 0.143.0 / redis 8.1.0 / pydantic 2.14.0`。
@@ -143,7 +145,7 @@
 
 | 项 | 所需条件 |
 |---|---|
-| 端到端 30,000 行落库 | 需真实 EMQX + TimescaleDB + Redis（Docker），属订单 06 |
+| 端到端 30,000 行落库 | **harness 已就绪**（ISSUE #60：`tests/e2e/docker-compose.e2e.yml` + `tests/e2e/test_e2e_30k.py`），但**尚未在真实 Docker 上跑过** —— 本开发环境无 docker daemon，脚本按设计 skip（退出码 3）。需在提供 docker 的机器/runner 上执行 `python -m pytest tests/e2e/test_e2e_30k.py -v -s` 才产生实测数字。CI 侧 `e2e-30k-landing`（`.cnb.yml`）已按实跑报错修正：显式钉 `docker.image: python:3.11-slim`（缺省镜像无 python3，首次实跑返回码 127）、补 `docker compose` 插件探测、并给压测加发送量下限（见 `tests/e2e/README.md`） |
 | I-2 / I-3 的**运行时**行为 | 需真实 broker；导入期已验证 |
 | 告警去重幂等 / `robot:alerts` 发布 | 同上 |
 

@@ -12,6 +12,20 @@
 #   alertmanager       <- external/alertmanager            @ v0.28.1
 #   postgres-exporter  <- external/postgres_exporter       @ v0.17.1
 #   redis-exporter     <- external/redis_exporter          @ v1.74.0
+#
+# ── 网络（订单 22 / I-12 的硬约束）────────────────────────────
+# 两个 exporter 必须与 timescaledb / redis 处在**同一个网络**，否则：
+#   postgres_exporter 按 DATA_SOURCE_NAME 里的 `timescaledb` 主机名解析不到库；
+#   redis_exporter 按 REDIS_ADDR 里的 `redis` 解析不到实例。
+#   —— 两个 exporter 会起来，但 /metrics 里一个业务指标都没有，静默失效。
+#
+# 这里刻意**不写** top-level `networks:` 声明：三个 compose 文件都不声明时，
+# 所有 service（含 base 的 emqx/timescaledb/redis）都落在 Compose 自动创建的
+# 默认网络 `{project}_default` 上，天然同网。一旦在本文件新增网络，要么把
+# base 的服务也接过去（那就得改基础 compose，本单禁止），要么 exporter 落单 → 解析失败。
+#
+# project 名要一致（同一条 `docker compose -f a -f b` 命令天然一致）；若拆成两条
+# 命令分别 up，必须显式 `-p robot-monitor`，否则会造出两张网络、DNS 互不可见。
 version: "3.8"
 
 services:
@@ -47,8 +61,13 @@ services:
     ports:
       - "9187:9187"
     environment:
-      # 变量名实证自 external/postgres_exporter/README.md:223（DATA_SOURCE_NAME）
-      DATA_SOURCE_NAME: "postgresql://postgres:postgres@timescaledb:5432/robot_monitor?sslmode=disable"
+      # 变量名实证自 external/postgres_exporter/README.md:252（DATA_SOURCE_NAME）
+      #
+      # 密码必须来自宿主机 .env，不允许把明文写进本文件（AGENTS.md §5）。
+      # compose 的 `${VAR:?msg}` 在变量未设置时直接报错退出 —— 这比给个默认口令好：
+      # 默认口令会让 exporter 以错误凭据静默起在 9187，没人发现它其实没连上。
+      # 本地首次使用：cp .env.example .env（模板里已含 POSTGRES_PASSWORD）。
+      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 未设置：请在宿主机 .env 里配置（见 .env.example）}@timescaledb:5432/${POSTGRES_DB:-robot_monitor}?sslmode=disable"
     depends_on:
       - timescaledb
 
