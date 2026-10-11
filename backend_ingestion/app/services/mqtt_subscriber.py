@@ -71,5 +71,9 @@ async def _handle(raw: bytes, writer) -> None:
         return
     received += 1
     metrics.mqtt_received.inc()
+    # 订单 16 T1b：同一事件另记一笔 robot_monitor_* 指标。
+    # 两套并存是刻意的（见 app/metrics.py 末尾注释）：robot_backend_* 已被
+    # 现网 PromQL 引用，robot_monitor_* 是订单 16 的护栏可视化面。
+    metrics.mqtt_messages_total.inc()
     await state_cache.write_and_publish(t)   # 最新状态 + 广播
     await writer.put(t)                      # 批量落库队列

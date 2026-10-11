@@ -31,3 +31,13 @@ setuptools<81
 # 本机实测：bcrypt 5.0.0 下 POST /auth/register 返回 500（ValueError: password
 # cannot be longer than 72 bytes）；降到 4.0.1 后 201。详见 PR 的「实测」章节。
 bcrypt==4.0.1
+
+# ---- OpenTelemetry（订单 16 T3）----
+# 注意版本线：OTel Python 的 API/SDK 是 1.x，而 instrumentation 包是 0.x b 版。
+# `0.43b0` 是与 SDK `1.22.0` 配对的版本（instrumentation 包的元数据会钉住 SDK
+# 的 lower-bound；本机实测 4 个包同时安装、import 通过，见 PR「实测」章节）。
+# 走 OTLP/HTTP 而非 gRPC：4318 端口在多数内网放行，且不需要 grpcio 这棵依赖树。
+opentelemetry-sdk==1.22.0
+opentelemetry-exporter-otlp-proto-http==1.22.0
+opentelemetry-instrumentation-fastapi==0.43b0
+opentelemetry-instrumentation-asyncpg==0.43b0

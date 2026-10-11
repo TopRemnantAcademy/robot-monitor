@@ -11,12 +11,18 @@ import LoginGate from './auth/LoginGate';
 import { setUnauthorizedHandler } from './auth/api';
 import { useAuthStore } from './auth/authStore';
 import { useRobotWebSocket } from './hooks/useRobotWebSocket';
+import { startObservabilityReport } from './lib/observability';
 import { COLORS } from './theme/tokens';
 
 /** 已登录后的看板主体。只有在这里才建立 WS —— 未登录时不连。 */
 function Dashboard() {
   // 全局唯一的 WS 接入点：100ms 节流刷库（spec/03 §6）
   useRobotWebSocket();
+
+  // 订单 16 T2：每 5s 打印一行重渲染摘要（wsMsgs / storeCommits / cardRenders / ratio）。
+  // 挂在 Dashboard（而非 App）是刻意的：未登录时 LoginGate 不渲染 Dashboard，
+  // 也就不会起一个只打印全 0 的定时器污染控制台。
+  useEffect(() => startObservabilityReport(), []);
 
   return (
     <div

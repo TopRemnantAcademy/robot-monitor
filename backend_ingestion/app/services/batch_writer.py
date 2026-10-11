@@ -122,6 +122,9 @@ class BatchWriter:
 
             buf = [first]
             deadline = loop.time() + settings.batch_trigger_seconds
+            # 触发原因用于 Prometheus label（订单 16 T1b）：满 500 条 → 'count'，
+            # 满 1s → 'timeout'。默认 'timeout'，只有真的攒够 batch_trigger_count 才改。
+            reason = "timeout"
             while len(buf) < settings.batch_trigger_count:
                 remaining = deadline - loop.time()
                 if remaining <= 0:
@@ -143,39 +146,56 @@ class BatchWriter:
                         continue
                     buf.append(item)
 
-            await self._flush(buf)
+            # 判定依据是"最终攒够没"，而不是"中途是否 timeout 过"：
+            # 只要到了 batch_trigger_count 就是 count 触发（哪怕中间等过几个 100ms）。
+            if len(buf) >= settings.batch_trigger_count:
+                reason = "count"
+
+            await self._flush(buf, reason=reason)
 
             if self._draining and self.queue.empty():
                 break
         self._drained.set()
 
-    async def _flush(self, buf: list[Telemetry]) -> None:
-        """落库一批。任何异常都必须在此消化，不能拖垮采集循环。"""
+    async def _flush(self, buf: list[Telemetry], reason: str = "timeout") -> None:
+        """落库一批。任何异常都必须在此消化，不能拖垮采集循环。
+
+        `reason` 是双重触发的判定结果（'count' / 'timeout'），仅用于 Prometheus
+        label，不影响写入语义。默认 'timeout' 让直接调用 _flush 的旧路径
+        （若有）不会因漏参而崩。
+        """
         if not buf:
             return
         rows = [self._to_row(t) for t in buf]
         async with self._lock:
             try:
-                await self._write_with_retry(rows)
+                await self._write_with_retry(rows, reason=reason)
             except Exception:
                 # 走到这里说明重试也没救回来（如 DB 长时间不可达）。整批丢弃并计入 rejected，
                 # 但采集循环继续——宁可丢历史数据，也不能让 MQTT 消费停摆。
                 self.rejected += len(rows)
                 log.exception("batch flush gave up, %d rows dropped", len(rows))
 
-    def _count_written(self, submitted: list[tuple], written: int) -> None:
+    def _count_written(
+        self, submitted: list[tuple], written: int, reason: str = "timeout"
+    ) -> None:
         """一次成功写入的记账（含 Prometheus 指标）。
 
         `submitted - written` 即被 `ON CONFLICT DO NOTHING` 静默丢弃的行数
         （ISSUE #19 G2 的直接证据）。降级链三条路径都只经由此处记账：
         这里刻意**不改写入语义**（不引 RETURNING、不改批量策略），只加计数器。
+
+        `reason` 供订单 16 的 `robot_monitor_batch_flush_total{reason}` 使用；
+        L3 二分隔离出的子批沿用父批的 reason（它本就是同一次触发的产物，
+        拆成两半不改变"为什么刷"这一事实）。
         """
         self.rows_submitted += len(submitted)
         self.rows_skipped += len(submitted) - written
         metrics.telemetry_written.inc(written)
         metrics.batch_flushes.inc()
+        metrics.observe_flush(reason, written)
 
-    async def _write_with_retry(self, rows: list[tuple]) -> None:
+    async def _write_with_retry(self, rows: list[tuple], reason: str = "timeout") -> None:
         """重试 + 降级链。重试的是**同一条路径**，路径切换只在第一次失败后发生。
 
         注意顺序：先重试，再降级。原因是「连接被掐断」这类瞬时故障占多数，
@@ -189,7 +209,7 @@ class BatchWriter:
                 inserted = await self._copy_upsert(rows)
                 self.written += inserted
                 self.flushes += 1
-                self._count_written(rows, inserted)
+                self._count_written(rows, inserted, reason)
                 return
             except Exception as exc:
                 last = exc
@@ -207,13 +227,13 @@ class BatchWriter:
             written = await self._executemany(rows)
             self.written += written
             self.flushes += 1
-            self._count_written(rows, written)
+            self._count_written(rows, written, reason)
             return
         except Exception as exc:
             self.retries += 1
             log.warning("executemany also failed (%s), isolating bad rows", exc)
 
-        await self._isolate_and_write(rows)
+        await self._isolate_and_write(rows, reason=reason)
 
     # ---- L1：COPY → 临时表 → upsert ----
     async def _copy_upsert(self, rows: list[tuple]) -> int:
@@ -254,7 +274,9 @@ class BatchWriter:
         return len(rows)
 
     # ---- L3：二分隔离坏行，保住好数据 ----
-    async def _isolate_and_write(self, rows: list[tuple], _depth: int = 0) -> None:
+    async def _isolate_and_write(
+        self, rows: list[tuple], _depth: int = 0, reason: str = "timeout"
+    ) -> None:
         """二分定位坏行。好数据落库，坏行计入 rejected 后丢弃。
 
         为什么必须做：L1/L2 都是批级原子，一行坏数据会让整批好数据连坐。
@@ -281,9 +303,9 @@ class BatchWriter:
                 written = await self._executemany(half)
                 self.written += written
                 self.flushes += 1
-                self._count_written(half, written)
+                self._count_written(half, written, reason)
             except Exception:
-                await self._isolate_and_write(half, _depth + 1)
+                await self._isolate_and_write(half, _depth + 1, reason)
 
     @staticmethod
     def _to_row(t: Telemetry) -> tuple:
