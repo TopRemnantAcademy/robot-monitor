@@ -27,7 +27,7 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from app import metrics, telemetry_tracing
 from app.alerts.router import router as alerts_router
@@ -38,6 +38,11 @@ from app.config import settings
 from app.db.redis import close_redis, get_redis
 from app.db.session import close_pool, ping
 from app.logging_json import configure_json_logging
+from app.schemas.api import (
+    HealthResponse,
+    RobotHistoryResponse,
+    RobotListResponse,
+)
 from app.services import mqtt_subscriber, state_cache
 from app.services.batch_writer import BatchWriter
 
@@ -105,8 +110,8 @@ app.include_router(alerts_router)
 
 # ------------------------------------------------------------------ REST
 
-@app.get("/healthz")
-async def healthz():
+@app.get("/healthz", response_model=HealthResponse)
+async def healthz() -> HealthResponse:
     """健康检查。
 
     `status` 反映**依赖可达性**，不只是「进程活着」：
@@ -160,7 +165,16 @@ async def _db_healthy() -> bool:
     return ok
 
 
-@app.get("/metrics")
+@app.get(
+    "/metrics",
+    # 显式声明 text/plain：Prometheus exposition format 不是 JSON。
+    # 不声明时 FastAPI 会默认插入 `application/json` + 空 schema，
+    # 快照里的契约就写成 JSON —— 与真实响应体不符，
+    # 正是本订单要消灭的"文档与契约漂移"。
+    # 用 response_class=PlainTextResponse 才能**替换掉**那个默认 content-type
+    # （只写 responses={...} 只会追加一条，JSON 那条仍在）。
+    response_class=PlainTextResponse,
+)
 async def prometheus_metrics():
     """Prometheus 抓取端点（`infra/observability/prometheus.yml` 的 `robot_backend` job）。
 
@@ -177,16 +191,18 @@ async def prometheus_metrics():
     metrics.queue_depth.set(writer.queue.qsize())
     metrics.refresh_gauges(writer.queue.qsize(), _ws_active)
     body, ctype = metrics.render()
-    return Response(content=body, media_type=ctype)
+    # ctype 由 prometheus_client 给出（`text/plain; version=0.0.4; charset=utf-8`），
+    # 必须原样透传 —— 版本号是 Prometheus 解析器协商格式的依据，不能丢。
+    return PlainTextResponse(content=body, media_type=ctype)
 
 
-@app.get("/robots")
+@app.get("/robots", response_model=RobotListResponse)
 async def list_robots(_user: RobotUser = Depends(current_active_user)):
     """100 台最新状态。只读端点：viewer 起可访问，返回体与加鉴权前逐字段一致。"""
     return {"robots": await state_cache.snapshot(settings.robot_ids)}
 
 
-@app.get("/robots/{robot_id}/history")
+@app.get("/robots/{robot_id}/history", response_model=RobotHistoryResponse)
 async def history(
     robot_id: str,
     minutes: int = 5,

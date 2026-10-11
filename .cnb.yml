@@ -19,6 +19,45 @@ $:
         max_turns: 200
         workspace_preflight: on
 
+    # -----------------------------------------------------------------------
+    # 订单 18 T2 —— 契约门禁（契约即代码）
+    #
+    # **刻意不做 `|| true` / `continue-on-error` 兜底**：门禁能被吞掉就等于不存在。
+    # 两步判定都必须让构建变红：
+    #   ① generated-types-must-be-committed —— api.gen.ts 与 openapi.snapshot.json 不同步
+    #   ② contract-snapshot-check           —— 后端删字段/改类型但没同步快照（breaking）
+    # 依据：本仓已真实翻车过一次（STATUS.md §六第 2 条 —— `/history` 漏 `joint_positions`
+    # 导致 Drawer 第三条折线恒空）。那次是"人眼比对通过"的，机器一跑就现形。
+    #
+    # 用对象形式声明（`contract-gate:` 是流水线标识），与 NPC 的 `comment@npc:` 平级；
+    # 依据：语法手册「也支持通过对象的形式声明多个流水线」。
+    #
+    # 镜像用 `ci/contract-gate.Dockerfile` 而非裸 node:20 —— 实测 node:20 的 python3
+    # **没有 pip 也没有 ensurepip**（见该 Dockerfile 顶部记录），依赖必须在镜像构建期装好。
+    # 全部逻辑收进 `ci/contract-gate.sh`（POSIX sh），避免几十行内联脚本难维护。
+    # -----------------------------------------------------------------------
+    contract-gate:
+      docker:
+        build:
+          dockerfile: ci/contract-gate.Dockerfile
+          by:
+            - ci/contract-gate.Dockerfile
+            - backend_ingestion/requirements.txt
+            # `by` 是 Dockerfile 可 COPY 文件的**白名单**，未列出的文件不进构建上下文
+            # （官方 grammar.md 明确警告）。这 3 个文件必须与 ci/contract-gate.Dockerfile
+            # 里的 COPY 严格对应，少列一个 → 构建直接
+            # `failed to calculate checksum ... not found`
+            # （实测：缺 package.json 时构建 cnb-jgf-1k4k4c9db 死在这一步）。
+            - frontend_dashboard/package.json
+            - frontend_dashboard/package-lock.json
+      env:
+        # 只为让 `Settings()` 在 import 期实例化成功（jwt_secret 无默认值）。
+        # 是占位串，不参与任何签名；真实密钥绝不入仓（AGENTS.md §5）。
+        JWT_SECRET: ci-openapi-export-placeholder
+      stages:
+        - name: contract-gate
+          script: sh ci/contract-gate.sh
+
 main:
   "crontab: 0 0,6,12,18 * * *":
     - stages:
