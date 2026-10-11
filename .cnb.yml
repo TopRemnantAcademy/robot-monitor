@@ -100,7 +100,11 @@ main:
           script: |
             set -eu
             cd frontend_dashboard
-            npm ci
+            # npm ci 不行：lockfile v3 只写生成平台的原生可选依赖条目（本仓在 Windows 生成，
+            # 无 linux-x64 条目），npm ci 严格按 lockfile 安装 → rollup 原生模块缺失
+            # （npm/cli#4828 症状，2026-10-11 CI 实录）。npm install 的 reify 会按
+            # 父包 optionalDependencies 元数据补装当前平台的可选依赖。版本仍受 lockfile 约束。
+            npm install
             npm test
     - name: sync-to-github
       # 单向同步 CNB main -> github.com/TopRemnantAcademy/robot-monitor（Issue #64 / C4）
@@ -225,7 +229,11 @@ main:
           script: |
             set -eu
             cd frontend_dashboard
-            npm ci
+            # npm ci 不行：lockfile v3 只写生成平台的原生可选依赖条目（本仓在 Windows 生成，
+            # 无 linux-x64 条目），npm ci 严格按 lockfile 安装 → rollup 原生模块缺失
+            # （npm/cli#4828 症状，2026-10-11 CI 实录）。npm install 的 reify 会按
+            # 父包 optionalDependencies 元数据补装当前平台的可选依赖。版本仍受 lockfile 约束。
+            npm install
             npm test
     # e2e 与 push 共用同一份 stages/env（锚点定义在 push 块，此处按文档序用别名引用）
     - name: e2e-30k-landing
