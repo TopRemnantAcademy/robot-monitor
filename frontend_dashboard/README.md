@@ -23,18 +23,23 @@ npm run preview           # 预览构建产物
 
 ECharts 默认入口 `echarts-for-react` 内部 `require("echarts")`（整包，无法 tree-shake）。
 订单 09 改为 **core 入口 + 按需注册**，注册清单集中在
-`src/lib/echartsCore.ts`（仅 LineChart + Grid/Tooltip/Legend + CanvasRenderer）。
+`src/lib/echartsCore.ts`（LineChart / BarChart / GaugeChart + Grid/Tooltip/Legend +
+CanvasRenderer）。
 本仓库**不使用** HeatmapChart —— `JointHeatmap.tsx` 是纯 CSS grid 自绘（无 ECharts）。
 
-`npx vite build` 实测：
+> 说明：`BarChart` / `GaugeChart` 属 **预留注册**，不是当前大屏实际渲染的图表 ——
+> 全仓挂载 ECharts 的只有 `RobotDetailDrawer.tsx`，且只有 `type: 'line'`。
+> 二者代价实测仅 **+9.46 kB gzip**，Issue #62 明确要求保留 line/bar/gauge 三件套。
+
+`npx vite build` 实测（主 JS chunk `dist/assets/index-*.js`）：
 
 | 版本 | 主 JS chunk | gzip |
 | :--- | ---: | ---: |
-| 改前 | 1,209.34 kB | 401.05 kB |
-| 改后 | 671.23 kB | 224.79 kB |
+| 全量引入（订单 09 前） | 1,209.34 kB | 401.05 kB |
+| 订单 09（仅 LineChart） | 675.19 kB | 226.16 kB |
+| 本次（+ BarChart/GaugeChart） | 703.50 kB | 235.62 kB |
 
-> 主 chunk 仍 >600 kB 的目标值：剩余体积为 ECharts 引擎的**不可再裁**部分
-> （tree-shake 后 echarts 子树 ≈487 kB + React/业务基线 ≈161 kB）。
+> 剩余体积为 ECharts 引擎的**不可再裁**部分（tree-shake 后 echarts 子树 + React/业务基线）。
 > 详见 issue 的实测说明。
 
 新增/导入图表能力时，请**只**在 `src/lib/echartsCore.ts` 里 `echarts.use([...])` 增补，
