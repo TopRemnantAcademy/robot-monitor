@@ -10,20 +10,18 @@ $:
   # 用 `cnb build start-build --event api_trigger` 真机验证命令能过。
   # **验证完必须删除本块**。
   # 【临时·订单18】环境探针
+  # 【临时·订单18】pip 引导方式探针
   api_trigger:
-    probe-env:
+    probe-pip:
       docker:
         image: node:20
       stages:
-        - name: probe-node20
+        - name: probe-pip
           script: |
-            echo "--- node:20 ---"
-            echo "node: $(node -v)"
-            command -v python3 && python3 --version
-            command -v pip3 || echo "no pip3"
-            python3 -m pip --version 2>&1 || echo "no pip module"
-            command -v apt-get || echo "no apt-get"
-            echo "--- whoami: $(whoami) ---"
+            echo "--- ensurepip ---"
+            python3 -m ensurepip --version 2>&1 || echo "ensurepip FAILED"
+            python3 -m ensurepip --upgrade 2>&1 | tail -3
+            python3 -m pip --version 2>&1 || echo "pip still missing"
 
   issue:
     comment@npc:
