@@ -13,18 +13,26 @@ import {
   robotDisplayState,
   tempColor,
 } from '../theme/tokens';
-import { useRobotStore } from '../store/robotStore';
+import { useRobotStore, buildRobotIds } from '../store/robotStore';
 import { countCardRender } from '../lib/observability';
-import type { RobotTelemetry } from '../types/robot';
 
-/** 卡片只吃自己的机器人对象，配合 memo 让「本帧没变的卡」不重渲染 */
+/** 卡片只吃自己的 robotId，配合 memo + 自订阅让「本帧没变的卡」不重渲染 */
 interface RobotCardProps {
-  robot: RobotTelemetry;
+  robotId: string;
   selected: boolean;
   onOpen: (robotId: string) => void;
 }
 
-const RobotCard = memo(function RobotCard({ robot, selected, onOpen }: RobotCardProps) {
+const RobotCard = memo(function RobotCard({ robotId, selected, onOpen }: RobotCardProps) {
+  // ISSUE #75 结构性共享：卡片**自己**订阅自己那一格（`s.robots.get(robotId)`）。
+  // 旧形态是网格订阅整张 Map → 每个刷库帧都重建 100 个卡片元素 + 100 次 memo
+  // 比较（哪怕本帧只有 3 台变了）；现在 zustand 按选择器输出（Object.is）逐卡
+  // 判定 —— 只有 robot 对象引用变化的卡才重渲染，网格本体零重渲染。
+  // Map 里 100 台常驻（离线占位兜底），但类型上 get 仍可返回 undefined，
+  // 防御性短路避免上游契约变化时白屏。
+  const robot = useRobotStore((s) => s.robots.get(robotId));
+  if (!robot) return null;
+
   // ISSUE #77：着色与文案都走 robotDisplayState，**在线与否只认 is_online**。
   // 旧实现用 `status_code === 0` 判断，于是停报的机器人保持最后一次的颜色与温度 ——
   // 一台 1 小时前断电的"预警"机器人会一直亮着黄灯。现在它是灰色的「失联」。
@@ -87,7 +95,12 @@ const RobotCard = memo(function RobotCard({ robot, selected, onOpen }: RobotCard
 /**
  * 100 卡网格本体。用 memo 包一层：父级 App 在绘制 Drawer（选中态变化）时，
  * 该子树 props 完全未变，memo 命中即可整块跳过 —— 不必为 100 张卡逐个 diff。
- * 网格自身只在 robots / selectedRobotId 引用变化时重渲染（即 100ms 刷库帧）。
+ *
+ * ISSUE #75 结构性共享（消费侧）：网格**不再订阅整张 robots Map**。
+ * 旧形态 `useRobotStore((s) => s.robots)` 让网格本体每个 100ms 刷库帧都重渲染
+ * 并重建 100 个卡片元素；现在改为订阅常量 ID 列表（`buildRobotIds(100)`，
+ * 内容永不变 → 本组件除 selectedRobotId 变化外**零重渲染**），每张卡通过
+ * 自己的 `s.robots.get(robotId)` 自订阅取数 —— 只有引用变化的卡才重渲染。
  */
 const RobotGrid = memo(function RobotGrid() {
   // 订单 16 T2：卡片墙渲染计数。
@@ -96,34 +109,25 @@ const RobotGrid = memo(function RobotGrid() {
   // 触发本组件重渲染 → 计数又 +1 → 无限循环。useRef 是渲染期可安全写的可变盒子，
   // 写它不产生任何 React 订阅通知（不触发额外渲染，满足订单 16 的硬约束）。
   //
-  // 计数点选在 **RobotGrid 本体**而不是 100 个 RobotCard：验收问的是
-  // "卡片墙整块重渲染了几次"，那对应的是"store 通知本组件几次"。
-  // 逐卡计数会被 memo 命中的卡混入（那些卡根本没重渲染），数字没有对照意义。
-  //
-  // ⚠️ React.StrictMode（main.tsx）在**开发模式**下会双调用组件函数，
-  // 故 dev 下 cardRenders 约为真实值的 2 倍。生产构建（vite build）无此行为，
-  // 对照 storeCommits 时应以生产数据为准；dev 下看两者"同比例"即可。
+  // 计数点选在 **RobotGrid 本体**而不是 100 个 RobotCard：#75 之后网格本体
+  // 只在选中态变化时渲染，逐卡重渲染不再抬升此数字 —— "wallRenders 不随刷库
+  // 帧增长" 本身就是 #75 结构性共享的验收信号。dev 模式下 StrictMode 双调用
+  // 仍使读数约为真实值 2 倍，对照以生产构建为准。
   const renderCountRef = useRef(0);
   renderCountRef.current += 1;
   countCardRender(renderCountRef.current);
 
-  // 只订阅 robots 这一个字段；100ms 批量刷库时本组件最多 10 次/秒重渲染
-  const robots = useRobotStore((s) => s.robots);
   const selectedRobotId = useRobotStore((s) => s.selectedRobotId);
   const selectRobot = useRobotStore((s) => s.selectRobot);
 
-  const list = useMemo(() => Array.from(robots.values()), [robots]);
+  // 常量列表：内容与引用都永不变，useMemo 只是契约性表达（期待编译器常量折叠）。
+  const ids = useMemo(() => buildRobotIds(100), []);
 
   return (
     <div className="flex-1 min-h-0 overflow-y-auto px-3 py-2">
       <div className="grid grid-cols-5 md:grid-cols-10 gap-2">
-        {list.map((robot) => (
-          <RobotCard
-            key={robot.robot_id}
-            robot={robot}
-            selected={robot.robot_id === selectedRobotId}
-            onOpen={selectRobot}
-          />
+        {ids.map((id) => (
+          <RobotCard key={id} robotId={id} selected={id === selectedRobotId} onOpen={selectRobot} />
         ))}
       </div>
     </div>

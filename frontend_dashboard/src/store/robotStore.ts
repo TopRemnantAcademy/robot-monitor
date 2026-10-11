@@ -97,8 +97,19 @@ export const useRobotStore = create<RobotState>((set) => ({
   applyTelemetryBatch: (list) =>
     set((state) => {
       if (list.length === 0) return state;
-      // 每帧只做一次 Map 拷贝 + O(n) 覆盖，n = 本帧变化的机器人数（≤100），
-      // 而不是每条消息一次 set()，这是防 1000 msg/s 卡顿的关键。
+      // 结构性共享（ISSUE #75）：先做**引用级去重探测** —— 本帧里所有条目
+      // 若都与 state 中现有对象同引用（重复推送 / 空转帧），整张 Map 无需重建，
+      // 返回原 state 让 zustand 零通知、所有订阅者零重渲染。
+      // 引用有变的帧才做一次 Map 拷贝 + O(n) 覆盖（n ≤ 100）—— 拷贝本身廉价，
+      // 真正的花费在订阅通知，而通知的前提必须是"真有东西变了"。
+      let touched = false;
+      for (const item of list) {
+        if (state.robots.get(item.robot_id) !== item) {
+          touched = true;
+          break;
+        }
+      }
+      if (!touched) return state;
       const next = new Map(state.robots);
       for (const item of list) next.set(item.robot_id, item);
       return { robots: next };

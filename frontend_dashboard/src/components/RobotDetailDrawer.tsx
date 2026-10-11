@@ -57,8 +57,11 @@ interface ChartModel {
 
 export default function RobotDetailDrawer() {
   const selectedRobotId = useRobotStore((s) => s.selectedRobotId);
-  const robots = useRobotStore((s) => s.robots);
   const selectRobot = useRobotStore((s) => s.selectRobot);
+  // ISSUE #75 结构性共享：Drawer 只订阅**它显示的那一格**
+  // （`s.robots.get(selectedRobotId)`），不再订阅整张 Map —— 否则关着 Drawer 时
+  // 每个 100ms 刷库帧也会让它重渲染一遍。选中态切换 / 关闭时选择器自动换挡。
+  const robot = useRobotStore((s) => (s.selectedRobotId ? s.robots.get(s.selectedRobotId) : undefined));
 
   const [selectedJoint, setSelectedJoint] = useState<string>(JOINT_NAMES[0]);
 
@@ -85,8 +88,6 @@ export default function RobotDetailDrawer() {
       ? historyQuery.error.message
       : 'history 请求失败'
     : null;
-
-  const robot = selectedRobotId ? robots.get(selectedRobotId) : undefined;
 
   // ECharts 折线模型：温度/扭矩/角度 三条 series，x 轴为 10s 桶时间
   const chart = useMemo<ChartModel>(() => {
