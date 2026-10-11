@@ -43,10 +43,11 @@ $:
           by:
             - ci/contract-gate.Dockerfile
             - backend_ingestion/requirements.txt
-            # package.json 必须一起列出：`by` 是 Dockerfile 可 COPY 文件的**白名单**，
-            # 未列出的文件不进构建上下文（官方 grammar.md 明确警告），
-            # 缺它 → Dockerfile 第 32 行 COPY frontend_dashboard/package.json 直接
-            # `failed to calculate checksum ... not found`（构建 cnb-jgf-1k4k4c9db 实测）。
+            # `by` 是 Dockerfile 可 COPY 文件的**白名单**，未列出的文件不进构建上下文
+            # （官方 grammar.md 明确警告）。这 3 个文件必须与 ci/contract-gate.Dockerfile
+            # 里的 COPY 严格对应，少列一个 → 构建直接
+            # `failed to calculate checksum ... not found`
+            # （实测：缺 package.json 时构建 cnb-jgf-1k4k4c9db 死在这一步）。
             - frontend_dashboard/package.json
             - frontend_dashboard/package-lock.json
       env:

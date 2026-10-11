@@ -9,7 +9,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --port 4173",
     "typecheck": "tsc --noEmit",
-    "gen:types": "openapi-typescript ../docs/contracts/openapi.snapshot.json -o src/types/api.gen.ts",
+    "gen:types": "node scripts/gen-types.mjs",
     "contract:snapshot": "python3 ../scripts/export-openapi.py --out docs/contracts/openapi.snapshot.json",
     "contract:check": "python3 ../scripts/export-openapi.py --check docs/contracts/openapi.snapshot.json",
     "test:ws-contract": "node --test \"tests/*.test.mjs\""
