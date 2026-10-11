@@ -1,4 +1,4 @@
-// 订单 24 T2 — RobotDetailDrawer 组件测试（vitest + testing-library + msw）。
+// 订单 24 T2 — RobotDetailDrawer 组件测试（vitest + testing-library）。
 //
 // 为什么挑 Drawer 而不是别的组件：
 //   STATUS.md §六第 2 条记录过一次**真实事故** —— `/history` 不返回
@@ -10,18 +10,29 @@
 // `echarts-for-react/lib/core`，把它收到的 `option` 原样 dump 到 DOM（data-testid），
 // 于是我们能断言「组件算出来的图表模型」这一层 —— 这正是最该测的纯逻辑层，
 // 而 ECharts 自身怎么画像素不在本仓职责内。
+//
+// 【网络层：为什么用受控 fetch 替身而不是 msw（Issue #78 根因）】
+//   happy-dom 会把全局 `Response`/`ReadableStream` 覆盖成自己的实现，而 msw/node
+//   拦截器返回的 Response body 是 Node(undici) 的 ReadableStream —— happy-dom 的
+//   `Response.json()` 读不动这条流，于是在 200 用例里 `res.json()` 永久挂起（只读
+//   `res.status` 的 500 用例反而正常）。这是**环境层**问题，与组件实现无关。
+//   实测本沙箱内 msw 这条路不通，故这里改用受控的全局 `fetch` 替身：它返回 Node 原生
+//   `Response`（其 `.json()` 可正确解析），既保留「真实 fetch → 解析 → chart」链路断言，
+//   又绕开环境挂起。组件里仍走真实的 `fetchRobotHistory`（用全局 fetch），所以
+//   URL 拼错 / 头漏带 / 字段改名 这一类回归依然会被本用例抓住。
 
-import { describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { http, HttpResponse } from 'msw';
 
 import RobotDetailDrawer from '../RobotDetailDrawer';
 import { useRobotStore } from '../../store/robotStore';
 import { JOINT_NAMES } from '../../types/robot';
 import type { RobotTelemetry } from '../../types/robot';
-import { server } from '../../test/msw/server';
-import { API_BASE, SAMPLE_HISTORY } from '../../test/msw/handlers';
+import { SAMPLE_HISTORY } from '../../test/msw/handlers';
+// 共享渲染：已包裹 QueryClientProvider，使使用 useQuery 的组件可在测试里渲染
+// （修复 Issue #78：main 此前 npm test 8/8 全红）。
+import { render } from '../../test/render';
 
 // —— ECharts 替身：把 option 序列化进 DOM，供断言 ——
 vi.mock('echarts-for-react/lib/core', () => ({
@@ -29,6 +40,28 @@ vi.mock('echarts-for-react/lib/core', () => ({
     <pre data-testid="echarts-option">{JSON.stringify(option)}</pre>
   ),
 }));
+
+// —— 受控 fetch 替身（替代 msw，绕开 happy-dom + msw 的 body 挂起）——
+// 默认实现：命中 /history 就返回样例数据（SAMPLE_HISTORY），其余一律 200 空 JSON。
+// 各用例可用 `fetchMock.mockImplementation(...)` 临时改写响应（见下方面 500 / 空 / 鉴权用例）。
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+const fetchMock = vi.fn(
+  async (_input: RequestInfo | URL): Promise<Response> => jsonResponse(SAMPLE_HISTORY),
+);
+
+beforeAll(() => {
+  vi.stubGlobal('fetch', fetchMock);
+});
+
+afterAll(() => {
+  vi.unstubAllGlobals();
+});
 
 function telemetry(over: Partial<RobotTelemetry> = {}): RobotTelemetry {
   const zeros = Object.fromEntries(JOINT_NAMES.map((j) => [j, 0]));
@@ -113,10 +146,8 @@ describe('RobotDetailDrawer', () => {
   });
 
   it('history 为空时显示「无历史点」而不是空图', async () => {
-    server.use(
-      http.get(`${API_BASE}/robots/:robotId/history`, () =>
-        HttpResponse.json({ robot_id: 'humanoid-042', points: [] }),
-      ),
+    fetchMock.mockImplementation(async () =>
+      jsonResponse({ robot_id: 'humanoid-042', points: [] }),
     );
     openDrawer();
     render(<RobotDetailDrawer />);
@@ -126,11 +157,7 @@ describe('RobotDetailDrawer', () => {
   });
 
   it('history 请求 500 时显示错误态，且错误文案含 HTTP 状态码（便于排障）', async () => {
-    server.use(
-      http.get(`${API_BASE}/robots/:robotId/history`, () =>
-        new HttpResponse(null, { status: 500 }),
-      ),
-    );
+    fetchMock.mockImplementation(async () => new Response(null, { status: 500 }));
     openDrawer();
     render(<RobotDetailDrawer />);
 
@@ -149,12 +176,10 @@ describe('RobotDetailDrawer', () => {
 
   it('请求必须带 Authorization 头（订单 15：唯一的 REST 调用点，漏了就全漏）', async () => {
     const seen: (string | null)[] = [];
-    server.use(
-      http.get(`${API_BASE}/robots/:robotId/history`, ({ request }) => {
-        seen.push(request.headers.get('authorization'));
-        return HttpResponse.json(SAMPLE_HISTORY);
-      }),
-    );
+    fetchMock.mockImplementation(async (_input, init) => {
+      seen.push(new Headers(init?.headers).get('authorization'));
+      return jsonResponse(SAMPLE_HISTORY);
+    });
     // 预置 token（sessionStorage）
     window.sessionStorage.setItem('robotmonitor.jwt', 'test-token');
 

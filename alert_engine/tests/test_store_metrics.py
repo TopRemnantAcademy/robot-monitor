@@ -129,6 +129,11 @@ def test_success_does_not_increment_counter(monkeypatch):
         async def execute(self, *a, **kw):
             return "INSERT 0 1"
 
+        async def fetchval(self, *a, **kw):
+            # store.py:42 用 RETURNING alert_id 取回自增主键，成功路径必须支持，
+            # 否则 AttributeError 被 except 吞成"落库失败" → 本用例的反向护栏红。
+            return 1
+
     class OkPool:
         def acquire(self):
             return _AsyncCtx(OkConn())
