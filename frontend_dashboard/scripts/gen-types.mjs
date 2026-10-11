@@ -14,6 +14,11 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const pkgRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// 解析顺序：本地 node_modules → 全局 node_modules（Dockerfile 里 npm ci 到镜像内的
+// frontend_dashboard/node_modules，故 CI 会命中第一项）。**两个候选都用绝对路径**，
+// 不用裸 `require.resolve('openapi-typescript')` —— 后者会从本文件所在目录向上收集
+// 所有 node_modules，在有依赖仓库里足以把工作区外的 /workspace/node_modules 卷进来，
+// 解析结果取决于 jenkins 工作区里有什么，不可复现。绝对路径让本地与 CI 命中同一份。
 const candidates = [
   path.join(pkgRoot, 'node_modules', 'openapi-typescript'),
   '/usr/local/lib/node_modules/openapi-typescript',
