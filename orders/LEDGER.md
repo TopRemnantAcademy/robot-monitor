@@ -57,3 +57,27 @@
 - 触发：Issue 正文**不含** @codebuddy；仅 `post-issue-comment --work-mode` 触发（CNB 不在 issue body 触发 NPC）。
 - 每单 doc 派前必须复验 file:line 与订单号（纪律第 7 条）。
 - `success` 只是构建通过，**必须**回收分支 `git diff --stat main...<branch>` 核验范围后才算方向无误。
+
+## 六、第二轮派发（2026-10-11，Issue #58–#64）
+
+本批从 STATUS.md 的「后续增强 C1/C4」「非功能缺口 G-3/G-4/G-6/G-7」与「仍未验证 e2e 30k」中 harvest 出 7 个尚未派发的真实问题，逐个开 Issue（正文无触发词）+ `--work-mode @codebuddy` 派发。
+
+| Issue | 问题 | 缺口 | Build SN | Build 状态 | 方向校准要点 |
+|-------|------|------|----------|-----------|-------------|
+| #58 | WS 合成探针（识别假绿） | G-3 | cnb-sar-1k4k4q3nj | success✓ | 新增 ws_probe_alive/failures_total；与订单16 T1b 的 ws_connections 不冲突 |
+| #59 | 告警落库失败可观测 | G-4 | cnb-nl1-1k4k4q3nk | success✓ | alert_engine 加 robot_alert_store_errors_total + Alertmanager 规则 |
+| #60 | e2e 30k 落库 Docker 验证 | 仍未验证#1 | cnb-a2r-1k4k4q3mq | pending | 真实 TimescaleDB，断言 >=30000，禁 mock 替身 |
+| #61 | robot_metadata last_seen/is_online 写入 | G-6 | cnb-hn1-1k4k4q3m8 | pending | 批量化更新，offline 规则读 is_online 列 |
+| #62 | 前端 ECharts 按需引入瘦身 | C1 | cnb-579-1k4k4q3jt | pending | echarts/core 按需 use，禁 CDN/删实际图表 |
+| #63 | 任务级多机器人协同仿真 | G-7 | cnb-d5s-1k4k4q3e7 | pending | simulator/task_sim.py，禁假相关/GPU |
+| #64 | CNB→GitHub 自动同步 | C4 | cnb-n4i-1k4k4q3c0 | pending | .cnb.yml job + secret 注入，禁明文 token |
+
+> 7 个构建均已触发（00:11:41Z），workMode=true 已核验（抽样 cnb-sar 为 success+workMode✓）。AI 积分未耗尽，派发链路正常。
+
+## 七、累计待办 / 风险（截至 2026-10-11）
+
+1. **第一轮 8 个 success 分支待合并**（feat/order-20/21/24/25 + auto/contract-as-code-18 / observability-exporters-471a / order26-frontend-resilience / alert-closure-2e09）：方向已核验无误，经 @codebuddy 的 PR 合入 main 后跑回归 `tsc --noEmit` + `vite build` + `import app.main`。
+2. **第二轮 7 单（#58–#64）待回收核验**：等 @codebuddy 产出分支后按 SOP 三点 diff。
+3. **订单 23（#44 / cnb-ml1）** 仍 pending 且无明确分支，需跟进（k6 mqtt_pub.js + mock_fleet）。
+4. **订单 16（#55）/ 18（#40）** 构建 pending，等产出分支。
+5. STATUS.md 的 e2e 30k（#60 已覆盖）、第三方 D-xxx 缺陷属另一清单，未随本批派工。
