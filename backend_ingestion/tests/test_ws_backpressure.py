@@ -450,46 +450,86 @@ class TestAuthOrderPreserved:
         assert "robots" in first["data"]
 
 
-# ------------------------------------------------------- 约束② 告警转发仍在
+# ------------------------------------------- 约束② 告警转发仍在（#71 RAW 通道）
 
-class TestAlertChannelStillForwarded:
-    """ISSUE #73 约束②：不得去掉 `chan_alerts` 转发（前端告警流唯一数据源）。"""
+class TestRawFramesFromHub:
+    """ISSUE #71 融合：ws_hub 节拍扇出经 `enqueue_raw` 投递**预序列化**帧。
 
-    def test_pump_routes_alerts_channel(self):
-        """`_ws_pump_pubsub` 必须把 `robot:alerts` 映射成 alert 信封。
+    RAW 通道必须完整继承 #73 的分级语义：遥测可丢（丢最旧）、告警永丢不得；
+    且发送协程对 RAW 帧走 `send_text` 直发（一份序列化 → N 连接复用的落点）。
+    """
 
-        直接喂假 pubsub，断言入队结果是 `alert` 类型 —— 这比"读代码看有没有
-        那个 if"可靠：有人把 `chan_alerts` 分支删掉时这条会红。
+    def test_raw_telemetry_sent_verbatim_via_send_text(self):
+        """RAW 帧必须原样 `send_text`，不得再过一遍 send_json（重复序列化）。"""
+
+        class RecordingWS:
+            def __init__(self) -> None:
+                self.texts: list[str] = []
+                self.json_sent: list[dict] = []
+
+            async def send_text(self, text: str) -> None:
+                self.texts.append(text)
+
+            async def send_json(self, envelope: dict) -> None:
+                self.json_sent.append(envelope)
+
+        async def drive() -> tuple[RecordingWS, int]:
+            ws = RecordingWS()
+            ob = WsOutbound(ws, maxsize=10)
+            ob.start()
+            ob.enqueue_raw("telemetry", '{"type":"telemetry","data":{"robot_id":"r1"}}')
+            await _settle()
+            ob._task.cancel()
+            await asyncio.gather(ob._task, return_exceptions=True)
+            return ws, ob.sent_count
+
+        ws, sent = asyncio.run(drive())
+        assert sent == 1
+        assert ws.texts == ['{"type":"telemetry","data":{"robot_id":"r1"}}'], (
+            "RAW 帧必须逐字节原样 send_text（字符串在连接间复用的前提）"
+        )
+        assert ws.json_sent == [], "RAW 帧不得走 send_json（那会每连接重复序列化）"
+
+    def test_raw_alert_survives_telemetry_overflow(self):
+        """队列被 RAW 遥测塞满后，RAW 告警仍必须送到（走预留区，永不丢）。"""
+
+        async def drive() -> tuple[WsOutbound, list[str]]:
+            ob = WsOutbound(DrainingWS(), maxsize=2, alert_slack=4)
+            for i in range(5):  # 远超软上限 2 → 一路丢最旧
+                ob.enqueue_raw("telemetry", f'{{"n":{i}}}')
+            ob.enqueue_raw("alert", '{"type":"alert"}')
+            return ob, ob.drain_nowait()
+
+        ob, frames = asyncio.run(drive())
+        assert ob.telemetry_dropped > 0, "RAW 遥测超限必须触发丢最旧"
+        assert '{"type":"alert"}' in frames, "RAW 告警必须留下"
+        assert ob.alerts_deferred == 0, "有预留余量时 RAW 告警不应顺延"
+
+    def test_drop_oldest_never_eats_raw_alert(self):
+        """回归护栏：丢最旧的判据必须是白名单（是遥测才可丢）。
+
+        第一版用 `item[0] is not ALERT` 判可丢 —— `_RAW_ALERT` 哨兵对象
+        `is not` 字符串恒真，队首若是预序列化告警就会被静默吃掉。
         """
-        import json
+        from app.ws_backpressure import _RAW_ALERT, _RAW_TELEMETRY  # noqa: F401
 
-        import app.main as main
+        async def drive() -> tuple[WsOutbound, list[str]]:
+            ob = WsOutbound(DrainingWS(), maxsize=2, alert_slack=4)
+            ob.enqueue_raw("alert", '{"type":"alert","n":0}')  # 队首是告警
+            ob.enqueue_raw("telemetry", '{"n":1}')
+            ob.enqueue_raw("telemetry", '{"n":2}')  # 顶满软上限
+            ob.enqueue_raw("telemetry", '{"n":3}')  # 触发丢最旧 → 必须丢 '{"n":1}'
+            return ob, ob.drain_nowait()
 
-        alerts_channel = settings.chan_alerts
-        stream_channel = settings.chan_stream_all
+        ob, frames = asyncio.run(drive())
+        assert '{"type":"alert","n":0}' in frames, "队首告警不得被丢最旧逻辑吃掉"
+        assert '{"n":1}' not in frames, "被丢的必须是**最旧的遥测**"
 
-        class FakePubSub:
-            async def listen(self):
-                yield {
-                    "type": "message",
-                    "channel": stream_channel,
-                    "data": json.dumps({"robot_id": "humanoid-001"}),
-                }
-                yield {
-                    "type": "message",
-                    "channel": alerts_channel,
-                    "data": json.dumps({"robot_id": "humanoid-001", "rule_id": "motor_temp"}),
-                }
-
-        async def drive() -> WsOutbound:
-            ob = WsOutbound(DrainingWS(), maxsize=10)
-            await main._ws_pump_pubsub(ob, FakePubSub())
-            return ob
-
-        ob = asyncio.run(drive())
-        kinds = [e["type"] for e in ob.drain_nowait()]
-        assert "alert" in kinds, f"chan_alerts 未被转发：{kinds}"
-        assert "telemetry" in kinds, f"chan_stream_all 未被转发：{kinds}"
+    def test_metrics_include_hub_counters(self):
+        """中枢指标必须存在（改造是否生效的观测面，缺失即回退到逐条直发）。"""
+        text = metrics.render()[0].decode()
+        assert "robot_backend_ws_hub_frames_total" in text
+        assert "robot_backend_ws_hub_coalesced_total" in text
 
 
 # -------------------------------------------------------------- 指标与配置

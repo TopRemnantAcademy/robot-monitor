@@ -76,6 +76,13 @@ ALERT_OVERFLOW_SLACK = 64
 #: 顺带把"这条连接还发得出去吗"验掉，不需要第二个并发源。
 _HEARTBEAT = object()
 
+# ---- 预序列化帧通道（ISSUE #71 融合设计）----
+# ws_hub 的节拍扇出把每帧**只序列化一次**（一份发布 → 多连接复用），入队的是
+# 现成的 JSON 文本。队列项的 kind 用哨兵对象而非字符串，与 dict 信封通道
+# 绝不混淆；droppability 仍按 telemetry/alert 分级（见 _drop_oldest_telemetry）。
+_RAW_TELEMETRY = object()
+_RAW_ALERT = object()
+
 
 class WsOutbound:
     """单条 WS 连接的出站通道：有界队列 + 独立发送协程。
@@ -164,6 +171,19 @@ class WsOutbound:
         else:
             self._enqueue_telemetry(kind, envelope)
 
+    def enqueue_raw(self, kind: str, text: str) -> None:
+        """预序列化帧入队（ws_hub 节拍扇出专用）。语义与 `enqueue` 完全一致。
+
+        区别仅在载荷形态：`text` 是 hub **已经序列化好**的 JSON 字符串，
+        发送协程走 `send_text` 直发，不再每连接重复 `json.dumps` ——
+        这是「一份序列化 → N 连接复用」的落点（ISSUE #71 的核心收益）。
+        droppability 与 dict 通道相同：遥测可丢（丢最旧）、告警永丢不得。
+        """
+        if kind == ALERT:
+            self._enqueue_raw_alert(text)
+        else:
+            self._enqueue_raw_telemetry(text)
+
     def _enqueue_telemetry(self, kind: str, envelope: dict) -> None:
         # 【判据是"遥测**自己**的额度"，不是物理容量】
         # 物理容量里多出来的那截是**留给告警的**。若这里按物理容量判断，
@@ -201,28 +221,48 @@ class WsOutbound:
         except asyncio.QueueFull:
             self.alerts_deferred += 1
 
+    def _enqueue_raw_telemetry(self, text: str) -> None:
+        """预序列化遥测入队，判据与 `_enqueue_telemetry` 相同（软上限 + 丢最旧）。"""
+        if self._queue.qsize() >= self._telemetry_limit:
+            dropped = self._drop_oldest_telemetry()
+            if dropped is None:
+                self.telemetry_merged += 1
+                return
+            self.telemetry_dropped += 1
+        try:
+            self._queue.put_nowait((_RAW_TELEMETRY, text))
+        except asyncio.QueueFull:  # pragma: no cover - 丢帧后必有空位
+            self.telemetry_dropped += 1
+
+    def _enqueue_raw_alert(self, text: str) -> None:
+        """预序列化告警入队：同样只走预留区，**永不丢**（同 `_enqueue_alert`）。"""
+        try:
+            self._queue.put_nowait((_RAW_ALERT, text))
+        except asyncio.QueueFull:
+            self.alerts_deferred += 1
+
     def _drop_oldest_telemetry(self) -> tuple | None:
         """从队首起找第一帧遥测并移除，返回被丢的元组；找不到返回 None。
 
-        队列里可能有三种东西，必须分开对待：
-          - `(kind, envelope)` 元组，`kind` 为 `"telemetry"` → 可丢；
-          - `(kind, envelope)` 元组，`kind` 为 `"alert"`     → **不可丢**，跳过；
-          - `_HEARTBEAT` 裸哨兵（`object()`）               → 可丢，但**没有下标**。
+        队列里可能有四种东西，必须分开对待：
+          - `(TELEMETRY, envelope)`        → 可丢；
+          - `(_RAW_TELEMETRY, text)`       → 可丢（hub 预序列化遥测，同遥测语义）；
+          - `(ALERT/​_RAW_ALERT, ...)`      → **不可丢**，跳过；
+          - `_HEARTBEAT` 裸哨兵（`object()`）→ 可丢，但**没有下标**。
 
-        ⚠️ 这个函数第一版写的是 `if item[0] != ALERT`，漏了第三种：
-        哨兵是裸 object，`item[0]` 直接抛 `TypeError: 'object' object is not
-        subscriptable`。异常从 `enqueue` 冒出去，调用方（转发循环）把它当
-        "Redis 出错"吞掉，那一帧告警就无声消失了 —— 实测混流 67 条告警会
-        少 1 条，且只在"哨兵恰好排到队首且队列满"时才现形，属于最难查的一类。
+        ⚠️ 判据必须是「是遥测才可丢」的白名单，**不是** `item[0] is not ALERT`：
+        后者会把 `_RAW_ALERT` 也当成可丢（哨兵对象 `is not` 字符串恒真），
+        一旦队首恰好是一条预序列化告警，它就会被静默丢弃 —— 违反
+        「告警不可丢」的硬约束。此函数第一版还漏过第三种（哨兵下标越界
+        TypeError），教训同源：对队列里的东西做**穷举**，别做排除。
         """
         items = self._queue._queue  # 直接访问 deque：从头部定位才可能 O(1) 丢最旧
         for i, item in enumerate(items):
             if item is _HEARTBEAT:
                 del items[i]
                 return None  # 丢哨兵不算丢遥测（无信封可返回）
-            # 用 `item[0] is not ALERT` 而非 `!=`：kind 是字符串常量，
-            # 身份比较足够且不受 == 重载影响；分类只认"是遥测"这一种可丢对象。
-            if item[0] is not ALERT:
+            kind = item[0]
+            if kind is TELEMETRY or kind is _RAW_TELEMETRY:
                 del items[i]
                 return item
         return None
@@ -234,19 +274,26 @@ class WsOutbound:
         self._task = asyncio.create_task(self._sender())
 
     async def _sender(self) -> None:
-        """串行发送。**唯一**调用 `ws.send_json` 的地方。
+        """串行发送。**唯一**调用 `ws.send_json` / `ws.send_text` 的地方。
 
         为什么串行而非并发：WebSocket 帧必须有序，并发 send 会让帧交错，
         客户端 JSON.parse 直接炸。串行也让"背压"这件事有单一定义点 ——
         阻塞只发生在这一处，队列长度就是唯一的积压度量。
+
+        载荷双形态：dict 信封走 `send_json`（本连接自行序列化）；
+        hub 预序列化的 RAW 帧走 `send_text` 直发 —— 每帧的 json.dumps
+        全进程只做一次（ISSUE #71 的核心收益），客户端拿到的字节完全一致。
         """
         try:
             while True:
                 item = await self._queue.get()
                 if item is _HEARTBEAT:
                     continue
-                kind, envelope = item
-                await self._ws.send_json(envelope)
+                kind, payload = item
+                if kind is _RAW_TELEMETRY or kind is _RAW_ALERT:
+                    await self._ws.send_text(payload)
+                else:
+                    await self._ws.send_json(payload)
                 self.sent_count += 1
                 self.last_sent_at = asyncio.get_running_loop().time()
                 if self._on_sent is not None:

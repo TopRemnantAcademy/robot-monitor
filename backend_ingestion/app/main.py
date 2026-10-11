@@ -35,7 +35,7 @@ from app.auth.deps import authenticate_ws_token, current_active_user
 from app.auth.router import router as auth_router
 from app.auth.users import RobotUser, close_engine
 from app.config import settings
-from app.db.redis import close_redis, get_redis
+from app.db.redis import close_redis
 from app.db.session import close_pool, ping
 from app.logging_json import configure_json_logging
 from app.schemas.api import (
@@ -47,6 +47,7 @@ from app.services import liveness, mqtt_subscriber, state_cache
 from app.services.batch_writer import BatchWriter
 from app import ws_probe
 from app.ws_backpressure import WsOutbound
+from app.ws_hub import hub as ws_hub
 
 # 订单 16 T4：单行 JSON 日志，供订单 07 的 openobserve/loki 直接采集。
 # 必须在**其它 logger 首次输出之前**配置 —— uvicorn 的启动日志会经由根 logger，
@@ -65,6 +66,9 @@ async def lifespan(app: FastAPI):
     # WS 合成探针：客户端视角验活（缺口 G-3）。它只读指标，不碰数据流；
     # 关闭时 `run()` 立刻 return，任务自灭，无需在 shutdown 里特判。
     probe_task = asyncio.create_task(ws_probe.run())
+    # WS 出站中枢（ISSUE #71）：全进程唯一的 Redis pubsub 订阅 + 100ms 合并节拍。
+    # 必须先于第一个 WS 连接 start()，否则早期连接扇不到增量帧。
+    await ws_hub.start()
     app.state.writer_task = writer_task
     app.state.mqtt_task = mqtt_task
     app.state.probe_task = probe_task
@@ -96,6 +100,9 @@ async def lifespan(app: FastAPI):
     #   ③ 探针只是旁观者，没有存量要冲刷，直接取消（它 slept 在 interval 上）。
     probe_task.cancel()
     await asyncio.gather(probe_task, return_exceptions=True)
+    #   ④ WS 中枢：先停扇出与共享订阅，再清注册表 —— 必须在 close_redis 之前，
+    #      否则 _consume_loop 会对着已关的 Redis 退避重连、日志刷屏。
+    await ws_hub.stop()
     await close_pool()
     await close_redis()
     # auth 的 ORM engine 是独立于 asyncpg 业务池的（fastapi-users 要 SQLAlchemy 会话），
@@ -482,28 +489,6 @@ async def _ws_watch_disconnect(ws: WebSocket) -> None:
             return
 
 
-async def _ws_pump_pubsub(outbound: WsOutbound, pubsub) -> None:
-    """把 Redis 两个频道搬进出站队列。**永不 await 到 ws 上**。
-
-    这是 ISSUE #73 性能护栏的落点：改前每条消息都 `await ws.send_json(...)`，
-    慢客户端会把这里阻塞住，进而拖住整个 Redis 转发。现在只做 `enqueue`
-    （内部 `put_nowait`），本协程的推进速度只取决于 Redis，与客户端快慢无关。
-    """
-    async for msg in pubsub.listen():
-        if msg.get("type") != "message":
-            continue
-        try:
-            data = json.loads(msg["data"])
-        except json.JSONDecodeError:
-            continue
-        channel = msg["channel"]
-        if channel == settings.chan_alerts:
-            # 告警**不可丢**：走告警专用入队路径，占用队列里为告警预留的额度。
-            outbound.enqueue("alert", {"type": "alert", "data": data})
-        elif channel == settings.chan_stream_all:
-            outbound.enqueue("telemetry", {"type": "telemetry", "data": data})
-
-
 async def _ws_try_close(ws: WebSocket, *, code: int, reason: str) -> None:
     """尽力关闭连接。已经断开时静默 —— 关闭动作与 `finally` 回收是两条独立路径，
     这里失败不代表回收会失败（不回抛，避免把 watchdog 变成未处理的任务异常）。"""
@@ -551,8 +536,6 @@ async def ws_robots(ws: WebSocket, token: str | None = Query(default=None)):
     _ws_active += 1
     log.info("ws connected", extra={"ws_active": _ws_active})
 
-    r = await get_redis()
-
     # ① 首帧：100 台全量快照
     try:
         snap = await state_cache.snapshot(settings.robot_ids)
@@ -562,10 +545,12 @@ async def ws_robots(ws: WebSocket, token: str | None = Query(default=None)):
 
     # ② 增量：遥测 + 告警（alert 通道是前端告警流的唯一数据源）
     #
-    # ISSUE #73：出站改走**有界队列 + 独立发送协程**（见 app/ws_backpressure.py）。
-    # 改前这里是 `await ws.send_json(...)`：慢客户端会让 uvicorn 的写缓冲涨到高水位，
-    # 此后每帧都阻塞在 drain 上，**把 Redis 转发循环本身拖住** —— 既让该连接内存
-    # 无界增长，也让所有健康客户端一起挨饿。现在本循环只做 put_nowait（永不 await）。
+    # ISSUE #71 + #73 融合架构：本连接创建**自己的**有界出站通道（#73），
+    # 然后注册到进程级 WS 中枢（#71）—— 中枢持有全进程唯一的 Redis 订阅，
+    # 按 100ms 节拍把合并后的帧 enqueue_raw 进各连接的队列。
+    # 本协程自此只做两件事：注册中枢 + 等连接断开。
+    # 改前这里是「每连接自己订阅 chan_stream_all/chan_alerts + 逐条 send_json」，
+    # N 个大屏 = N 份 Redis 订阅 + N × 1000 msg/s 的序列化/发送，线性膨胀。
     outbound = WsOutbound(
         ws,
         maxsize=settings.ws_outbound_queue_size,
@@ -574,10 +559,9 @@ async def ws_robots(ws: WebSocket, token: str | None = Query(default=None)):
     outbound.start()
 
     # 断开侦测（ISSUE #73：不能只靠"发得出去"判断连接还在）。
-    # 这个循环原先只**出站**（await pubsub.listen + send），从不读 WebSocket，
-    # 于是客户端走了它也不知道 —— 连接会一直挂到 TCP 超时，`_ws_active` 虚高。
-    # 这里起一个专职任务 `await ws.receive()`：客户端正常关闭、崩溃、拔网线
-    # （走 RST/FIN）都会让 receive 抛 WebSocketDisconnect，从而立刻进 finally。
+    # 中枢扇出只入队不读 WebSocket，必须有专职任务 `await ws.receive()`：
+    # 客户端正常关闭、崩溃、拔网线（走 RST/FIN）都会让 receive 抛
+    # WebSocketDisconnect，从而立刻进 finally。
     disconnect = asyncio.create_task(_ws_watch_disconnect(ws))
 
     # 背压/心跳超时守卫：队列**持续满**或发送**持续阻塞**超过阈值即主动摘连接。
@@ -585,31 +569,15 @@ async def ws_robots(ws: WebSocket, token: str | None = Query(default=None)):
     # 不能指望 TCP 自己发现半开连接（可能几分钟），必须主动判死。
     watchdog = asyncio.create_task(_ws_watchdog(ws, outbound))
 
-    pubsub = r.pubsub()
-    # ⚠️ `subscribe()` **必须在 try 之内**：它要连 Redis，无 Redis/Redis 掉线时
-    # 会抛（或挂起）。放在 try 之外的话，异常会绕过 finally，
-    # `_ws_active` 就再也回不来 —— 这不是理论风险，本文件上一版正是这么写的，
-    # 实测后果：`ws connected` 有日志、`ws disconnected` 永远没有，计数只增不减。
-    # 换句话说，"回收计数"这条硬承诺要求**从拿到 pubsub 那一刻起就受 finally 保护**。
+    # 注册动作受 try/finally 保护：注册成功到注销之间的任何退出路径，
+    # finally 里的 unregister 都必须执行 —— 否则中枢会向已关闭的连接继续
+    # 入队（队列有界不会泄漏内存，但 client_count 会虚高）。
     try:
-        await pubsub.subscribe(settings.chan_stream_all, settings.chan_alerts)
-        # 主循环与"客户端是否还在"**赛跑**：谁先结束就收谁。
-        # 用 `wait(FIRST_COMPLETED)` 而不是在 async-for 里轮询 `disconnect.done()`：
-        # listen() 空闲时会阻塞在 await 上，循环体根本不执行，轮询形同虚设
-        # （这正是改前连接挂死、`_ws_active` 只增不减的机制）。
-        pump = asyncio.create_task(_ws_pump_pubsub(outbound, pubsub))
-        await asyncio.wait({pump, disconnect}, return_when=asyncio.FIRST_COMPLETED)
-        # 断开任务先结束 → 客户端已走。把 pump 停掉，别让它在 finally 里继续入队。
-        # 反过来（pump 先结束，如 Redis 掉线）也停掉侦测任务，两个都得收干净。
-        for task in (pump, disconnect):
-            task.cancel()
-        await asyncio.gather(pump, disconnect, return_exceptions=True)
-        # 把 pump 的真实异常（Redis 断开等）如实抛出，交给下面的 except 记日志；
-        # 不抛的话 Redis 掉线会表现为"连接静默结束"，运维在日志里什么都看不到。
-        if not disconnect.done() and pump.done() and not pump.cancelled():
-            exc = pump.exception()
-            if exc is not None:
-                raise exc
+        await ws_hub.register(outbound)
+        # 等客户端断开（watcher 内部 receive 到 disconnect 即返回）。
+        # 中枢断连（Redis 掉线）不再影响单条连接：_consume_loop 自带退避重连，
+        # 连接只是暂时收不到增量帧 —— 比旧实现"Redis 一抖全部连接退出重连"更稳。
+        await disconnect
     except WebSocketDisconnect:
         pass
     except Exception:
@@ -646,8 +614,14 @@ async def ws_robots(ws: WebSocket, token: str | None = Query(default=None)):
                 outbound.alerts_deferred,
             )
 
-        # ③ 停任务、退订 Redis。顺序：先停发送协程，再退订 ——
-        #    反过来的话，发送协程可能在 Redis 已关之后仍尝试写一条队列里的帧。
+        # ③ 从中枢注销（尽快：下一节拍起不再向本连接入队）。
+        #    每个 await 单独 try，任一失败都不影响其它清理 与①的计数。
+        try:
+            await ws_hub.unregister(outbound)
+        except BaseException:  # noqa: BLE001 —— 含 CancelledError，见本段头注释
+            log.debug("ws hub unregister failed during teardown", exc_info=True)
+
+        # ④ 停任务、停发送协程。顺序：先停发送协程相关的任务，再关出站 ——
         #    每个 await 单独 try，任一失败都不影响其它清理 与①的计数。
         watchdog.cancel()
         disconnect.cancel()
@@ -660,8 +634,3 @@ async def ws_robots(ws: WebSocket, token: str | None = Query(default=None)):
             await outbound.aclose()
         except BaseException:  # noqa: BLE001
             log.debug("ws outbound close failed during teardown", exc_info=True)
-        try:
-            await pubsub.unsubscribe(settings.chan_stream_all, settings.chan_alerts)
-            await pubsub.aclose()
-        except BaseException:  # noqa: BLE001
-            log.debug("ws pubsub teardown failed", exc_info=True)

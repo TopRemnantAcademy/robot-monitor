@@ -99,6 +99,13 @@ class Settings(BaseSettings):
     # 出站队列满时，允许为**不可丢的告警**额外扩张的格数（见 ws_backpressure）。
     ws_alert_overflow_slack: int = 64
 
+    # ---- WS 广播合并节拍（ISSUE #71）----
+    # 服务端出站中枢的扇出周期。100ms = 10Hz，与上游遥测速率（100 台 × 10Hz）
+    # 及前端 100ms 节流（spec/03 §6）同拍：每节拍每台机器人只扇出**最新一帧**，
+    # 中间帧在「覆盖写」里被自然合并（ws_hub_coalesced_total 计数即证据）。
+    # 调大 → 服务端更省、但看板更新变钝；调小 → 更实时、但序列化/发送次数回升。
+    ws_broadcast_interval_ms: float = 100.0
+
     # ---- 认证 / RBAC（订单 15）----
     # JWT 签名密钥。**必须**由 .env 注入，不设默认值 —— 有空默认值等于库里带着
     # 一个人人可签的密钥，任何拿到源码的人都能伪造 admin token（AGENTS.md §5）。

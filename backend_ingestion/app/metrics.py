@@ -233,3 +233,29 @@ ws_slow_client_evicted = Counter(
     "因出站队列持续满或心跳超时被主动 close 的慢客户端连接数",
     registry=registry,
 )
+
+# ---------------------------------------------------------------------------
+# ISSUE #71：WS 出站 fan-out 中枢（服务端广播合并）
+#
+# 为什么单列一组：#73 的指标回答"单条连接跟不跟得上"，
+# 这两个指标回答"**服务端**是否还在随客户端数线性膨胀"：
+#   - frames_total{kind}    实际**发送**的 WS 帧总数（含每连接各一份）。
+#     改造前 ≈ N × 1000/s（每连接独立订阅 + 逐条 send）；
+#     改造后 ≈ N × (节拍 × 机器人数)，序列化全进程只做一份。
+#   - coalesced_total       在节拍内被**合并掉**的遥测条数（覆盖写掉的中间帧）。
+#     它 > 0 才证明「每台机器人只保留最新一帧」真的在生效；
+#     恒为 0 说明节拍没起作用（收到的每条都被单独发了）。
+# 不设 ws_hub_clients：连接注册与 ws_robots 的 _ws_active 一一对应，
+# 再发一个同源 Gauge 就是 #72 刚清完的双轨命名故技复萌。
+# ---------------------------------------------------------------------------
+ws_hub_frames_total = Counter(
+    "robot_backend_ws_hub_frames_total",
+    "WS 出站中枢实际发送的帧数，按 kind 区分（telemetry=合并后每机器人一帧 / alert=逐条不合并）",
+    labelnames=("kind",),
+    registry=registry,
+)
+ws_hub_coalesced_total = Counter(
+    "robot_backend_ws_hub_coalesced_total",
+    "被节拍合并掉的遥测帧数（本节拍收到数 - 实际扇出数；>0 = 每机器人只留最新一帧生效）",
+    registry=registry,
+)
