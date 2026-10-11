@@ -162,7 +162,14 @@ MQTT topic `robots/{robot_id}/telemetry`，JSON payload（见 `spec/01` 的 `tel
                 "joint_temperatures": { "...": 42.1 }, "joint_torques": { "...": 3.4 } } ] }
 ```
 
-数据来源优先 `robot_status_10s` 连续聚合；聚合未就绪时回退查 `robot_telemetry` 原始表并做 `time_bucket`。
+数据来源优先 `robot_history_10s` 连续聚合（ISSUE #76 新增，含 JSONB 关节列，
+刷新 end_offset=10s / schedule=30s）；聚合未就绪时回退查 `robot_telemetry` 原始表并做 `time_bucket`。
+
+> 修订（ISSUE #76）：原稿写「优先 `robot_status_10s`」，但该视图**不含** JSONB 关节列，
+> Drawer 热力图与第三条折线需要它们，落地时被迫一直走原始表 —— 于是「优先连续聚合」
+> 这句话在实现里从未成立。现新增 `robot_history_10s`（与 `robot_status_10s` 并存，
+> 后者仍服务看板最新态），使「优先连续聚合」第一次真正落地。
+> 视图定义见 `infra/init.sql §5.1`，含 JSONB 的可行性依据（`last()` 为 anyelement 多态）。
 
 ### 5.4 后端内部
 

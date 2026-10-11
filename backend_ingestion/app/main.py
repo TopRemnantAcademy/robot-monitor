@@ -218,9 +218,26 @@ async def history(
 ):
     """最近 N 分钟历史（供 Drawer 折线 + 关节热力图）。
 
-    说明：spec/00 §4.3 的连续聚合 `robot_status_10s` **不含 JSONB 关节列**，
-    而 Drawer 的热力图需要 joint_temperatures，故此处直接对原始表做 time_bucket，
-    一次性取回标量 + 关节字典，避免二次查询。
+    数据源（ISSUE #76 起）：**优先查连续聚合 `robot_history_10s`**，
+    该视图的刷新策略是 end_offset=10s / schedule=30s，延迟在数十秒内
+    （见 infra/init.sql §5.1），满足 Drawer 对「最近数据」的要求。
+
+    为什么不再直查原始表：
+      原实现对 `robot_telemetry` 做 `time_bucket`，过滤 `time >= now() - 5min`。
+      100 台 × 10Hz = 1000 行/s ⇒ 5 分钟窗口内单台约 3000 行、全量扫描更多；
+      每次 Drawer 打开都要在原始 hypertable 上区间扫描 + 逐行 last() 聚合。
+      改查连续聚合后，同一查询只读「已预聚合的 ~30 行/台」，扫描量下降三个数量级
+      —— 这是真快，不是靠 Histogram 观测出来的假快。
+
+    为什么保留原始表回退：
+      连续聚合在 `REFRESH` 之前是空的（`WITH NO DATA` + 策略异步刷新），
+      冷启动、策略 job 未跑到、或刷新窗口尚未覆盖时，直查会返回空数组 →
+      Drawer 曲线恒空。回退保证「聚合未就绪 ≠ 端点失效」，
+      语义与 spec/00 §5.3「聚合未就绪时回退原始表」逐字一致。
+
+    `last(joint_positions, time)` 在两个分支中都**必须保留** ——
+    它是 Drawer 第三条折线「角度(rad)」的唯一数据源
+    （RobotDetailDrawer.tsx:88），缺了它曲线恒为 null（订单 16 踩过的坑）。
     """
     try:
         res_s = _parse_resolution(resolution)
@@ -228,24 +245,36 @@ async def history(
         raise HTTPException(status_code=400, detail=f"invalid resolution: {resolution}")
 
     span_s = max(1, minutes) * 60
-    sql = """
-        SELECT time_bucket(($1 || ' seconds')::interval, time) AS bucket,
+    # 两个分支的 SELECT 列**逐字对齐**（列名即响应字段名），
+    # 这样结果映射只写一份，不会出现「聚合加了列、回退漏了列」的漂移。
+    # 差别只在 FROM / WHERE：聚合表按 `bucket` 过滤，原始表按 `time` 过滤。
+    _select = """
+        SELECT {bucket}                          AS bucket,
                robot_id,
-               last(status_code, time)        AS status_code,
-               last(battery_pct, time)        AS battery_pct,
-               max(max_joint_temp)            AS max_joint_temp,
-               last(joint_temperatures, time) AS joint_temperatures,
-               last(joint_torques, time)      AS joint_torques,
+               last(status_code, time)           AS status_code,
+               last(battery_pct, time)           AS battery_pct,
+               max(max_joint_temp)               AS max_joint_temp,
+               last(joint_temperatures, time)    AS joint_temperatures,
+               last(joint_torques, time)         AS joint_torques,
                -- joint_positions 必须返回：前端 Drawer 的第三条折线「角度(rad)」
-               -- 数据源就是 point.joint_positions[joint]（RobotDetailDrawer.tsx:93）。
+               -- 数据源就是 point.joint_positions[joint]（RobotDetailDrawer.tsx:88）。
                -- 缺失时该曲线恒为 null，图上永远空白。
-               last(joint_positions, time)    AS joint_positions
-        FROM robot_telemetry
+               last(joint_positions, time)       AS joint_positions
+        FROM {source}
         WHERE robot_id = $2
-          AND time >= now() - (($3 || ' seconds')::interval)
+          AND {time_col} >= now() - (($3 || ' seconds')::interval)
         GROUP BY bucket, robot_id
         ORDER BY bucket
     """
+    sql_cagg = _select.format(
+        bucket="bucket", time_col="bucket", source="robot_history_10s"
+    )
+    sql_raw = _select.format(
+        bucket="time_bucket(($1 || ' seconds')::interval, time)",
+        time_col="time",
+        source="robot_telemetry",
+    )
+
     from app.db.session import get_pool
 
     pool = await get_pool()
@@ -256,14 +285,31 @@ async def history(
     # try/finally 而非只在成功时 observe：**查询失败的那一刻往往正是最慢的一次**
     # （超时/锁等待），漏掉它会让 p99 被系统性低估。
     _t0 = time.perf_counter()
+    # source 只在**查询成功返回**后才计数，故初值 None 而非 "cagg" ——
+    # 若在异常路径上也记成 cagg，会把「聚合查询失败」混进「聚合命中」的分子里，
+    # 恰好把最该暴露的故障掩盖成最理想的状态。
+    source: str | None = None
     try:
         async with pool.acquire() as conn:
-            rows = await conn.fetch(sql, str(res_s), robot_id, str(span_s))
+            rows = await conn.fetch(sql_cagg, str(res_s), robot_id, str(span_s))
+            if not rows:
+                # 聚合未就绪（策略尚未刷新到该窗口）→ 回退原始表。
+                # 只在**空结果**时回退，不无条件双查：非空路径不该付第二遍代价，
+                # 否则改连续聚合的收益会被自己抵消掉。
+                source = "raw"
+                rows = await conn.fetch(sql_raw, str(res_s), robot_id, str(span_s))
+            else:
+                source = "cagg"
     except Exception as exc:
         log.exception("history query failed")
         return JSONResponse(status_code=503, content={"detail": f"query failed: {exc}"})
     finally:
         metrics.history_latency_seconds.observe(time.perf_counter() - _t0)
+        # 数据源标签：p95 下降到底是「真变快」还是「查了别的表」，靠这个区分。
+        # 异常路径 source 仍为 None，不计入任一 series（失败由 `m` 之外的方式暴露：
+        # 503 + log.exception），避免把失败伪装成命中。
+        if source is not None:
+            metrics.history_source.labels(source=source).inc()
 
     # 注意：这里**刻意不校验 robot_metadata**。init.sql 预置了 100 台机器人，
     # 但「从未上报过数据的机器人」查历史必然是空数组——这是正常语义而非错误。

@@ -121,6 +121,21 @@ history_latency_seconds = Histogram(
     registry=registry,
 )
 
+# /history 的数据源计数（ISSUE #76）。
+#
+# 为什么必须有：改查连续聚合后 p95 会下降，但**「变快」单独看无法自证**
+# —— 空结果、缓存、甚至查询写错都会让耗时变短。把数据源拆成 cagg/raw 两个
+# series 后，p95 下降与 `source="cagg"` 占比上升必须同时成立才算真的生效；
+# 反之若 `source="raw"` 长期占多数，说明聚合没跟上（刷新策略或调度有问题），
+# 这正是回归该发现的那类故障，而不是靠人眼盯。
+# label 只有 2 个取值，基数可控（对比 mqtt_received 刻意不带 robot_id 的理由）。
+history_source = Counter(
+    "robot_monitor_history_source_total",
+    "/history 实际命中数据源：cagg=连续聚合 robot_history_10s / raw=原始表回退",
+    ("source",),
+    registry=registry,
+)
+
 
 def render() -> tuple[bytes, str]:
     """返回 (body, content_type)，供 FastAPI 的 /metrics 端点直接使用。"""

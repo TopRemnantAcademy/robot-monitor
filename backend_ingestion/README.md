@@ -109,9 +109,21 @@ spec/01 §4.2 允许 `copy_records_to_table` **或** 批量 `execute`。本机�
 
 > 另注：`command_timeout` 只覆盖普通语句，**拦不住**被锁阻塞的批量写入（见上）。
 
-## 关于 /history 的实现说明
+## 关于 /history 的实现说明（ISSUE #76 修订）
 
-`spec/00 §4.3` 的连续聚合 `robot_status_10s` **不含 JSONB 关节列**，
-而 Drawer 的关节热力图需要 `joint_temperatures`，
-故此处直接对 `robot_telemetry` 原始表做 `time_bucket`，
-一次取回标量 + 关节字典，避免二次查询。
+`spec/00 §4.3` 的 `robot_status_10s` **不含 JSONB 关节列**，而 Drawer 的热力图与
+第三条折线需要它们，故本端点此前一直直查 `robot_telemetry` 原始表并 `time_bucket`。
+
+ISSUE #76 新增了专用连续聚合 **`robot_history_10s`**（`infra/init.sql §5.1`，
+含 `joint_temperatures / joint_positions / joint_torques` 三列），`/history` 改为：
+**先查聚合 → 结果为空则回退原始表**。
+
+- 为什么 JSONB 能进连续聚合：`last(value, time)` 首参是 **anyelement 多态**
+  （timescaledb `src/agg_bookend.c` 的 `ts_last_sfunc`），与 INTEGER 走同一路径；
+  内部 partialize 亦为 `ANYELEMENT`（`sql/partialize_finalize.sql`）。
+  原「缺列」是当初没写，不是能力不支持。
+- 为什么不复用 `robot_status_10s`：它已被 R-08 §A4 / `test_integration.sh` /
+  `tests/e2e` 三处断言，改列会动摇既有验收面；且两者消费方不同（看板最新态 vs 单机历史）。
+- 为什么保留回退：`WITH NO DATA` 的聚合在首次刷新前是空的，不回退则冷启动期曲线恒空。
+- 每条 SQL 列清单由 `tests/test_history_source.py` 逐字锁死（两分支不得漂移，
+  且三个关节列必须同时在），防「一侧加列另一侧漏列」的间歇故障。

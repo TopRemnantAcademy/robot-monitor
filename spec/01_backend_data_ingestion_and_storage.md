@@ -97,7 +97,8 @@ SQLAlchemy 2.0 Async 模式：
   否则前端告警流永远为空。
 - **REST 路由（Drawer 依赖，不可省略）**：
   - `GET /robots/{robot_id}/history?minutes=5&resolution=10s` → 最近 N 分钟历史点（优先查
-    `robot_status_10s`，聚合未就绪时回退 `robot_telemetry` + `time_bucket`）。
+    `robot_history_10s`（ISSUE #76 新增，含 JSONB 关节列），聚合未就绪时回退
+    `robot_telemetry` + `time_bucket`；两条分支都必须带 `joint_positions`）。
   - `GET /robots` → 100 台最新状态（WS 之外兜底）。
   - `GET /healthz` → 200。`status` 反映依赖可达性（`ok`/`degraded`），
     并暴露 `db` / `retries` / `rejected` 与丢行三元组

@@ -118,6 +118,76 @@ SELECT add_continuous_aggregate_policy('robot_status_10s',
     schedule_interval => INTERVAL '1 minute',
     if_not_exists => TRUE);
 
+-- 5.1 连续聚合（ISSUE #76）：`/history` 专用，**含 JSONB 关节列**
+--
+-- 为什么必须新增而不是扩展 robot_status_10s：
+--   ① `/history` 需要 joint_positions / joint_temperatures / joint_torques 三列
+--      （Drawer 三条折线与热力图的数据源），而 robot_status_10s 只有标量列；
+--   ② robot_status_10s 已被 R-08 §A4（视图存在）、test_integration.sh:172、
+--      tests/e2e/test_e2e_30k.py 三处断言，改列会动摇这些既有验收面；
+--   ③ 两个聚合的**消费方与刷新语义不同**：robot_status_10s 服务「看板最新态」，
+--      本视图服务「单机历史回放」。合表会让两者的保留/刷新策略互相牵制。
+--
+-- 为什么 JSONB 能进连续聚合（源码实证，非推测；本机拉取 timescaledb 2.13.1
+-- 源码核对，路径见 external/SOURCES.md 的 N21 条目）：
+--   ① `last(value, time)` 的第一参数是 **anyelement 多态**
+--      （timescaledb `src/agg_bookend.c:433` 的 `ts_last_sfunc` 签名
+--      `last(internal, anyelement, "any")`），JSONB 与 INTEGER 走同一条路径，
+--      不存在「JSONB 不支持聚合」这一限制；旧注释所述「缺列」是当初**没写**，不是不能写。
+--   ② 内部 partialize 走 `_timescaledb_functions.partialize_agg(arg ANYELEMENT)`
+--      （`sql/partialize_finalize.sql:6-7`），同样多态，JSONB 可直接落物化表。
+--   ③ 列序无隐藏要求：连续聚合的**分区列**由 `time_bucket` 所在的 TargetEntry
+--      在 targetlist 中的位置决定（`tsl/src/continuous_aggs/finalize.c:875-877`
+--      设置 `matpartcolno/matpartcolname`），并不要求它排第一位；
+--      `caggtimebucket_validate` 只校验「恰好一个 time_bucket，且作用于分区列」
+--      （`tsl/src/continuous_aggs/common.c:152-206`），不校验位置。
+--      下面仍把 bucket 放首列 —— 读起来最直观，且与 robot_status_10s 保持同构。
+--
+-- 键名与列名逐字对齐 robot_status_10s 的既有列，外加三个关节列；
+-- 列名即 `/history` 返回体的字段名，两侧漂移会直接让 Drawer 变空。
+CREATE MATERIALIZED VIEW IF NOT EXISTS robot_history_10s
+WITH (timescaledb.continuous) AS
+SELECT
+    time_bucket('10 seconds', time) AS bucket,
+    robot_id,
+    last(status_code, time)        AS status_code,
+    last(battery_pct, time)        AS battery_pct,
+    max(max_joint_temp)            AS max_joint_temp,
+    last(error_code, time)         AS error_code,
+    -- ↓ 三个 JSONB 关节列：ISSUE #76 的核心，也是订单 16「漏列→曲线恒空」的反面教训。
+    --   joint_positions 尤其不能省：它是 Drawer 第三条折线「角度(rad)」的唯一数据源
+    --   （frontend_dashboard/src/components/RobotDetailDrawer.tsx:88）。
+    last(joint_temperatures, time) AS joint_temperatures,
+    last(joint_positions, time)    AS joint_positions,
+    last(joint_torques, time)      AS joint_torques
+FROM robot_telemetry
+GROUP BY bucket, robot_id
+WITH NO DATA;
+
+-- 刷新策略：比 robot_status_10s 更激进（end_offset 10 秒，schedule 30 秒）。
+--
+-- 为什么不能照抄 1 分钟：
+--   ISSUE #76 验收明确要求「Drawer 打开时数据必须是最近的，可接受数秒延迟，
+--   但不能陈旧到分钟级」。robot_status_10s 的 end_offset=1min + schedule=1min
+--   最坏情况 2 分钟才可见，正好踩在禁止线上。
+--   end_offset=10s（= 一个桶宽）：只刷新「已确定的桶」，不触碰仍在写入的当前桶，
+--     避免同一桶先物化、后被新数据补齐导致的不一致；
+--   schedule=30s：3 倍于桶宽，单次增量刷新只扫 30 秒窗口，
+--     在 1000 行/s 下约 3 万行，远低于原始表 30 万行的全量扫描。
+--   start_offset 保留 1 小时：与 robot_status_10s 一致，也给「迟到数据补写」留窗口。
+SELECT add_continuous_aggregate_policy('robot_history_10s',
+    start_offset => INTERVAL '1 hour',
+    end_offset   => INTERVAL '10 seconds',
+    schedule_interval => INTERVAL '30 seconds',
+    if_not_exists => TRUE);
+
+-- 5.2 物化表索引说明（**不需要手工建**）
+-- 连续聚合会自动为每个分组列建 `(<分组列>, <分区列> DESC)` 索引
+--   （tsl/src/continuous_aggs/create.c:303-306 的注释与
+--    mattablecolumninfo_add_mattable_index 实现）。
+-- `/history` 的谓词是 `robot_id = $2 AND bucket >= now() - span`，
+-- 正落在自动索引 (robot_id, bucket DESC) 上，无需额外 DDL。
+
 -- 6. 数据生命周期：压缩 + 保留（I-17）
 --
 -- 为什么必须有：chunk_time_interval = 7 天，不设保留策略磁盘只增不减。

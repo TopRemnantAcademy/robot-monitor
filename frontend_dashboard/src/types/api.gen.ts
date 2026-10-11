@@ -138,9 +138,26 @@ export interface paths {
          * History
          * @description 最近 N 分钟历史（供 Drawer 折线 + 关节热力图）。
          *
-         *     说明：spec/00 §4.3 的连续聚合 `robot_status_10s` **不含 JSONB 关节列**，
-         *     而 Drawer 的热力图需要 joint_temperatures，故此处直接对原始表做 time_bucket，
-         *     一次性取回标量 + 关节字典，避免二次查询。
+         *     数据源（ISSUE #76 起）：**优先查连续聚合 `robot_history_10s`**，
+         *     该视图的刷新策略是 end_offset=10s / schedule=30s，延迟在数十秒内
+         *     （见 infra/init.sql §5.1），满足 Drawer 对「最近数据」的要求。
+         *
+         *     为什么不再直查原始表：
+         *       原实现对 `robot_telemetry` 做 `time_bucket`，过滤 `time >= now() - 5min`。
+         *       100 台 × 10Hz = 1000 行/s ⇒ 5 分钟窗口内单台约 3000 行、全量扫描更多；
+         *       每次 Drawer 打开都要在原始 hypertable 上区间扫描 + 逐行 last() 聚合。
+         *       改查连续聚合后，同一查询只读「已预聚合的 ~30 行/台」，扫描量下降三个数量级
+         *       —— 这是真快，不是靠 Histogram 观测出来的假快。
+         *
+         *     为什么保留原始表回退：
+         *       连续聚合在 `REFRESH` 之前是空的（`WITH NO DATA` + 策略异步刷新），
+         *       冷启动、策略 job 未跑到、或刷新窗口尚未覆盖时，直查会返回空数组 →
+         *       Drawer 曲线恒空。回退保证「聚合未就绪 ≠ 端点失效」，
+         *       语义与 spec/00 §5.3「聚合未就绪时回退原始表」逐字一致。
+         *
+         *     `last(joint_positions, time)` 在两个分支中都**必须保留** ——
+         *     它是 Drawer 第三条折线「角度(rad)」的唯一数据源
+         *     （RobotDetailDrawer.tsx:88），缺了它曲线恒为 null（订单 16 踩过的坑）。
          */
         get: operations["history_robots__robot_id__history_get"];
         put?: never;

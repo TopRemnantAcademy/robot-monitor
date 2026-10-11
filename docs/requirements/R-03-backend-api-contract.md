@@ -79,9 +79,17 @@ Drawer 的 ECharts 折线与关节热力图数据源。
 | 400 | `resolution` 非整数倍（显式语义） | `{"detail": "invalid resolution: 2.5s"}` |
 | 503 | 数据库查询失败 | `{"detail": "query failed: ..."}` |
 
-**实现说明（重要）**：连续聚合 `robot_status_10s` 不含 JSONB 关节列，
-而热力图需要 `joint_temperatures`，故本端点直接对 `robot_telemetry` 原始表做 `time_bucket`，
-一次取回标量 + 关节字典。**不要改成只查连续聚合**，否则热力图无数据。
+**实现说明（ISSUE #76 修订）**：本端点改查连续聚合 `robot_history_10s`
+（`infra/init.sql §5.1`），它**含**三个 JSONB 关节列，刷新策略 end_offset=10s / schedule=30s。
+
+- 原实现直查 `robot_telemetry` 原始表做 `time_bucket`：100 台 × 10Hz ⇒ 5 分钟窗口内
+  单台约 3000 行、每次 Drawer 打开都全区间扫描 + 逐行 `last()` 聚合。
+- 现改为「先查聚合、空则回退原始表」。回退**必须保留**：
+  `WITH NO DATA` 的聚合在首次刷新前是空的，不回退的话冷启动期间 Drawer 曲线恒空。
+- **`joint_positions` 在两条分支中都不得删** —— 它是 Drawer 第三条折线「角度(rad)」
+  的唯一数据源（订单 16 曾因漏列致曲线恒空，见 STATUS.md §六第 2 条）。
+- 数据源有 `robot_monitor_history_source_total{source=cagg|raw}` 计数，
+  用于把 p95 的下降归因到「真的换了数据源」而非空结果。
 
 ### 4.1 `resolution` 解析语义（Issue #74 锁定）
 
