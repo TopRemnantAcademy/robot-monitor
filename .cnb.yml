@@ -16,6 +16,11 @@ $:
           by:
             - ci/contract-gate.Dockerfile
             - backend_ingestion/requirements.txt
+            # package.json 必须一起列出：`by` 是 Dockerfile 可 COPY 文件的**白名单**，
+            # 未列出的文件不进构建上下文（官方 grammar.md 明确警告），
+            # 缺它 → Dockerfile 第 32 行 COPY frontend_dashboard/package.json 直接
+            # `failed to calculate checksum ... not found`（构建 cnb-jgf-1k4k4c9db 实测）。
+            - frontend_dashboard/package.json
             - frontend_dashboard/package-lock.json
       env:
         JWT_SECRET: ci-openapi-export-placeholder
@@ -60,6 +65,11 @@ $:
           by:
             - ci/contract-gate.Dockerfile
             - backend_ingestion/requirements.txt
+            # package.json 必须一起列出：`by` 是 Dockerfile 可 COPY 文件的**白名单**，
+            # 未列出的文件不进构建上下文（官方 grammar.md 明确警告），
+            # 缺它 → Dockerfile 第 32 行 COPY frontend_dashboard/package.json 直接
+            # `failed to calculate checksum ... not found`（构建 cnb-jgf-1k4k4c9db 实测）。
+            - frontend_dashboard/package.json
             - frontend_dashboard/package-lock.json
       env:
         # 只为让 `Settings()` 在 import 期实例化成功（jwt_secret 无默认值）。
