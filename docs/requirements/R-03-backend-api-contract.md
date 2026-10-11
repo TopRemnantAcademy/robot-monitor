@@ -110,6 +110,25 @@ Drawer 的 ECharts 折线与关节热力图数据源。
 > 的 `HISTORY_RESOLUTION`），落在合法区间，本次收紧**不会**触发新的 400。
 
 
+### 4.1 `resolution` 解析语义（Issue #74 锁定）
+
+**不得静默截断**。旧实现用 `int(float(...))` 收尾，把 `2.5s` 变成 2 秒、
+`1.5m` 变成 60 秒、`0.5m` 变成 1 秒 —— HTTP 200，无任何提示，图上点数与预期对不上。
+
+现行规则（`backend_ingestion/app/main.py:_parse_resolution`）：
+
+| 输入 | 结果 | 说明 |
+| :--- | :--- | :--- |
+| `10s` / `30s` / `1s` | 10 / 30 / 1 秒 | 整秒，合法 |
+| `1m` / `5m` | 60 / 300 秒 | 整分钟，合法（响应回显为 `60s` / `300s`，单位规范化） |
+| `2.5s` / `1.5m` / `0.5m` | **400** | 非整数倍，显式拒绝（`resolution must be a whole number of seconds`） |
+| `500ms` / `0s` | **400** | 下限 1s（不得放宽，避免压垮查询） |
+| `abc` / `10` / 空串 | **400** | 格式非法（必须带 `s`/`m` 单位） |
+
+> 前端 Drawer 仅传 `resolution=10s`（`frontend_dashboard/src/api/robotHistory.ts:13`
+> 的 `HISTORY_RESOLUTION`），落在合法区间，本次收紧**不会**触发新的 400。
+
+
 ## 5. WebSocket `/ws/robots`
 
 **出站统一信封（强制）**
