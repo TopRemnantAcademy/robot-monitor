@@ -29,6 +29,13 @@ main:
   # 一个 docker 镜像塞两套运行时会让镜像臃肿且版本漂移；用 stage 级 `image`
   # 各自用官方镜像，装什么完全由本仓 requirements/package.json 决定。
   #
+  # ⚠️ 关于 stage 的 shell（本文件曾因此 CI 红）：CNB 用 `sh`（dash）执行 script，
+  #   而 dash **不支持** `set -o pipefail`——脚本第 1 行即报
+  #   `sh: 1: set: Illegal option -o pipefail`，退出码 2（实测 push 的 npm-test 1417ms 挂掉）。
+  #   修法：script 里只保留 dash 支持的 `set -eu`（`-u` 未定义变量、`-e` 失败即停仍生效）。
+  #   不要改成 `set -euo pipefail`，也不要用 stage 的 `bash:` 字段（不是合法字段，Schema 会拒）。
+  #   若将来确需 pipefail，得在 script 内显式 `bash -c '...'` 包一层。
+  #
   # ⚠️ 关于 `pytest` 的 testpaths（pytest.ini，订单 24 §4.1 禁止修改）：
   #   `pytest`（裸跑）走 testpaths = tests + alert_engine/tests；
   #   `backend_ingestion/tests` 刻意**不在**其内（顶层包 `app` 与 alert_engine 冲突，
@@ -40,7 +47,7 @@ main:
       stages:
         - name: pytest
           script: |
-            set -euo pipefail
+            set -eu
             python -m pip install --no-cache-dir -r alert_engine/requirements.txt
             python -m pip install --no-cache-dir -r backend_ingestion/requirements.txt
             # httpx<0.28：starlette 0.36.3 的 TestClient 仍用 `Client(app=...)` 旧签名，
@@ -54,7 +61,7 @@ main:
         - name: npm-test
           image: node:20
           script: |
-            set -euo pipefail
+            set -eu
             cd frontend_dashboard
             # npm ci 走 package-lock.json，锁定 vitest/testing-library/msw 的精确版本。
             npm ci
@@ -66,7 +73,7 @@ main:
       stages:
         - name: pytest
           script: |
-            set -euo pipefail
+            set -eu
             python -m pip install --no-cache-dir -r alert_engine/requirements.txt
             python -m pip install --no-cache-dir -r backend_ingestion/requirements.txt
             python -m pip install --no-cache-dir pytest 'httpx<0.28'
@@ -78,7 +85,7 @@ main:
         - name: npm-test
           image: node:20
           script: |
-            set -euo pipefail
+            set -eu
             cd frontend_dashboard
             # npm ci 走 package-lock.json，锁定 vitest/testing-library/msw 的精确版本。
             npm ci
