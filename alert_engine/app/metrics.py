@@ -48,6 +48,18 @@ robots_online = Gauge(
     "ticker 线当前判定为在线的机器人数（分母固定 100）",
     registry=registry,
 )
+#: 告警**写库失败**的条数（`increase(...[5m]) > 0` 即触发）。
+#:
+#: 为什么必须单独埋这一颗：这条链路上 `robot_alert_emitted_total` 只统计
+#: "去重后决定发出"，`store.save()` 的 insert 异常此前**只进日志**。
+#: 于是「DB 无记录」与「告警根本没触发」在监控上完全同形 ——
+#: 看板照常变绿，审计对账却少数据（G-4）。有了它，二者才可区分：
+#: emitted 在涨而 store_errors 也在涨 ⇒ 告警确实判定出来了，只是没落库。
+store_errors = Counter(
+    "robot_alert_store_errors_total",
+    "robot_alert 写库失败的告警条数（>0 即「有告警但 DB 里查不到」，看板绿是假的）",
+    registry=registry,
+)
 
 
 class _Handler(BaseHTTPRequestHandler):

@@ -50,7 +50,8 @@ for m in robot_backend_queue_depth robot_backend_mqtt_dropped_total \
          robot_backend_telemetry_written_total; do
   if grep -rq "$m" backend_ingestion/app/metrics.py; then ok "$m (backend)"; else bad "$m 未定义"; fi
 done
-for m in robot_alert_emitted_total robot_alert_robots_online; do
+for m in robot_alert_emitted_total robot_alert_robots_online \
+         robot_alert_store_errors_total; do
   if grep -rq "$m" alert_engine/app/metrics.py; then ok "$m (alert)"; else bad "$m 未定义"; fi
 done
 

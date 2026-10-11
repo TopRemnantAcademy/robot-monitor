@@ -44,6 +44,23 @@ groups:
         annotations:
           summary: "告警引擎 down（此时机器人告警全部停摆）"
 
+      # 告警的告警：判定出来了却没写进 robot_alert（G-4）。
+      # 为什么用 increase 而不是 > 0：Counter 单调，进程活着的整个生命周期
+      # `robot_alert_store_errors_total > 0` 一旦触发就永不复位，成了永远在响的
+      # 死警报；increase(...[5m]) 只看最近 5 分钟**又在失败**，故障恢复后自动静默。
+      # for: 0s —— 落库失败不是抖动，不需要"连续 N 秒"再确认。
+      - alert: AlertStoreFailing
+        expr: increase(robot_alert_store_errors_total[5m]) > 0
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "5 分钟内 {{ $value }} 条告警写库失败"
+          description: >-
+            robot_alert 落库异常（connection / permission / 磁盘）。
+            注意此时前端告警流可能照常滚动（PUBLISH 与 INSERT 解耦），
+            看板变绿不代表告警已被持久化 —— 以 DB 对账为准。
+
       - alert: TimescaleDown
         expr: up{job="postgres"} == 0
         for: 15s
