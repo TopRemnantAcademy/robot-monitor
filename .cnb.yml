@@ -20,6 +20,29 @@ $:
         workspace_preflight: on
 
 main:
+  push:
+    - name: sync-to-github
+      # 单向同步 CNB main -> github.com/TopRemnantAcademy/robot-monitor（Issue #64 / C4）
+      # 凭据只从密钥仓库 imports 注入（GIT_USERNAME / GIT_ACCESS_TOKEN），禁止明文写入本文件；
+      # 未配置密钥时 mustache 占位符会原样透传，插件认证必然失败 —— 流水线会显式报红，不静默。
+      imports:
+        - https://cnb.cool/flow.237/RobotMonitor-secrets/-/blob/main/github-sync.yml
+      stages:
+        # 本流水线自身 push 触发的构建（数组形式下 key 为 "pipeline-0"）跳过，
+        # 避免与 crontab/npc 流水线的推送互相触发造成回环。
+        - name: push main to github origin
+          if: '[ "$CNB_PIPELINE_KEY" != "pipeline-0" ]'
+          image: tencentcom/git-sync
+          settings:
+            target_url: https://github.com/TopRemnantAcademy/robot-monitor.git
+            auth_type: https
+            username: ${GIT_USERNAME}
+            password: ${GIT_ACCESS_TOKEN}
+            branch: main
+            force: false
+            push_tags: false
+            git_user: RobotMonitor Sync
+            git_email: robot-monitor@users.noreply.github.com
   "crontab: 0 0,6,12,18 * * *":
     - stages:
         - name: pm-call
