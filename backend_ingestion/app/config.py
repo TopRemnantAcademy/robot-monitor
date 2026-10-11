@@ -78,6 +78,27 @@ class Settings(BaseSettings):
     # 此时端口尚未 accept，立刻探必然失败。给一个窗口避免开局一次假失败。
     ws_probe_startup_grace_s: float = 5.0
 
+    # ---- WS 出站背压 + 心跳（ISSUE #73）----
+    # 每条连接一个**有界**出站队列：转发循环只做 put_nowait（永不 await），
+    # 慢客户端不再拖住 Redis 转发循环，内存最坏 = 队列长度 × 帧大小（常量）。
+    # 依据：100 台 × 10Hz = 1000 msg/s，若逐帧 await 到慢客户端，一个卡死的
+    # 浏览器标签就能把整个进程的内存拖无界（见 app/ws_backpressure.py 头注释）。
+    #
+    # 取值 500：约 0.5s 的遥测（1000 msg/s）—— 足以吸收移动网络的抖动，
+    # 又不至于让"丢掉最旧帧"这件事被延迟到用户可见。配大等于回到无界。
+    ws_outbound_queue_size: int = 500
+    # 心跳哨兵的投放间隔。发送协程每轮循环投一个，它会被 `await send_json`
+    # 牵着经过真实的背压/断开判定 —— 于是"投得进去"本身就是一次验活。
+    # 浏览器侧的半开连接（拔网线但 TCP 未断）会表现为发送阻塞，
+    # 该连接随后被 `ws_outbound_close_timeout_s` 兜底摘除。
+    ws_heartbeat_interval_s: float = 15.0
+    # 单条连接在队列持续满 / 发送持续阻塞时的最长容忍时间，超时主动 close。
+    # 上限存在是为了让"慢客户端断网后计数在心跳超时内归位"成为可验证的承诺，
+    # 而不是"等 TCP 自己发现"（可能几分钟）。默认 60s ≈ 3 个心跳周期。
+    ws_outbound_close_timeout_s: float = 60.0
+    # 出站队列满时，允许为**不可丢的告警**额外扩张的格数（见 ws_backpressure）。
+    ws_alert_overflow_slack: int = 64
+
     # ---- 认证 / RBAC（订单 15）----
     # JWT 签名密钥。**必须**由 .env 注入，不设默认值 —— 有空默认值等于库里带着
     # 一个人人可签的密钥，任何拿到源码的人都能伪造 admin token（AGENTS.md §5）。

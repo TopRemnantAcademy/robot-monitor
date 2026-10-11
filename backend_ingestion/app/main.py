@@ -46,6 +46,7 @@ from app.schemas.api import (
 from app.services import liveness, mqtt_subscriber, state_cache
 from app.services.batch_writer import BatchWriter
 from app import ws_probe
+from app.ws_backpressure import WsOutbound
 
 # 订单 16 T4：单行 JSON 日志，供订单 07 的 openobserve/loki 直接采集。
 # 必须在**其它 logger 首次输出之前**配置 —— uvicorn 的启动日志会经由根 logger，
@@ -405,6 +406,113 @@ def _as_dict(v) -> dict:
     return {}
 
 
+async def _ws_watchdog(ws: WebSocket, outbound: WsOutbound) -> None:
+    """慢客户端/半开连接的主动摘除（ISSUE #73）。
+
+    两条判死依据，任一命中即 `close`：
+
+    1. **出站队列持续满**：说明客户端消费速度长期低于 1000 msg/s 的流入速度。
+       偶尔满一下是正常的（网络抖动被队列吸收），持续满等于"这条连接已经跟不上"，
+       继续挂着只会让队列反复丢帧、日志刷屏。
+    2. **发送持续阻塞**：`last_sent_at` 长时间不前进 = 发送协程卡在 `send_json`
+       上 = TCP 写缓冲满了但内核没报错（典型的"客户端拔网线"半开连接）。
+       TCP 自己发现这种状态可能要好几分钟，`_ws_active` 就会虚高到那时。
+
+    为什么用独立的 watchdog 而不是复用心跳：心跳只证明"队列还塞得进去"，
+    它**不读**客户端是否还在消费（服务端发得出去≠客户端收得到）。
+    两者一起才覆盖了 ISSUE #73 验收里"慢客户端"与"断网客户端"两种形态。
+    """
+    timeout = settings.ws_outbound_close_timeout_s
+    # 用 event loop 单调时钟：墙钟会被 NTP 跳变，超时判定不能受它影响。
+    loop = asyncio.get_running_loop()
+    full_since: float | None = None
+    last_sent_marker = 0
+
+    while True:
+        await asyncio.sleep(settings.ws_heartbeat_interval_s)
+        now = loop.time()
+
+        # 心跳哨兵：让发送协程有机会在"没有可见遥测"时也验一次活。
+        outbound.heartbeat()
+        metrics.outbound_queue_depth.set(outbound.qsize)
+
+        # 判据 1：队列持续满
+        if outbound.is_saturated:
+            if full_since is None:
+                full_since = now
+            elif now - full_since >= timeout:
+                log.warning(
+                    "ws slow client evicted: outbound queue full for %.0fs", now - full_since
+                )
+                metrics.ws_slow_client_evicted.inc()
+                await _ws_try_close(ws, code=1001, reason="slow consumer")
+                return
+        else:
+            full_since = None
+
+        # 判据 2：发送协程长时间没有推进
+        if outbound.sent_count == last_sent_marker:
+            if outbound.last_sent_at is not None and now - outbound.last_sent_at >= timeout:
+                log.warning("ws half-open client evicted: no successful send for %.0fs", timeout)
+                metrics.ws_slow_client_evicted.inc()
+                await _ws_try_close(ws, code=1001, reason="heartbeat timeout")
+                return
+        else:
+            last_sent_marker = outbound.sent_count
+
+
+async def _ws_watch_disconnect(ws: WebSocket) -> None:
+    """等到客户端真的断开为止，然后返回（供主循环 `asyncio.wait` 赛跑）。
+
+    【为什么必须显式读 WebSocket】
+    改前这个端点只**出站**（await pubsub.listen → send_json），从不调用 receive。
+    于是客户端走了服务端也不知道：TCP 半开时内核不报错，`_ws_active` 会一直虚高，
+    与订单 16 防"假绿"的初衷相悖（ISSUE #73 根因第二条）。这里 `await ws.receive()`
+    让 Starlette 把 FIN/RST 或客户端 close 帧翻译成异常/返回，从而即时感知。
+
+    【为什么不像 ws_probe 那样回 pong】
+    Starlette 在 `receive()` 层**原生**处理 `"ping"`：客户端发文本 `ping`，
+    它会自动回 `pong`（`starlette/websockets.py` 的 receive_text 分支）。
+    本函数只需消费消息、不解析内容 —— 解析是应用层自己的事，
+    而契约里客户端并不发业务上行帧（WS 是单向下行流，见 spec/00 §5.2）。
+    """
+    while True:
+        message = await ws.receive()
+        if message["type"] == "websocket.disconnect":
+            return
+
+
+async def _ws_pump_pubsub(outbound: WsOutbound, pubsub) -> None:
+    """把 Redis 两个频道搬进出站队列。**永不 await 到 ws 上**。
+
+    这是 ISSUE #73 性能护栏的落点：改前每条消息都 `await ws.send_json(...)`，
+    慢客户端会把这里阻塞住，进而拖住整个 Redis 转发。现在只做 `enqueue`
+    （内部 `put_nowait`），本协程的推进速度只取决于 Redis，与客户端快慢无关。
+    """
+    async for msg in pubsub.listen():
+        if msg.get("type") != "message":
+            continue
+        try:
+            data = json.loads(msg["data"])
+        except json.JSONDecodeError:
+            continue
+        channel = msg["channel"]
+        if channel == settings.chan_alerts:
+            # 告警**不可丢**：走告警专用入队路径，占用队列里为告警预留的额度。
+            outbound.enqueue("alert", {"type": "alert", "data": data})
+        elif channel == settings.chan_stream_all:
+            outbound.enqueue("telemetry", {"type": "telemetry", "data": data})
+
+
+async def _ws_try_close(ws: WebSocket, *, code: int, reason: str) -> None:
+    """尽力关闭连接。已经断开时静默 —— 关闭动作与 `finally` 回收是两条独立路径，
+    这里失败不代表回收会失败（不回抛，避免把 watchdog 变成未处理的任务异常）。"""
+    try:
+        await ws.close(code=code, reason=reason)
+    except Exception:
+        log.debug("ws close during eviction failed (already gone)", exc_info=True)
+
+
 # ------------------------------------------------------------------ WebSocket
 
 @app.websocket("/ws/robots")
@@ -453,33 +561,107 @@ async def ws_robots(ws: WebSocket, token: str | None = Query(default=None)):
         log.exception("snapshot failed")
 
     # ② 增量：遥测 + 告警（alert 通道是前端告警流的唯一数据源）
+    #
+    # ISSUE #73：出站改走**有界队列 + 独立发送协程**（见 app/ws_backpressure.py）。
+    # 改前这里是 `await ws.send_json(...)`：慢客户端会让 uvicorn 的写缓冲涨到高水位，
+    # 此后每帧都阻塞在 drain 上，**把 Redis 转发循环本身拖住** —— 既让该连接内存
+    # 无界增长，也让所有健康客户端一起挨饿。现在本循环只做 put_nowait（永不 await）。
+    outbound = WsOutbound(
+        ws,
+        maxsize=settings.ws_outbound_queue_size,
+        alert_slack=settings.ws_alert_overflow_slack,
+    )
+    outbound.start()
+
+    # 断开侦测（ISSUE #73：不能只靠"发得出去"判断连接还在）。
+    # 这个循环原先只**出站**（await pubsub.listen + send），从不读 WebSocket，
+    # 于是客户端走了它也不知道 —— 连接会一直挂到 TCP 超时，`_ws_active` 虚高。
+    # 这里起一个专职任务 `await ws.receive()`：客户端正常关闭、崩溃、拔网线
+    # （走 RST/FIN）都会让 receive 抛 WebSocketDisconnect，从而立刻进 finally。
+    disconnect = asyncio.create_task(_ws_watch_disconnect(ws))
+
+    # 背压/心跳超时守卫：队列**持续满**或发送**持续阻塞**超过阈值即主动摘连接。
+    # 这是"慢客户端断网后 _ws_active 在心跳超时内归位"的实现（ISSUE #73 验收第三条）：
+    # 不能指望 TCP 自己发现半开连接（可能几分钟），必须主动判死。
+    watchdog = asyncio.create_task(_ws_watchdog(ws, outbound))
+
     pubsub = r.pubsub()
-    await pubsub.subscribe(settings.chan_stream_all, settings.chan_alerts)
+    # ⚠️ `subscribe()` **必须在 try 之内**：它要连 Redis，无 Redis/Redis 掉线时
+    # 会抛（或挂起）。放在 try 之外的话，异常会绕过 finally，
+    # `_ws_active` 就再也回不来 —— 这不是理论风险，本文件上一版正是这么写的，
+    # 实测后果：`ws connected` 有日志、`ws disconnected` 永远没有，计数只增不减。
+    # 换句话说，"回收计数"这条硬承诺要求**从拿到 pubsub 那一刻起就受 finally 保护**。
     try:
-        async for msg in pubsub.listen():
-            if msg.get("type") != "message":
-                continue
-            try:
-                data = json.loads(msg["data"])
-            except json.JSONDecodeError:
-                continue
-            channel = msg["channel"]
-            if channel == settings.chan_alerts:
-                await ws.send_json({"type": "alert", "data": data})
-            elif channel == settings.chan_stream_all:
-                await ws.send_json({"type": "telemetry", "data": data})
+        await pubsub.subscribe(settings.chan_stream_all, settings.chan_alerts)
+        # 主循环与"客户端是否还在"**赛跑**：谁先结束就收谁。
+        # 用 `wait(FIRST_COMPLETED)` 而不是在 async-for 里轮询 `disconnect.done()`：
+        # listen() 空闲时会阻塞在 await 上，循环体根本不执行，轮询形同虚设
+        # （这正是改前连接挂死、`_ws_active` 只增不减的机制）。
+        pump = asyncio.create_task(_ws_pump_pubsub(outbound, pubsub))
+        await asyncio.wait({pump, disconnect}, return_when=asyncio.FIRST_COMPLETED)
+        # 断开任务先结束 → 客户端已走。把 pump 停掉，别让它在 finally 里继续入队。
+        # 反过来（pump 先结束，如 Redis 掉线）也停掉侦测任务，两个都得收干净。
+        for task in (pump, disconnect):
+            task.cancel()
+        await asyncio.gather(pump, disconnect, return_exceptions=True)
+        # 把 pump 的真实异常（Redis 断开等）如实抛出，交给下面的 except 记日志；
+        # 不抛的话 Redis 掉线会表现为"连接静默结束"，运维在日志里什么都看不到。
+        if not disconnect.done() and pump.done() and not pump.cancelled():
+            exc = pump.exception()
+            if exc is not None:
+                raise exc
     except WebSocketDisconnect:
         pass
     except Exception:
         log.exception("ws error")
     finally:
+        # 【这一整段的写法是被 bug 逼出来的，别改成"顺手的样子"】
+        #
+        # 本函数可能因**任务被 cancel** 而进 finally（uvicorn 关停、TestClient
+        # 上下文退出都会）。任务已处于取消态时，finally 里**任何未加保护的 await
+        # 都可能立刻抛出 CancelledError 并中断整个 finally 块** ——
+        # 实测最小复现：
+        #     try: await sleep(999)
+        #     finally: await x(); n -= 1      # x() 抛错 → n -= 1 永不执行
+        # 若照直觉写在最后面（本文件第一版就是），一旦 `outbound.aclose()` 抛错，
+        # `_ws_active -= 1` 就被跳过，计数只增不减 —— 正是本单要修的那个"假数据"。
+        #
+        # 因此规则是：**清理动作逐个 try 包住，计数配平放最前且不依赖任何清理成功**。
+        # 回收计数是硬承诺（ISSUE #73 验收第三条），不能让它有机会被跳过。
+
+        # ① 先配平计数。此处没有任何 await，因此**不可能**被取消中断。
+        #    必须与上面的 +1 成对：漏掉它的话，客户端异常断开（浏览器崩溃/网络切换）
+        #    会让计数只增不减，面板上"连接数 47"而实际只有 3 台大屏 ——
+        #    假数据比没数据更糟。
+        _ws_active -= 1
+        log.info("ws disconnected", extra={"ws_active": _ws_active})
+
+        # ② 把本轮连接的背压事实记进指标（同步，无 await，同样不会被中断）。
+        metrics.telemetry_frames_dropped.inc(outbound.telemetry_dropped)
+        metrics.alerts_deferred.inc(outbound.alerts_deferred)
+        if outbound.telemetry_dropped or outbound.alerts_deferred:
+            log.warning(
+                "ws backpressure on close: telemetry_dropped=%d alerts_deferred=%d",
+                outbound.telemetry_dropped,
+                outbound.alerts_deferred,
+            )
+
+        # ③ 停任务、退订 Redis。顺序：先停发送协程，再退订 ——
+        #    反过来的话，发送协程可能在 Redis 已关之后仍尝试写一条队列里的帧。
+        #    每个 await 单独 try，任一失败都不影响其它清理 与①的计数。
+        watchdog.cancel()
+        disconnect.cancel()
+        for task in (watchdog, disconnect):
+            try:
+                await asyncio.gather(task, return_exceptions=True)
+            except BaseException:  # noqa: BLE001 —— 含 CancelledError，见本段头注释
+                pass
+        try:
+            await outbound.aclose()
+        except BaseException:  # noqa: BLE001
+            log.debug("ws outbound close failed during teardown", exc_info=True)
         try:
             await pubsub.unsubscribe(settings.chan_stream_all, settings.chan_alerts)
             await pubsub.aclose()
-        except Exception:
-            pass
-        # 配平上面的 +1。必须与计数点成对出现在 finally 里：
-        # 漏掉它的话，客户端异常断开（浏览器崩溃/网络切换）会让计数只增不减，
-        # 面板上"连接数 47"而实际只有 3 台大屏 —— 假数据比没数据更糟。
-        _ws_active -= 1
-        log.info("ws disconnected", extra={"ws_active": _ws_active})
+        except BaseException:  # noqa: BLE001
+            log.debug("ws pubsub teardown failed", exc_info=True)

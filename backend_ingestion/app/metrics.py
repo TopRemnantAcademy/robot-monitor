@@ -174,3 +174,51 @@ def refresh_gauges(queue_size: int, ws_conns: int) -> None:
     """
     queue_depth.set(queue_size)
     ws_connections.set(ws_conns)
+
+
+# ---------------------------------------------------------------------------
+# ISSUE #73：WS 出站背压 + 心跳
+#
+# 为什么单列一组而不是复用 robot_monitor_ws_connections：
+# 连接数回答"几台大屏挂着"，**不回答"它们还跟得上吗"**。一个慢客户端
+# （移动网络 / 标签页被冻结）连接数照样 +1，却把 1000 msg/s 的出站帧全积在
+# 自己的队列里。下面三个指标就是"谁在拖后腿"的可观测面：
+#   - outbound_queue_depth  Gauge   按连接聚合的出站积压（持续 >0 = 有人消费不动）
+#   - telemetry_frames_dropped_total  Counter 被**丢弃**的遥测帧（内存有界的代价）
+#   - alerts_deferred_total           Counter 因队列满而顺延的告警（>0 = 病态，
+#                                            0 是"告警不可丢"约束生效的证据）
+# 刻意不带 connection label：连接是短生命周期对象，按连接分 label 会让
+# Prometheus 时序无限增长（每次重连都是新 series）。需要下钻时看日志。
+# ---------------------------------------------------------------------------
+
+# 出站积压（每台机器一条 WS 连接，这里取**所有连接的合计**）。
+outbound_queue_depth = Gauge(
+    "robot_monitor_ws_outbound_queue_depth",
+    "所有 /ws/robots 连接出站队列的积压帧数合计（持续 >0 说明有慢客户端）",
+    registry=registry,
+)
+
+# 被丢弃的遥测帧。**遥测可丢、告警不可丢**（ISSUE #73 禁止项第三条）：
+# 这个计数涨是设计内的背压行为，不是故障；它涨而 alerts_deferred_total 恒 0，
+# 恰好证明分级处置按预期工作。
+telemetry_frames_dropped = Counter(
+    "robot_monitor_ws_telemetry_frames_dropped_total",
+    "因出站队列满而被丢弃的遥测帧数（丢最旧，慢客户端的背压代价）",
+    registry=registry,
+)
+
+# 顺延的告警。设计目标恒为 0：告警溢出时队列允许扩容（见 ws_backpressure），
+# 只有几千条告警积压这种病态情形才会让这个数 >0。
+alerts_deferred = Counter(
+    "robot_monitor_ws_alerts_deferred_total",
+    "因出站队列满而顺延的告警帧数（应为 0；>0 说明告警积压，需扩容或摘连接）",
+    registry=registry,
+)
+
+# 被摘除的慢/半开连接数。与连接数 Gauge 互补：连接数掉下来是**结果**，
+# 这个计数是**原因**——运维据此区分"大屏正常关闭"与"被服务端踢掉"。
+ws_slow_client_evicted = Counter(
+    "robot_monitor_ws_slow_client_evicted_total",
+    "因出站队列持续满或心跳超时被主动 close 的慢客户端连接数",
+    registry=registry,
+)
