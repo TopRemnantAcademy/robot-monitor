@@ -11,30 +11,38 @@ AGENTS.md §3 立了两条硬护栏：
 
 | 护栏 | 原文位置 | 当前能否验证 |
 |---|---|---|
-| 后端禁逐条 INSERT，批量满 500 条或 1 秒 | `backend_ingestion/app/config.py:27-29` | ❌ 无 metrics |
-| 前端禁每条 WS 消息重渲染，必须 100ms 节流 | `frontend_dashboard/src/store/robotStore.ts:4-5,84` | ❌ 无任何计数 |
+| 后端禁逐条 INSERT，批量满 500 条或 1 秒 | `backend_ingestion/app/config.py:27-29` | ✅ 订单 19 已接 `robot_backend_*` metrics（`main.py:133` `/metrics`） |
+| 前端禁每条 WS 消息重渲染，必须 100ms 节流 | `frontend_dashboard/src/store/robotStore.ts:4-5,84` + `useRobotWebSocket.ts:19,73` | ❌ 无任何计数（T2 未完成） |
 
-**事实**：护栏写在纸上，**没有任何代码能证明它正在生效**。
-企业验收必问「你凭什么说没重渲染 1000 次/秒」——目前只能嘴说。
+**事实**：后端护栏现已可由订单 19 的 `robot_backend_*` 指标证明正在生效；
+但**前端 100ms 节流仍无任何计数器**（T2 未完成），企业验收问「凭什么说没重渲染」目前前端部分只能嘴说。
 
 ---
 
 ## 1. 任务
 
-### T1 — 后端 `/metrics`（Prometheus 文本格式）
-用 `prometheus-client`（已在 `external/client_python`）。**禁止引入重框架**。
+### T1 — 后端 `/metrics`（Prometheus 文本格式）✅ 已由订单 19 完成
+`/metrics` 路由已在 `backend_ingestion/app/main.py:133` 落地，`render()` 来自
+`backend_ingestion/app/metrics.py`（独立 `CollectorRegistry`，已接 `infra/observability/prometheus.yml`
+的 `robot_backend` job 与 `rules/robot-alerts.yml` 的 PromQL）。**命名前缀用 `robot_backend_*`**，
+与历史告警规则对齐（**不是**本单原稿的 `robot_monitor_*` —— 原稿命名已作废，切勿新建 `robot_monitor_*`）。
 
-必须暴露（命名用 `robot_monitor_` 前缀）：
-| 指标 | 类型 | 说明 |
+订单 19 已实现（5 个）：
+| 已实现指标 | 类型 | 对应原稿意图 |
 |---|---|---|
-| `robot_monitor_batch_queue_size` | Gauge | 队列水位（`batch_queue_maxsize` = 20000，见 `config.py:29`） |
-| `robot_monitor_batch_flush_total` | Counter | 落库批次数（按触发原因 label：`count` / `timeout`） |
-| `robot_monitor_batch_rows_total` | Counter | 落库行数 |
-| `robot_monitor_mqtt_messages_total` | Counter | MQTT 收到消息数（按 `robot_id` label 会爆基数，**不按 robot_id 分**） |
-| `robot_monitor_ws_connections` | Gauge | 当前 WS 连接数 |
-| `robot_monitor_history_latency_seconds` | Histogram | `/history` 耗时 |
+| `robot_backend_queue_depth` | Gauge | 原 `robot_monitor_batch_queue_size`（队列水位，`config.py:29` = 20000） |
+| `robot_backend_batch_flushes_total` | Counter | 原 `robot_monitor_batch_flush_total`（落库批次数） |
+| `robot_backend_telemetry_written_total` | Counter | 原 `robot_monitor_batch_rows_total`（落库行数） |
+| `robot_backend_mqtt_received_total` | Counter | 原 `robot_monitor_mqtt_messages_total`（MQTT 收包，**不按 robot_id 分**） |
+| `robot_backend_mqtt_dropped_total` | Counter | （新增）校验失败丢包，>0 即契约破坏 |
 
-`GET /metrics` 免鉴权（与 `/healthz` 同级）。
+**验收已满足**：`GET /metrics` 免鉴权（与 `/healthz` 同级，见 `main.py:12` 白名单；`/metrics` 无 `Depends`），
+返回 Prometheus 文本，含上述 5 指标。
+
+### T1b — 补齐订单 19 缺的 2 个指标（本单真正剩余后端工作）
+- `robot_backend_ws_connections` Gauge —— 当前 WS 连接数（`ws_robots` 在 `main.py:250`，连接集合计数）
+- `robot_backend_history_latency_seconds` Histogram —— `/history` 耗时（读路径端点）
+- 可选增强：`robot_backend_batch_flushes_total` 加 `reason` label（`count` / `timeout`），便于区分触发原因。
 
 ### T2 — 前端自报重渲染（本单的**关键交付**）
 - 新增 `frontend_dashboard/src/lib/observability.ts`：
@@ -58,8 +66,8 @@ AGENTS.md §3 立了两条硬护栏：
 
 ## 2. 验收标准
 
-- [ ] `GET /metrics` 返回 Prometheus 文本，含 T1 全部 6 个指标名
-- [ ] 压测时 `robot_monitor_batch_queue_size` 有真实波动（不是常量 0）
+- [x] `GET /metrics` 返回 Prometheus 文本，含 `robot_backend_*` 5 指标（订单 19 已落地，`main.py:133` 免鉴权）
+- [ ] 压测时 `robot_backend_queue_depth` 有真实波动（不是常量 0）；补 `robot_backend_ws_connections` / `robot_backend_history_latency_seconds` 后 7 指标齐全
 - [ ] 前端控制台稳定输出 `wsMsgs/storeCommits ≈ 10`（**贴真实截图或 console 文本**）
 - [ ] `cardRenders` 增长速率 ≈ `storeCommits`（不得 ≈ `wsMsgs`）
 - [ ] `OTEL_EXPORTER_OTLP_ENDPOINT` 未设时服务正常启动
@@ -78,5 +86,5 @@ AGENTS.md §3 立了两条硬护栏：
 
 ## 4. 冲突提示
 
-- 与订单 11 同改 `backend_ingestion/app/main.py`：本单加**中间件 + /metrics 路由**，订单 11 加 `Depends`。合并时**两者都要保留**。
-- 与订单 11 同改 `useRobotWebSocket.ts`：订单 11 加 token 拼接，本单加计数。合并保留两者。
+- 与订单 15 同改 `backend_ingestion/app/main.py`：本单加 `/metrics` 路由（**无 `Depends`**，在白名单 `main.py:12`），订单 15 加 `Depends(current_active_user)` 鉴权。两者不冲突，`/metrics` 必须保持免鉴权（否则 Prometheus 抓取失败）。
+- 与订单 15/18 同改 `useRobotWebSocket.ts`：订单 15/18 负责 token 拼接与 WS 契约（`docs/contracts/ws-envelope.schema.json`），本单只加计数观测（T2），合并保留两者。
