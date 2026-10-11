@@ -13,6 +13,17 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379"
     database_url: str = "postgresql://postgres:postgres@localhost:5432/robot_monitor"
 
+    # ---- DB 连接池（订单 17 发现：db.py 一直在读这两个键，config 却没定义）----
+    # `app/db.py:get_pool()` 引用 `settings.db_pool_size` / `settings.db_command_timeout`，
+    # 但本文件此前**没有**这两个字段 —— 于是任何走到 `get_pool()` 的路径（告警落库
+    # `store.save`、metadata 更新、本单的 escalation 扫描）都会抛
+    # `AttributeError: 'Settings' object has no attribute 'db_pool_size'`。
+    # 这是订单 08 引入 `app/pool.py` 时漏掉的配置项，本单为跑通 escalation 补齐。
+    # 命名与 `backend_ingestion/app/config.py` 对齐（db_pool_min_size 等），
+    # 但 pool.py 的入参名是 `pool_size`，故此处取 `db_pool_size`。
+    db_pool_size: int = 2          # 预建条数 = 空闲地板（见 app/pool.py:MAX_POOL_SIZE）
+    db_command_timeout: float = 30.0
+
     # ---- Redis 频道（与后端约定一致）----
     chan_stream_all: str = "robot:stream:all"
     chan_alerts: str = "robot:alerts"
@@ -41,6 +52,20 @@ class Settings(BaseSettings):
     # 机器都离线了，「电量低」「关节卡死」没有处置价值，根因就是离线。
     # 留开关便于回滚与 A/B 对比；关闭后行为回到加抑制之前。
     inhibit_offline: bool = True
+
+    # ---- 升级（escalation，对齐 Alertmanager 的 repeat_interval）----
+    # severity=3 且超过该秒数仍未 ack → 置 escalated=TRUE 并重发一次。
+    # 300s（5 分钟）取自派工单 T2；这是一个"值班员该响应了"的经验量级，
+    # 比它短会催得太急（现场巡检一次就可能超 1 分钟），长则失去催办意义。
+    escalate_after_s: int = 300
+    # 升级扫描周期。30s 是"及时性 vs 扫描开销"的折中：
+    #   - 300s 的阈值下，30s 抖动最多让升级晚 30s 发生，对催办无实质影响；
+    #   - 谓词被部分索引 idx_alert_escalation 覆盖（init.sql:206），
+    #     每次扫描扫的是窄集，30s 一次开销可忽略。
+    escalate_scan_interval_s: float = 30.0
+    # 单条告警最多升级重发几次。防止"没人管 → 永远每 5 分钟重发"变成
+    # 长期噪声源（Alertmanager 也需配 repeat_interval 而非无限重发）。
+    escalate_max_repeat: int = 3
 
     # ---- 判定循环 ----
     tick_interval_s: float = 1.0        # 离线 ticker 间隔

@@ -43,6 +43,18 @@ alerts_suppressed = Counter(
     ["rule_id"],
     registry=registry,
 )
+alerts_silenced = Counter(
+    "robot_alert_silenced_total",
+    "被 silence 静默（TTL 生效期内）而未落库/未发布的告警条数（订单 17）",
+    ["rule_id"],
+    registry=registry,
+)
+alerts_escalated = Counter(
+    "robot_alert_escalated_total",
+    "被升级重发的告警条数（severity=3 超时未 ack，订单 17）",
+    ["rule_id"],
+    registry=registry,
+)
 robots_online = Gauge(
     "robot_alert_robots_online",
     "ticker 线当前判定为在线的机器人数（分母固定 100）",

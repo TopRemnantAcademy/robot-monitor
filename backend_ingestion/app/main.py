@@ -5,6 +5,8 @@
                         且必须订阅 Redis `robot:alerts` 转发告警（否则前端告警流永远空白）
 - REST `GET /robots`                     —— 100 台最新状态（WS 之外兜底）
 - REST `GET /robots/{id}/history`        —— Drawer 的 ECharts 折线与关节热力图数据源
+- REST `GET /alerts`                     —— 告警分页（订单 17，viewer 起可读）
+- REST `POST /alerts/{id}/ack|unack`     —— 告警确认/撤回（订单 17，需 admin）
 - REST `GET /healthz`                    —— 健康检查
 - REST `GET /metrics`                    —— Prometheus 抓取（**必须免鉴权**）
 
@@ -28,6 +30,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocket
 from fastapi.responses import JSONResponse, Response
 
 from app import metrics, telemetry_tracing
+from app.alerts.router import router as alerts_router
 from app.auth.deps import authenticate_ws_token, current_active_user
 from app.auth.router import router as auth_router
 from app.auth.users import RobotUser, close_engine
@@ -94,6 +97,10 @@ app = FastAPI(title="RobotMonitor Ingestion", lifespan=lifespan)
 # 认证路由（/auth/register、/auth/jwt/login、/auth/jwt/logout、/users/me）。
 # 它们**不加**任何鉴权依赖 —— 登录端点自己再要求 token 就成了死循环。
 app.include_router(auth_router)
+
+# 告警闭环（订单 17）—— GET /alerts 分页 + POST /alerts/{id}/ack|unack。
+# 挂在同一 app 下，路径为绝对路径（/alerts…），不带前缀。
+app.include_router(alerts_router)
 
 
 # ------------------------------------------------------------------ REST
