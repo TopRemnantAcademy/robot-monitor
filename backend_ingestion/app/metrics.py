@@ -33,6 +33,17 @@
     - `robot_monitor_history_latency_seconds`  → 改名为 `robot_backend_history_latency_seconds`
   被删的 3 个之所以能删，是因为 prometheus_client 的 Counter/Gauge 是**幂等累加/覆盖**
   语义：删掉重复定义后，同一事件只经一个计数器表达，数值不会丢、也不会双份。
+
+第二波收敛（2026-10-11，CI 实录）：#73/#76/#77 的回收分支基于旧 main 开发，
+  彼此不知道对方的命名约束，合并后 6 个旧前缀指标再次入库，被 #72 的守卫测试
+  （FORBIDDEN_MONITOR_PREFIX 行首前缀断言）当场拦下 —— 这正是守卫存在的意义。
+    - `robot_monitor_robots_online`                     → `robot_backend_robots_online`
+    - `robot_monitor_history_source_total`              → `robot_backend_history_source_total`
+    - `robot_monitor_ws_outbound_queue_depth`           → `robot_backend_ws_outbound_queue_depth`
+    - `robot_monitor_ws_telemetry_frames_dropped_total` → `robot_backend_ws_telemetry_frames_dropped_total`
+    - `robot_monitor_ws_alerts_deferred_total`          → `robot_backend_ws_alerts_deferred_total`
+    - `robot_monitor_ws_slow_client_evicted_total`      → `robot_backend_ws_slow_client_evicted_total`
+  这些指标尚未被任何面板/告警规则引用，纯改名无下游兼容负担。
 """
 
 from __future__ import annotations
@@ -115,7 +126,7 @@ ws_connections = Gauge(
 # 而不是「status_code != 0」—— 停报的机器人 status_code 会冻在最后一帧，
 # 用它统计会稳定虚高。刷新点：`/healthz`（编排以秒级频率打，顺带维护，不另起定时器）。
 robots_online = Gauge(
-    "robot_monitor_robots_online",
+    "robot_backend_robots_online",
     "在线机器人数（now - last_seen <= 阈值，ISSUE #77；停报者不计入）",
     registry=registry,
 )
@@ -139,7 +150,7 @@ history_latency_seconds = Histogram(
 # 这正是回归该发现的那类故障，而不是靠人眼盯。
 # label 只有 2 个取值，基数可控（对比 mqtt_received 刻意不带 robot_id 的理由）。
 history_source = Counter(
-    "robot_monitor_history_source_total",
+    "robot_backend_history_source_total",
     "/history 实际命中数据源：cagg=连续聚合 robot_history_10s / raw=原始表回退",
     ("source",),
     registry=registry,
@@ -193,7 +204,7 @@ def refresh_gauges(queue_size: int, ws_conns: int) -> None:
 
 # 出站积压（每台机器一条 WS 连接，这里取**所有连接的合计**）。
 outbound_queue_depth = Gauge(
-    "robot_monitor_ws_outbound_queue_depth",
+    "robot_backend_ws_outbound_queue_depth",
     "所有 /ws/robots 连接出站队列的积压帧数合计（持续 >0 说明有慢客户端）",
     registry=registry,
 )
@@ -202,7 +213,7 @@ outbound_queue_depth = Gauge(
 # 这个计数涨是设计内的背压行为，不是故障；它涨而 alerts_deferred_total 恒 0，
 # 恰好证明分级处置按预期工作。
 telemetry_frames_dropped = Counter(
-    "robot_monitor_ws_telemetry_frames_dropped_total",
+    "robot_backend_ws_telemetry_frames_dropped_total",
     "因出站队列满而被丢弃的遥测帧数（丢最旧，慢客户端的背压代价）",
     registry=registry,
 )
@@ -210,7 +221,7 @@ telemetry_frames_dropped = Counter(
 # 顺延的告警。设计目标恒为 0：告警溢出时队列允许扩容（见 ws_backpressure），
 # 只有几千条告警积压这种病态情形才会让这个数 >0。
 alerts_deferred = Counter(
-    "robot_monitor_ws_alerts_deferred_total",
+    "robot_backend_ws_alerts_deferred_total",
     "因出站队列满而顺延的告警帧数（应为 0；>0 说明告警积压，需扩容或摘连接）",
     registry=registry,
 )
@@ -218,7 +229,7 @@ alerts_deferred = Counter(
 # 被摘除的慢/半开连接数。与连接数 Gauge 互补：连接数掉下来是**结果**，
 # 这个计数是**原因**——运维据此区分"大屏正常关闭"与"被服务端踢掉"。
 ws_slow_client_evicted = Counter(
-    "robot_monitor_ws_slow_client_evicted_total",
+    "robot_backend_ws_slow_client_evicted_total",
     "因出站队列持续满或心跳超时被主动 close 的慢客户端连接数",
     registry=registry,
 )

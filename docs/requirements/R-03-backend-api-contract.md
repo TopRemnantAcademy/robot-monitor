@@ -88,7 +88,7 @@ Drawer 的 ECharts 折线与关节热力图数据源。
   `WITH NO DATA` 的聚合在首次刷新前是空的，不回退的话冷启动期间 Drawer 曲线恒空。
 - **`joint_positions` 在两条分支中都不得删** —— 它是 Drawer 第三条折线「角度(rad)」
   的唯一数据源（订单 16 曾因漏列致曲线恒空，见 STATUS.md §六第 2 条）。
-- 数据源有 `robot_monitor_history_source_total{source=cagg|raw}` 计数，
+- 数据源有 `robot_backend_history_source_total{source=cagg|raw}` 计数，
   用于把 p95 的下降归因到「真的换了数据源」而非空结果。
 
 ### 4.1 `resolution` 解析语义（Issue #74 锁定）

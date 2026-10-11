@@ -497,10 +497,10 @@ class TestAlertChannelStillForwarded:
 class TestObservabilityAndConfig:
     def test_backpressure_metrics_exist(self):
         text = metrics.render()[0].decode()
-        assert "robot_monitor_ws_outbound_queue_depth" in text
-        assert "robot_monitor_ws_telemetry_frames_dropped_total" in text
-        assert "robot_monitor_ws_alerts_deferred_total" in text
-        assert "robot_monitor_ws_slow_client_evicted_total" in text
+        assert "robot_backend_ws_outbound_queue_depth" in text
+        assert "robot_backend_ws_telemetry_frames_dropped_total" in text
+        assert "robot_backend_ws_alerts_deferred_total" in text
+        assert "robot_backend_ws_slow_client_evicted_total" in text
 
     def test_thresholds_come_from_settings(self):
         """阈值必须来自配置（AGENTS.md：禁止在业务代码里硬编码）。"""
