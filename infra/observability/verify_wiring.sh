@@ -47,14 +47,24 @@ PY
 
 echo "==> [3/5] 规则指标名 ↔ 代码 实存性"
 for m in robot_backend_queue_depth robot_backend_mqtt_dropped_total \
-         robot_backend_telemetry_written_total; do
+         robot_backend_telemetry_written_total \
+         robot_backend_ws_probe_alive robot_backend_ws_probe_failures_total; do
   if grep -rq "$m" backend_ingestion/app/metrics.py; then ok "$m (backend)"; else bad "$m 未定义"; fi
 done
 for m in robot_alert_emitted_total robot_alert_robots_online; do
   if grep -rq "$m" alert_engine/app/metrics.py; then ok "$m (alert)"; else bad "$m 未定义"; fi
 done
 
-echo "==> [4/5] 上游 env 变量名对齐"
+# 探针指标必须与连接数指标分开定义（ISSUE #58）：探针只出现在 ws_probe.py 引用的
+# metrics 里，而连接数不在 metrics.py 中定义 —— 两者若被混为一谈，本检查会红。
+if grep -q "robot_backend_ws_probe_alive" backend_ingestion/app/metrics.py \
+   && ! grep -qE 'Gauge\(\s*"robot_backend_ws_connections"' backend_ingestion/app/metrics.py; then
+  ok "ws_probe 指标与 ws_connections 指标分离"
+else
+  bad "ws_probe / ws_connections 指标定义混淆"
+fi
+
+echo "==> [4/4] 上游 env 变量名对齐"
 if grep -q "DATA_SOURCE_NAME" external/postgres_exporter/README.md 2>/dev/null \
    && grep -q "DATA_SOURCE_NAME" infra/observability/docker-compose.observability.yml; then
   ok "DATA_SOURCE_NAME (postgres_exporter/README.md:223)"

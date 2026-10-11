@@ -12,6 +12,14 @@
 指标命名对齐 `infra/observability/rules/robot-alerts.yml` 的 PromQL：
   robot_backend_queue_depth          （直方图不需要，Gauge 即可）
   robot_backend_mqtt_dropped_total   （Counter，规则里用 increase(...[1m])）
+
+本模块只管「指标定义」，不负责采集。WS 相关有两个来源，**不要混淆**：
+  - `robot_backend_ws_connections` —— 服务端当前连接数（订单 16 T1b），
+    由 `main.py` 的 `ws_robots` 连接/断开时增减；
+  - `robot_backend_ws_probe_alive` / `robot_backend_ws_probe_failures_total`
+    —— WS **合成探针**（客户端视角），由 `app/ws_probe.py` 的循环更新。
+两者是互补而非重复：连接数为 1 只证明「有个客户端挂着」，
+探针为 1 才证明「这条连接真的还能收到首帧 snapshot」。
 """
 
 from __future__ import annotations
@@ -46,6 +54,20 @@ mqtt_received = Counter(
 mqtt_dropped = Counter(
     "robot_backend_mqtt_dropped_total",
     "MQTT 校验失败被丢弃的消息数（>0 说明 payload 契约被破坏）",
+    registry=registry,
+)
+
+# ---- WS 合成探针（缺口 G-3「看板假的绿」）----
+# 注意：这两个是**探针视角**指标，与 `robot_backend_ws_connections`（服务端连接数，
+# 订单 16 T1b）语义不同，禁止互相覆盖或复用一个名字。
+ws_probe_alive = Gauge(
+    "robot_backend_ws_probe_alive",
+    "WS 合成探针最近一次探活结果（1=握手并收到 snapshot 首帧 / 0=失败）",
+    registry=registry,
+)
+ws_probe_failures = Counter(
+    "robot_backend_ws_probe_failures_total",
+    "WS 合成探针累计失败次数（>0 说明客户端视角的实时流断过）",
     registry=registry,
 )
 

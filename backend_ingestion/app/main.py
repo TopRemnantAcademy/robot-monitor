@@ -45,6 +45,7 @@ from app.schemas.api import (
 )
 from app.services import mqtt_subscriber, state_cache
 from app.services.batch_writer import BatchWriter
+from app import ws_probe
 
 # 订单 16 T4：单行 JSON 日志，供订单 07 的 openobserve/loki 直接采集。
 # 必须在**其它 logger 首次输出之前**配置 —— uvicorn 的启动日志会经由根 logger，
@@ -60,8 +61,12 @@ async def lifespan(app: FastAPI):
     # startup
     writer_task = asyncio.create_task(writer.run())
     mqtt_task = asyncio.create_task(mqtt_subscriber.run(writer))
+    # WS 合成探针：客户端视角验活（缺口 G-3）。它只读指标，不碰数据流；
+    # 关闭时 `run()` 立刻 return，任务自灭，无需在 shutdown 里特判。
+    probe_task = asyncio.create_task(ws_probe.run())
     app.state.writer_task = writer_task
     app.state.mqtt_task = mqtt_task
+    app.state.probe_task = probe_task
     # 订单 16 T3：endpoint 为空则 no-op，返回 False 也不影响启动（可降级）。
     # 放在 yield 之前：instrument 必须早于第一个请求到达。
     tracing_on = telemetry_tracing.configure_tracing(
@@ -87,6 +92,9 @@ async def lifespan(app: FastAPI):
     #      最后一批遥测（订单 06 验收关注的 30000 行附近）会丢。
     await writer.graceful_shutdown()
     await asyncio.gather(writer_task, return_exceptions=True)
+    #   ③ 探针只是旁观者，没有存量要冲刷，直接取消（它 slept 在 interval 上）。
+    probe_task.cancel()
+    await asyncio.gather(probe_task, return_exceptions=True)
     await close_pool()
     await close_redis()
     # auth 的 ORM engine 是独立于 asyncpg 业务池的（fastapi-users 要 SQLAlchemy 会话），
