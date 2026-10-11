@@ -15,6 +15,14 @@
    "pending publish calls" 堆积（实测确认）。串行化后吞吐稳定在 ~1000 msg/s。
 2. 三类异常注入：过热（82°C+）/ 电量耗尽（<15%）/ 随机掉线。
 3. `rich.live.Live` **每秒刷新一次**汇总面板，绝不逐条 print（否则冲垮终端）。
+
+`--duration N`：跑到第 N 秒即自行退出（用于 e2e/CI 受控压测，见 tests/e2e/）。
+`--no-ui`：关掉 rich 面板，改用每秒一行的普通日志；容器里没有 TTY 时 Live 会退化成
+逐帧刷屏日志，把面板关掉才能让 `docker compose logs` 可读（e2e harness 用这条）。
+`--min-sent M`：退出时若 `sent < M` 则打印原因并以**非 0** 退出。为什么需要它 ——
+`--duration` 只保证「跑满 N 秒」，不保证「真发出去了多少条」：broker 地址写错、
+台数被环境变量静默覆盖、发布侧持续报错，都会让模拟器安然退 0，
+把失败推迟到断言阶段甚至被阈值判定放过（静默假绿）。给了下限，压测阶段自己先红。
 """
 
 from __future__ import annotations
@@ -25,6 +33,7 @@ import contextlib
 import json
 import random
 import signal
+import sys
 import time
 from dataclasses import dataclass, field
 
@@ -198,9 +207,41 @@ async def offline_injector(states: list[RobotState], fault_rate: float) -> None:
         victim.offline_until = time.monotonic() + duration
 
 
+def _fleet_summary(states: list[RobotState], counters: FleetCounters,
+                   now: float, start_wall: float) -> str:
+    """一行汇总，供 `--no-ui` 模式每秒打印（容器/CI 里没有 rich 面板可刷）。"""
+    online = warn = fault = offline = 0
+    for s in states:
+        status, _ = s.status_and_error()
+        if status == STATUS_FAULT:
+            fault += 1
+        elif status == STATUS_WARN:
+            warn += 1
+        elif status == STATUS_OFFLINE:
+            offline += 1
+        else:
+            online += 1
+    offline += sum(1 for s in states if time.monotonic() < s.offline_until)
+
+    overheated = [s.robot_id for s in states if s.overheating]
+    low_battery = sum(1 for s in states if s.battery_pct < BATTERY_LOW_THRESHOLD)
+
+    return (
+        f"sent={counters.sent} tps={counters.tps:.0f} "
+        f"ok/warn/fault/offline={online}/{warn}/{fault}/{offline} "
+        f"overheat={','.join(overheated) if overheated else '-'} "
+        f"low_batt={low_battery} pub_err={counters.publish_errors} "
+        f"elapsed={now - start_wall:.0f}s"
+    )
+
+
 async def stats_loop(states: list[RobotState], counters: FleetCounters,
-                     live: Live, start_wall: float) -> None:
-    """每秒统计一次并刷新 rich 面板（唯一的渲染入口）。"""
+                     live: Live | None, start_wall: float) -> None:
+    """每秒统计一次并刷新面板 / 打一行日志（唯一的渲染入口）。
+
+    `live is None` 即 `--no-ui`：无 TTY 环境（容器/CI）下 rich 的 Live 控制序列
+    会把日志刷成乱码，故降级为 `print` 每秒一行。
+    """
     last_sent, last_t = 0, time.monotonic()
     while True:
         await asyncio.sleep(1.0)
@@ -223,6 +264,11 @@ async def stats_loop(states: list[RobotState], counters: FleetCounters,
 
         overheated = [s.robot_id for s in states if s.overheating]
         low_battery = sum(1 for s in states if s.battery_pct < BATTERY_LOW_THRESHOLD)
+
+        if live is None:
+            print("[mock_fleet] " + _fleet_summary(states, counters, now, start_wall),
+                  flush=True)
+            continue
 
         table = Table.grid(padding=(0, 2))
         table.add_row(Text("累计发送", style="cyan"), f"{counters.sent:,} 条")
@@ -249,7 +295,7 @@ def pick_overheat_robots(states: list[RobotState], fault_rate: float) -> None:
 
 # ---------------------------------------------------------------- 入口
 
-async def amain(args: argparse.Namespace) -> None:
+async def amain(args: argparse.Namespace) -> int:
     states = [RobotState(robot_id=f"humanoid-{i:03d}") for i in range(1, args.robots + 1)]
     pick_overheat_robots(states, args.fault_rate)
 
@@ -258,23 +304,45 @@ async def amain(args: argparse.Namespace) -> None:
     start_wall = time.monotonic()
     console = Console()
 
+    if args.duration and args.duration > 0:
+        print(f"[mock_fleet] 受控压测模式：{args.duration}s 后自行退出"
+              f"（目标 ≈ {args.robots * 10 * args.duration} 条）", flush=True)
+
     tasks: list[asyncio.Task] = []
-    with Live(console=console, refresh_per_second=1) as live:
+    tasks.append(asyncio.create_task(publisher(queue, counters, args.broker, args.port)))
+    tasks.extend(asyncio.create_task(run_robot(s, queue, start_wall)) for s in states)
+    tasks.append(asyncio.create_task(offline_injector(states, args.fault_rate)))
+
+    # 面板与「压测时长」是互斥的两种收尾方式：--no-ui 只是换渲染出口，
+    # 而 --duration 决定链路何时被主动掐断（e2e/CI 需要确定性时长）。
+    live_ctx = (contextlib.nullcontext(None) if args.no_ui
+                else Live(console=console, refresh_per_second=1))
+    with live_ctx as live:
+        tasks.append(asyncio.create_task(
+            stats_loop(states, counters, live, start_wall)))
         try:
-            tasks.append(asyncio.create_task(
-                publisher(queue, counters, args.broker, args.port)))
-            tasks.extend(asyncio.create_task(run_robot(s, queue, start_wall))
-                         for s in states)
-            tasks.append(asyncio.create_task(offline_injector(states, args.fault_rate)))
-            tasks.append(asyncio.create_task(
-                stats_loop(states, counters, live, start_wall)))
-            await asyncio.gather(*tasks)
+            if args.duration and args.duration > 0:
+                # 与 stats_loop 的 1s 心跳错开一拍：保证最后一行汇总能落盘
+                await asyncio.sleep(args.duration)
+                print(f"[mock_fleet] 时长到，停止：sent={counters.sent} "
+                      f"(tps≈{counters.sent / args.duration:.0f})", flush=True)
+            else:
+                await asyncio.gather(*tasks)
         finally:
             for t in tasks:
                 t.cancel()
             for t in tasks:
                 with contextlib.suppress(asyncio.CancelledError):
                     await t
+
+    # 发送量自检放在 finally 之后：无论正常收尾还是被取消，都要如实报数。
+    if args.min_sent > 0 and counters.sent < args.min_sent:
+        print(f"[mock_fleet] 发送量不达标：sent={counters.sent} < --min-sent="
+              f"{args.min_sent}（publish 失败 {counters.publish_errors} 次）。"
+              "常见原因：broker 不可达/端口不对、台数被环境变量覆盖、发布侧持续报错。",
+              flush=True)
+        return 1
+    return 0
 
 
 def main() -> None:
@@ -283,12 +351,21 @@ def main() -> None:
     parser.add_argument("--broker", default="localhost")
     parser.add_argument("--port", type=int, default=1883)
     parser.add_argument("--fault-rate", type=float, default=0.02)
+    parser.add_argument("--duration", type=float, default=0.0,
+                        help="受控压测秒数；>0 时到点自行退出（0=永久运行，默认）")
+    parser.add_argument("--no-ui", action="store_true",
+                        help="关闭 rich 面板，改为每秒一行日志（无 TTY 的容器/CI 场景）")
+    parser.add_argument("--min-sent", type=int, default=0,
+                        help="发送量下限；>0 时退出时 sent 少于该值即以非 0 退出（0=不设卡，默认）")
     args = parser.parse_args()
+
+    if args.min_sent < 0:
+        parser.error("--min-sent 不能为负")
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: None)   # 交由 finally 统一取消任务
 
-    asyncio.run(amain(args))
+    sys.exit(asyncio.run(amain(args)))
 
 
 if __name__ == "__main__":
