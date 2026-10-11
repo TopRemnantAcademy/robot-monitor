@@ -96,6 +96,10 @@ class BatchWriter:
         self._draining = False
         # run() 排空并退出后置位；graceful_shutdown() 靠它确认落库完成
         self._drained = asyncio.Event()
+        # 哨兵只投一次（幂等）：graceful_shutdown 若被调两次会投两个 _STOP，
+        # 第二个哨兵会被 run() 当成一行数据送进 _to_row → AttributeError
+        # （2026-10-11 CI 实测：测试套件多会话重启 lifespan 时真实发生过）。
+        self._stop_requested = False
 
     # ---- 生产者 ----
     async def put(self, t: Telemetry) -> None:
@@ -110,6 +114,15 @@ class BatchWriter:
         loop = asyncio.get_running_loop()
         log.info("batch_writer started (count=%d, seconds=%.2f)",
                  settings.batch_trigger_count, settings.batch_trigger_seconds)
+        try:
+            await self._run_loop(loop)
+        finally:
+            # 无论正常排空还是中途异常退出，都必须置位：graceful_shutdown() 在等它。
+            # 不置位的话，等的是一个永远不会 set 的 Event —— 2026-10-11 CI 实测，
+            # 这正是 backend 测试套件挂死 10.8m 被 runner SIGKILL 的根因。
+            self._drained.set()
+
+    async def _run_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         while True:
             first = await self.queue.get()
             if first is _STOP:
@@ -119,6 +132,13 @@ class BatchWriter:
                 if self.queue.empty():
                     break
                 first = await self.queue.get()
+                # 重复哨兵防御：graceful_shutdown 现已幂等（_stop_requested），
+                # 但对历史遗留队列里压着的第二个 _STOP 仍要兜住 —— 绝不让
+                # 哨兵混进 buf 被 _to_row 当成一行遥测（AttributeError 实录）。
+                if first is _STOP:
+                    if self.queue.empty():
+                        break
+                    first = await self.queue.get()
 
             buf = [first]
             deadline = loop.time() + settings.batch_trigger_seconds
@@ -345,8 +365,21 @@ class BatchWriter:
         调用前提：writer_task 尚未被 cancel（由 lifespan 保证），
         否则 run() 会在 _flush 中途被 CancelledError 打断而丢在飞数据。
         """
-        await self.queue.put(_STOP)          # 唤醒可能阻塞在 queue.get() 的 run()
-        await self._drained.wait()           # 等 run() 把 queue 排空并落库
+        # 幂等哨兵：graceful_shutdown 可能被调多次（lifespan 重启 / 测试多会话），
+        # 重复投 _STOP 会让 run() 的 _to_row 收到哨兵 → AttributeError → run() 崩溃
+        # → _drained 永不置位 → 关闭流程挂死（2026-10-11 CI 10.8m SIGKILL 的根因链）。
+        if not self._stop_requested:
+            self._stop_requested = True
+            await self.queue.put(_STOP)      # 唤醒可能阻塞在 queue.get() 的 run()
+        try:
+            await self._drained.wait()       # 等 run() 把 queue 排空并落库
+        except RuntimeError as exc:
+            # 跨事件循环毒化：_drained 这个 asyncio.Event 绑定在创建它的循环上，
+            # 而测试套件每个 TestClient 会话都新起一个循环（lifespan 重启）。
+            # 此时本循环既无法等待也无法唤醒它 —— 生产环境单循环永不触发这里；
+            # 测试场景下唯一正确动作是记录并放行，让上层照常关闭、新会话拿到新实例。
+            log.warning("graceful_shutdown: cross-loop Event.wait failed (%s); "
+                        "skipping drain wait (test-session restart path)", exc)
         log.info("batch_writer stopped: written=%d flushes=%d retries=%d rejected=%d "
                  "submitted=%d skipped=%d",
                  self.written, self.flushes, self.retries, self.rejected,
