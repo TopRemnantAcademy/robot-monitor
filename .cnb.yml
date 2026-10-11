@@ -6,22 +6,22 @@ include:
   - https://cnb.cool/Bring/Agents/Agent/-/blob/main/npc.yml
 
 $:
-  # 【临时·订单18】把 contract-gate 的 stages 镜像到 api_trigger，
-  # 用 `cnb build start-build --event api_trigger` 真机验证命令能过。
-  # **验证完必须删除本块**。
-  # 【临时·订单18】环境探针
-  # 【临时·订单18】pip 引导方式探针
+  # 【临时·订单18】仅用于真机验证 contract-gate：同一 Dockerfile、同一脚本。
+  # 验证通过后删除本块。api_trigger 不是门禁的正式触发方式。
   api_trigger:
-    probe-pip:
+    contract-gate-verify:
       docker:
-        image: node:20
+        build:
+          dockerfile: ci/contract-gate.Dockerfile
+          by:
+            - ci/contract-gate.Dockerfile
+            - backend_ingestion/requirements.txt
+            - frontend_dashboard/package-lock.json
+      env:
+        JWT_SECRET: ci-openapi-export-placeholder
       stages:
-        - name: probe-pip
-          script: |
-            echo "--- ensurepip ---"
-            python3 -m ensurepip --version 2>&1 || echo "ensurepip FAILED"
-            python3 -m ensurepip --upgrade 2>&1 | tail -3
-            python3 -m pip --version 2>&1 || echo "pip still missing"
+        - name: contract-gate
+          script: sh ci/contract-gate.sh
 
   issue:
     comment@npc:
@@ -40,64 +40,34 @@ $:
     # 订单 18 T2 —— 契约门禁（契约即代码）
     #
     # **刻意不做 `|| true` / `continue-on-error` 兜底**：门禁能被吞掉就等于不存在。
-    # 两道判定都必须让构建变红：
-    #   ① generated-types-must-be-committed —— api.gen.ts 与 openapi.snapshot.json 不同步；
-    #   ② contract-snapshot-check           —— 后端删字段/改类型但没同步快照（breaking）。
+    # 两步判定都必须让构建变红：
+    #   ① generated-types-must-be-committed —— api.gen.ts 与 openapi.snapshot.json 不同步
+    #   ② contract-snapshot-check           —— 后端删字段/改类型但没同步快照（breaking）
     # 依据：本仓已真实翻车过一次（STATUS.md §六第 2 条 —— `/history` 漏 `joint_positions`
     # 导致 Drawer 第三条折线恒空）。那次是"人眼比对通过"的，机器一跑就现形。
     #
-    # 用对象形式声明（`contract-gate:` 是流水线标识），与 NPC 的 `comment@npc:` 平级。
-    # 依据：语法手册「也支持通过对象的形式声明多个流水线」（docs.cnb.cool/zh/build/grammar.md）。
+    # 用对象形式声明（`contract-gate:` 是流水线标识），与 NPC 的 `comment@npc:` 平级；
+    # 依据：语法手册「也支持通过对象的形式声明多个流水线」。
     #
-    # 为什么用 node:20 而不是 cnbcool/default-npc：
-    #   门禁横跨两侧 —— 前端要 Node（openapi-typescript / tsc / node --test），
-    #   契约导出要 Python（`import app.main` 取 `app.openapi()`）。
-    #   node:20 全量镜像自带 python3 与 pip，一次满足两侧；
-    #   依赖装在 --user，不碰系统 site-packages，也不需要 root。
-    #
-    # ⚠️ 踩坑记录：CNB 的 `script` 由 **sh(dash)** 执行，不是 bash。
-    #   `set -euo pipefail` 会报 `sh: 1: set: Illegal option -o pipefail` 并让 stage
-    #   exit 2（本单实测：构建 cnb-lof-1k4k3unge 的 probe stage）。
-    #   本文件统一用 POSIX 安全的 `set -eu`，**不要**加回 pipefail。
+    # 镜像用 `ci/contract-gate.Dockerfile` 而非裸 node:20 —— 实测 node:20 的 python3
+    # **没有 pip 也没有 ensurepip**（见该 Dockerfile 顶部记录），依赖必须在镜像构建期装好。
+    # 全部逻辑收进 `ci/contract-gate.sh`（POSIX sh），避免几十行内联脚本难维护。
     # -----------------------------------------------------------------------
     contract-gate:
       docker:
-        image: node:20
+        build:
+          dockerfile: ci/contract-gate.Dockerfile
+          by:
+            - ci/contract-gate.Dockerfile
+            - backend_ingestion/requirements.txt
+            - frontend_dashboard/package-lock.json
       env:
+        # 只为让 `Settings()` 在 import 期实例化成功（jwt_secret 无默认值）。
+        # 是占位串，不参与任何签名；真实密钥绝不入仓（AGENTS.md §5）。
         JWT_SECRET: ci-openapi-export-placeholder
       stages:
-        - name: prepare-backend-deps
-          script: |
-            set -eu
-            python3 -m pip install --user --quiet --disable-pip-version-check \\
-              -r backend_ingestion/requirements.txt
-            python3 -c "import fastapi, pydantic; print('backend deps ok:', fastapi.__version__, pydantic.VERSION)"
-        - name: contract-snapshot-check
-          script: |
-            set -eu
-            python3 scripts/export-openapi.py --check docs/contracts/openapi.snapshot.json
-        - name: prepare-frontend-deps
-          script: |
-            set -eu
-            cd frontend_dashboard
-            npm ci --no-audit --fund=false
-        - name: generated-types-must-be-committed
-          script: |
-            set -eu
-            cd frontend_dashboard
-            npm run gen:types
-            cd ..
-            git diff --exit-code -- frontend_dashboard/src/types/api.gen.ts
-        - name: ws-envelope-contract
-          script: |
-            set -eu
-            cd frontend_dashboard
-            node --test "tests/*.test.mjs"
-        - name: typecheck
-          script: |
-            set -eu
-            cd frontend_dashboard
-            npx tsc --noEmit
+        - name: contract-gate
+          script: sh ci/contract-gate.sh
 
 main:
   "crontab: 0 0,6,12,18 * * *":
