@@ -142,7 +142,7 @@
 
 | 项 | 所需条件 |
 |---|---|
-| 端到端 30,000 行落库 | 需真实 EMQX + TimescaleDB + Redis（Docker），属订单 06 |
+| 端到端 30,000 行落库 | **harness 已就绪**（ISSUE #60：`tests/e2e/docker-compose.e2e.yml` + `tests/e2e/test_e2e_30k.py`），但**尚未在真实 Docker 上跑过** —— 本开发环境无 docker daemon，脚本按设计 skip（退出码 3）。需在提供 docker 的机器/runner 上执行 `python -m pytest tests/e2e/test_e2e_30k.py -v -s` 才产生实测数字 |
 | I-2 / I-3 的**运行时**行为 | 需真实 broker；导入期已验证 |
 | 告警去重幂等 / `robot:alerts` 发布 | 同上 |
 

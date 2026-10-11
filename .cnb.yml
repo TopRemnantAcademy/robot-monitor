@@ -98,3 +98,70 @@ main:
               负责端到端联调：docker-compose 起栈 + 后端 + 告警引擎 + 模拟器压测 30s + 校验写入与告警。
             user_prompt: |
               定时巡检。先用 bash 读取 ./spec/ci/integration-call.md，严格按其程序执行，不要自创流程。
+
+  # ============================================================
+  # e2e：端到端 30,000 行落库验证（ISSUE #60）
+  #
+  # 为什么单独一条 pipeline：它需要 **Docker-in-Docker**（services: [docker]）
+  # 才能起 emqx + timescaledb:2.13.1 + redis + backend + mock_fleet。
+  # CNB 的默认构建机不一定提供可用 docker daemon，所以这一条**必须**
+  # 在缺失时「明确 skip」而不是红 —— 否则环境问题会被误读成代码回归
+  # （ISSUE #60 §4、AGENTS.md §6 都要求区分「环境」与「代码」）。
+  #
+  # 判定与产出：起栈前先探 docker；不可用则打印【E2E SKIP】原因并以 0 退出。
+  # 可用则跑 tests/e2e/test_e2e_30k.py（自带超时守卫与取证报告），
+  # 退出码 3 视同 skip（脚本内部已判过环境），其余非 0 才是真失败。
+  #
+  # 触发面：PR（拦回归）+ push main（合入后复核）+ 每日 crontab（漂移巡检）
+  # 共用同一份 stages 定义（锚点 &e2e-stages），避免三处脚本各自演化。
+  # ============================================================
+  pull_request:
+    - name: e2e-30k-landing
+      services: [docker]
+      env: &e2e-env
+        # 40s × 100 台 × 10Hz ≈ 40,000 帧，相对 30,000 阈值留足余量。
+        E2E_DURATION: "40"
+        E2E_ROBOTS: "100"
+        E2E_MIN_ROWS: "30000"
+      stages: &e2e-stages
+        - name: e2e
+          script: |
+            set -uo pipefail
+            echo "== e2e 30k 落库验证（ISSUE #60）=="
+
+            # ---- 环境判定：无 Docker 即明确 skip，绝不 red ----
+            if ! command -v docker >/dev/null 2>&1; then
+              echo "【E2E SKIP】PATH 内找不到 docker 命令。"
+              echo "本 job 需要真实 Docker（emqx + timescaledb:2.13.1 + redis + backend + mock_fleet），"
+              echo "且 ISSUE #60 禁止用 mock 替身冒充真实 TimescaleDB。"
+              echo "需要：在提供 docker 的构建机/自托管 runner 上运行本 job，或本地执行"
+              echo "  python -m pytest tests/e2e/test_e2e_30k.py -v -s"
+              exit 0
+            fi
+            if ! docker info >/dev/null 2>&1; then
+              echo "【E2E SKIP】docker daemon 不可达（docker info 非 0）。原始输出（尾部）："
+              docker info 2>&1 | tail -5 || true
+              exit 0
+            fi
+            echo "docker 可用：$(docker --version)"
+
+            # 依赖：e2e 脚本只用标准库（subprocess/urllib），无需 pip 安装。
+            python3 tests/e2e/test_e2e_30k.py
+            rc=$?
+            if [ "$rc" = "3" ]; then
+              echo "【E2E SKIP】脚本自判环境不具备（退出码 3），非代码失败。"
+              exit 0
+            fi
+            exit "$rc"
+
+  push:
+    - name: e2e-30k-landing
+      services: [docker]
+      env: *e2e-env
+      stages: *e2e-stages
+
+  "crontab: 0 3 * * *":
+    - name: e2e-30k-landing
+      services: [docker]
+      env: *e2e-env
+      stages: *e2e-stages

@@ -1,0 +1,137 @@
+# 端到端 30,000 行落库验证栈（ISSUE #60）
+#
+# 与 infra/docker-compose.yml 的关系：**不修改**基础设施栈，只在此处装一个
+# 「真实链路」的最小拓扑 —— EMQX + TimescaleDB + Redis + 后端 + 模拟器，
+# 五者同处一个 Docker 网络。之所以另起一份而不是叠加 infra 的两个文件：
+#   1. e2e 要的是**可一键重复运行**，不应依赖宿主机 .env（`JWT_SECRET:?` 会让
+#      compose 直接退出）；此处用 e2e 专用口令，与生产凭据无关。
+#   2. 模拟器在 infra 栈里根本没有容器（现状是在宿主机裸跑），
+#      「1000 msg/s 真实落库」这条链路的入口就缺了容器化的一环。
+#
+# 用法：
+#   docker compose -f tests/e2e/docker-compose.e2e.yml up -d --build   # 起基础设施+后端
+#   docker compose -f tests/e2e/docker-compose.e2e.yml run --rm mock_fleet  # 受控压测
+#   docker compose -f tests/e2e/docker-compose.e2e.yml down -v
+# 或直接用 tests/e2e/test_e2e_30k.py 驱动（推荐，见其文件头）。
+#
+# 纪律：这里的口令只用于**本地/CI 一次性栈**，不是生产凭据，也不从仓库外读密钥
+# （AGENTS.md §5 禁止的是把真实凭据写进仓库，不是禁止给测试栈设一个固定值）。
+name: robotmonitor-e2e
+
+services:
+  emqx:
+    # 与 infra/docker-compose.yml 锁同一档 5.6（选型理由见该文件注释）：
+    # 5.6.x 只在 emqx/emqx 通道持续发布，是 5.6 的可追溯来源。
+    image: emqx/emqx:5.6
+    environment:
+      EMQX_LOG__LEVEL: warning
+    healthcheck:
+      # `emqx ping` 可用前提：emqx-docker 的 Dockerfile 把 /opt/emqx/bin/* 软链到
+      # /usr/local/bin/（实证见 infra/docker-compose.yml 注释）。
+      test: ["CMD", "emqx", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      # start_period 必须给足：EMQX 首启要展开 Erlang 运行时，
+      # 早于它连 Broker 会得到「写入 0 条」的假失败（R-07 §1）。
+      start_period: 40s
+
+  timescaledb:
+    # 真实 TimescaleDB，**不接受 mock 替身**（ISSUE #60 禁止项）。
+    # 2.13.1-pg16 与 infra/docker-compose.yml 完全一致，且是 R-09 实测所用版本。
+    image: timescale/timescaledb:2.13.1-pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: robot_monitor
+    volumes:
+      # 复用仓库唯一的 Schema 事实源（AGENTS.md §4）：e2e 考的就是 init.sql 本身，
+      # 另写一份 DDL 会让「e2e 通过」与「生产建表」脱钩。
+      - ../../infra/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d robot_monitor"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
+  redis:
+    image: redis:7.2-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  backend:
+    build:
+      # 上下文必须是仓库根：Dockerfile 要 COPY backend_ingestion/。
+      context: ../..
+      dockerfile: backend_ingestion/Dockerfile
+    image: robot-monitor-backend:e2e
+    environment:
+      # service 名即 Docker DNS
+      MQTT_BROKER: emqx
+      MQTT_PORT: "1883"
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://postgres:postgres@timescaledb:5432/robot_monitor
+      # 双重触发窗口保持 spec/01 §4.2 的默认（满 500 条 或 满 1s），
+      # 刻意**不调小**：e2e 要验证的是生产配置下的落库无损，不是调参后的结果。
+      BATCH_TRIGGER_COUNT: "500"
+      BATCH_TRIGGER_SECONDS: "1.0"
+      # 后端启动即要求 JWT_SECRET（config.py 无默认值，留空会 ValidationError）。
+      # 这是 e2e 专用占位值，与任何真实环境无关。
+      JWT_SECRET: "e2e-only-secret-0123456789abcdef0123456789abcdef"
+    ports:
+      - "18000:8000"   # 宿主机也留一个口，便于 e2e 脚本从外面探 /healthz
+    depends_on:
+      emqx:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # 后端 /healthz 的语义是「存活探针」——依赖不可达时仍返回 200 且 status=degraded
+      # （backend_ingestion/app/main.py:85-118）。所以这里不能只看状态码，
+      # 必须等到 db=up 才算后端**真的能落库**，否则 e2e 会在 DB 未就绪时提前开跑。
+      test: ["CMD-SHELL", "python -c \"import urllib.request,json;d=json.load(urllib.request.urlopen('http://localhost:8000/healthz'));raise SystemExit(0 if d['db']=='up' else 1)\""]
+      interval: 5s
+      timeout: 5s
+      retries: 36
+      start_period: 20s
+
+  mock_fleet:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile.mock_fleet
+    image: robot-monitor-mock-fleet:e2e
+    # 默认不随 `up` 启动：压测由 e2e 脚本显式 `run`（或用 profile 手动拉起），
+    # 否则容器一起来就连，会把「起栈」和「压测」两件事的时序搅在一起。
+    profiles: ["stress"]
+    environment:
+      # ⚠️ 这里**不**用 compose 的 `${VAR:-default}` 插值来传时长/台数。
+      # compose 的变量插值发生在**宿主机**解析 YAML 时，`docker compose run -e FLEET_DURATION=x`
+      # 是容器启动时才注入的，改不动已经展开的 command —— 用插值会让
+      # 「脚本指定 40s」永远被宿主机默认值覆盖（且不报错，最难查的那种静默失败）。
+      # 故改由 entrypoint 在**容器内**读环境变量再 exec，`-e` 才真正生效。
+      FLEET_DURATION: "40"
+      FLEET_ROBOTS: "100"
+      MQTT_BROKER: emqx
+      MQTT_PORT: "1883"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        exec python /app/simulator/mock_fleet.py \
+          --robots "$${FLEET_ROBOTS}" \
+          --broker "$${MQTT_BROKER}" \
+          --port "$${MQTT_PORT}" \
+          --duration "$${FLEET_DURATION}" \
+          --no-ui \
+          --fault-rate 0.02
+    # 容器内无 TTY，rich 的 Live 控制序列会把 logs 刷乱，故 --no-ui 走每秒一行日志。
+    depends_on:
+      emqx:
+        condition: service_healthy
+      backend:
+        condition: service_healthy

@@ -1,0 +1,22 @@
+# e2e 专用模拟器镜像（ISSUE #60）。
+#
+# 为什么单独写一份而不是复用 simulator/ 下：simulator 目前**没有** Dockerfile
+# （它只在宿主机裸跑，见 simulator/README.md），而 e2e 要求入口也容器化，
+# 才能保证「100 台 × 10Hz 真实落库」整条链在同一个网络里跑完。
+#
+# 基础镜像与 backend_ingestion 一致（python:3.11-slim）：aiomqtt 2.0.1 带 wheel，
+# 不需要 gcc；仓库其余 Python 服务也都锁 3.11。
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# 依赖清单直接复用 simulator/requirements.txt（aiomqtt 2.0.1 + rich 13.7.1）。
+# 刻意**不新建** e2e 版 requirements：那会让模拟器的依赖出现两个事实源，
+# 将来升 aiomqtt 时必然漏改一处（README 已经把 2.0.1 的结论钉在 simulator 侧）。
+COPY simulator/requirements.txt /app/simulator/requirements.txt
+RUN pip install --no-cache-dir -r /app/simulator/requirements.txt
+
+COPY simulator /app/simulator
+
+# 压缩镜像里不需要 pyc 之外的东西；模拟器无对外端口。
+CMD ["python", "/app/simulator/mock_fleet.py", "--help"]
