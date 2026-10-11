@@ -1,30 +1,74 @@
-# pgBackRest 接入说明（未验证 · 待订单）
+# pgBackRest 灾备边车（订单 25 / I-19）
 
-## 现状（事实）
+> 完整运行手册见 **`docs/DR-RUNBOOK.md`**。本文件是目录导航 + 设计要点。
 
-`infra/docker-compose.yml` 的 `timescaledb` 用的是 `timescale/timescaledb:2.13.1-pg16`。
-该镜像**不含 pgbackrest**。因此本目录只交付配置契约，**没有**接线进 compose。
+## 交付物
 
-## 为什么值得做
+| 文件 | 作用 |
+|---|---|
+| `Dockerfile` | 仓库(repository)主机的 pgBackRest 镜像（PGDG 包安装，v2.59.3） |
+| `Dockerfile.timescaledb` | 派生 timescaledb 镜像：给基础镜像补 pgbackrest 二进制（`archive_command` 需要） |
+| `docker-compose.dr.yml` | overlay：派生 timescaledb + pgbackrest 仓库边车 |
+| `pgbackrest.conf` | **仓库侧**配置（含 `repo1-cipher-pass=${PGBACKREST_CIPHER_PASS}` 注入点） |
+| `pgbackrest-db.conf` | **数据库侧**配置（不含口令；只有 `pg1-path` 等本机信息） |
+| `postgresql-dr.conf` | PG 开关：`archive_mode=on` / `archive_command` / `archive_timeout`（经 `include_dir` 载入） |
+| `run-backup.sh` | 备份调度入口（`full` / `diff` / `check` / `info`） |
+| `restore.sh` | 恢复入口（`latest` / `set <name>` / `pitr '<ts>'`，带两级确认） |
 
-`infra/init.sql` 里的 `robot_telemetry` 是复合主键 `(time, robot_id)` 的超表，
-100 台 × 10Hz ≈ **8.64M 行/天**。现在整个仓库**没有任何备份路径**：
-`docker compose down -v` 一次，历史数据归零，且看板的「历史折线」永不可复现。
+## 为什么不能「只挂一个容器」就完事
 
-这属于监控系统里典型「出事前没人提」的缺口。
+pgBackRest 是双端架构，PG 主机与仓库主机**各自**都要有**同版本**二进制与配置：
 
-## 接入步骤（照做即可，需验证）
+- 实证 `external/pgbackrest/doc/xml/user-guide.xml:2770`
+  > "The pgBackRest version installed on the repository host must **exactly match**
+  > the version installed on the PostgreSQL host."
+- WAL 归档靠 PG 本地执行的 `archive_command`，故 DB 容器内必须有 pgbackrest。
 
-1. 换镜像或加边车：把 `timescale/timescaledb:2.13.1-pg16` 换成自带 pgbackrest 的镜像，
-   或起一个 `pgbackrest/pgbackrest` 容器（**镜像名未验证**，需先 `docker manifest inspect`，
-   参照本仓库 `external/SOURCES.md` 里 EMQX 镜像名的 digest 教训 —— 别裸信名字）。
-2. 挂配置：`./ops/pgbackrest/pgbackrest.conf → /etc/pgbackrest/pgbackrest.conf`。
-3. 初始化仓库：`pgbackrest --stanza=robot_monitor stanza-create`。
-4. 验证：`pgbackrest --stanza=robot_monitor check`，再 `--type=full backup`。
-5. 把 `repo1-cipher-pass` 落到 `.env`（**绝不入库**）。
+基础镜像 `timescale/timescaledb:2.13.1-pg16` **不含** pgbackrest —— 这正是本目录此前只交付
+「配置契约」的原因。本次通过 `Dockerfile.timescaledb` 补上，使方案可用。
 
-## 未验证清单
+## ⚠️ 纠正：官方没有 `pgbackrest/pgbackrest` 镜像
 
-- pgbackrest 官方镜像名与 tag（未 `docker manifest inspect`）
-- TimescaleDB 超表在 pgbackrest 物理备份下的恢复一致性（社区有讨论，本项目未实测）
-- 8.64M 行/天 的实际备份窗口与 `process-max=2` 是否够
+`external/SOURCES.md:325` 记的 `pgbackrest/pgbackrest` **不存在**。2026-10-11 实测：
+
+```
+GET https://hub.docker.com/v2/repositories/pgbackrest/pgbackrest/tags
+→ {"message":"object not found"}
+```
+
+`pgbackrest/*` 下只有 `test` / `doc` 两个仓库。故本方案自建镜像，走官方推荐的
+PGDG 包仓库（`external/pgbackrest/doc/xml/user-guide.xml:586`）。
+
+## 快速开始
+
+```bash
+# 1) 在宿主机 .env 配好仓库加密口令（禁止明文入库）
+echo "PGBACKREST_CIPHER_PASS=$(openssl rand -base64 48)" >> .env
+
+# 1.5) 生成双端 TLS 证书（compose 挂载 pgbackrest-certs 卷的前置条件）
+#      完整命令见 docs/DR-RUNBOOK.md §5.1
+
+# 2) 起带灾备的一整套
+docker compose -f infra/docker-compose.yml \
+               -f infra/ops/pgbackrest/docker-compose.dr.yml up -d --build
+
+# 3) 初始化 stanza + 校验
+DC="docker compose -f infra/docker-compose.yml -f infra/ops/pgbackrest/docker-compose.dr.yml"
+$DC exec pgbackrest pgbackrest --stanza=robot_monitor --log-level-console=info stanza-create
+$DC exec pgbackrest /opt/dr/run-backup.sh check
+
+# 4) 首份全量
+$DC exec pgbackrest /opt/dr/run-backup.sh full
+```
+
+## 状态
+
+- ✅ 配置、脚本、compose、RUNBOOK 齐备；
+- ✅ 静态自检通过（无需 Docker）：
+
+  ```bash
+  bash infra/ops/pgbackrest/verify-drs.sh
+  ```
+
+- ❌ **未端到端实跑**（本工作环境无 Docker）。未验证项与所需条件见
+  `docs/DR-RUNBOOK.md §6`。

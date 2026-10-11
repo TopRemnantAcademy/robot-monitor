@@ -1,0 +1,100 @@
+# 灾备叠加层（DR overlay）—— 与基础 compose 组合使用：
+#
+#   docker compose \
+#     -f infra/docker-compose.yml \
+#     -f infra/ops/pgbackrest/docker-compose.dr.yml up -d
+#
+# 目标：给 timescaledb 做「定期全量 + 持续 WAL 归档」的物理备份，量化 RPO/RTO。
+# 完整论证与恢复步骤见 docs/DR-RUNBOOK.md。
+#
+# ── 为什么是「替换 timescaledb 镜像 + 加一个 repo 边车」，而不是只加一个备份容器 ──
+# pgBackRest 的架构是**双端**的：PostgreSQL 主机与仓库(repository)主机**各自**都要有
+# pgbackrest 二进制与配置，且版本必须完全一致 —— 实证
+#   external/pgbackrest/doc/xml/user-guide.xml:2770
+#     "The pgBackRest version installed on the repository host must exactly match
+#      the version installed on the PostgreSQL host."
+# 而 PG 的 WAL 归档是通过 `archive_command = 'pgbackrest ... archive-push %p'` 触发的，
+# 这条命令**在 PG 主机本地执行** —— 所以 timescaledb 容器内必须有 pgbackrest 二进制。
+# 事实：基础 compose 用的 `timescale/timescaledb:2.13.1-pg16` 镜像**不含**它（见
+# `infra/ops/pgbackrest/README.md` 此前已记录）。故本 overlay 用派生镜像补上。
+#
+# ── 凭证 ──
+# repo1-cipher-pass 从宿主机 .env 的 PGBACKREST_CIPHER_PASS 透传（AGENTS.md §5：禁止硬编码）。
+# 用 `${VAR:?msg}` 形式：未设置时 compose 直接报错退出，而不是起一个明文/空密钥的仓库。
+#
+# ⚠️ 本 overlay 目前**未在本仓端到端实跑**（本工作环境无 Docker），
+#    DR-RUNBOOK.md 有完整的「未验证」章节与所需条件。
+
+version: "3.8"
+
+services:
+  # ── ① timescaledb 换成带 pgbackrest 的派生镜像（源码见本目录 Dockerfile.timescaledb）──
+  timescaledb:
+    image: robot-monitor-timescaledb:p16-pgbackrest
+    build:
+      context: .
+      dockerfile: Dockerfile.timescaledb
+    # 注意：此处不覆盖基础 compose 的 volumes/healthcheck —— overlay 语义是「合并」，
+    # 只声明新增项。tsdb-data 卷与 init.sql 挂载仍来自 infra/docker-compose.yml。
+    volumes:
+      # DB 侧 pgbackrest 配置（只读挂载，密钥不在这份文件里）
+      - ./ops/pgbackrest/pgbackrest-db.conf:/etc/pgbackrest/pgbackrest.conf:ro
+      # WAL 归档目标：与 repo 边车共享的仓库卷（pgbackrest 需要能写到 repo-path）
+      - pgbackrest-repo:/var/lib/pgbackrest
+      # PG 主配置片段：开启 archive_mode/archive_command（见 postgresql-dr.conf）
+      - ./ops/pgbackrest/postgresql-dr.conf:/etc/postgresql/conf.d/zz-dr.conf:ro
+      # pgbackrest 日志目录（DB 侧归档日志）
+      - pgbackrest-log:/var/log/pgbackrest
+      # 双端 TLS 证书（DB 侧作为 TLS 服务端，接受仓库边车连入）
+      - pgbackrest-certs:/etc/pgbackrest/cert:ro
+    # timescaledb 官方镜像的 postgres 与 PG 官方镜像同源，支持 conf.d 追加片段；
+    # command 追加 -c config_file 使其读取主配置。
+    command:
+      - "postgres"
+      - "-c"
+      - "config_file=/var/lib/postgresql/data/postgresql.conf"
+      - "-c"
+      - "include_dir=/etc/postgresql/conf.d"
+    environment:
+      # DB 侧不需要仓库加密口令（加密在仓库侧完成），但需要知道仓库主机地址。
+      # 这两个变量对应 pg1-host / pg1-host-user，由 db 侧 pgbackrest.conf 之外的
+      # 命令行给出（见 backup 脚本）；此处保留占位说明，不写死。
+      PGBACKREST_STANZA: robot_monitor
+
+  # ── ② pgBackRest 仓库(repository)主机：备份数据的落点 ──
+  pgbackrest:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: robot-monitor-pgbackrest:local
+    container_name: robot-monitor-pgbackrest
+    volumes:
+      # 仓库卷：备份 + WAL 归档的实际存储位置（生产应指向独立磁盘或对象存储，见 RUNBOOK）
+      - pgbackrest-repo:/var/lib/pgbackrest
+      # 仓库侧配置（含加密口令注入点，值来自 .env）
+      - ./ops/pgbackrest/pgbackrest.conf:/etc/pgbackrest/pgbackrest.conf:ro
+      - pgbackrest-log:/var/log/pgbackrest
+      # 运维脚本以只读方式挂载到 /opt/dr（不烘焙进镜像，便于现场修订）
+      - ./ops/pgbackrest/run-backup.sh:/opt/dr/run-backup.sh:ro
+      - ./ops/pgbackrest/restore.sh:/opt/dr/restore.sh:ro
+      # 双端 TLS 证书（仓库侧作为 TLS 服务端 + 连 DB 的客户端证书）
+      - pgbackrest-certs:/etc/pgbackrest/cert:ro
+    environment:
+      # 仓库加密口令：`${VAR:?msg}` 未设置时直接报错退出，杜绝空密钥仓库
+      PGBACKREST_CIPHER_PASS: "${PGBACKREST_CIPHER_PASS:?PGBACKREST_CIPHER_PASS 未设置：请在宿主机 .env 配置（openssl rand -base64 48）}"
+      # 覆盖配置里写的 pg1-path/host 语义：仓库侧要连 DB 主机（user-guide.xml:2762）
+      PGBACKREST_PG1_HOST: timescaledb
+      PGBACKREST_PG1_PATH: /var/lib/postgresql/data
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    # 默认空转等命令；由脚本/调度器 `docker compose exec` 或 `run` 触发具体动作
+    command: ["-c", "sleep infinity"]
+    restart: unless-stopped
+
+volumes:
+  # 仓库卷 —— 备份与 WAL 的实际载体
+  pgbackrest-repo:
+  pgbackrest-log:
+  # TLS 证书卷：由 runbook §5「生产加固」的 openssl 步骤生成后放入
+  pgbackrest-certs:
