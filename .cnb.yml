@@ -87,11 +87,14 @@ main:
             python -m pip install --no-cache-dir -r backend_ingestion/requirements.txt
             # fakeredis 是**测试期**依赖：订单 04 的验收用例要验去重器的 SET NX 幂等
             # 与 TTL，进程内 dict 替身测不出 Redis 服务端语义。
-            python -m pip install --no-cache-dir pytest 'httpx<0.28' fakeredis
+            python -m pip install --no-cache-dir pytest pytest-timeout 'httpx<0.28' fakeredis
             echo "── pytest（仓库根，testpaths = tests + alert_engine/tests）──"
             python -m pytest -q
             echo "── pytest backend_ingestion/tests（顶层 app 包冲突，单独跑）──"
-            python -m pytest backend_ingestion/tests/ -q
+            # 2026-10-11 实测：backend 套件一例 F 后整体挂死 10.8m 被 runner SIGKILL，
+            # F 的名字与栈都没打出来。加 pytest-timeout（单测 60s 封顶，超时打栈）
+            # 与 -v（挂死时日志至少留有「最后一个开跑的用例」），一次跑出可定位现场。
+            python -m pytest backend_ingestion/tests/ -v --timeout=60
         - name: npm-test
           image: node:20
           script: |
@@ -209,11 +212,14 @@ main:
             python -m pip install --no-cache-dir -r backend_ingestion/requirements.txt
             # fakeredis 是**测试期**依赖：订单 04 的验收用例要验去重器的 SET NX 幂等
             # 与 TTL，进程内 dict 替身测不出 Redis 服务端语义。
-            python -m pip install --no-cache-dir pytest 'httpx<0.28' fakeredis
+            python -m pip install --no-cache-dir pytest pytest-timeout 'httpx<0.28' fakeredis
             echo "── pytest（仓库根）──"
             python -m pytest -q
             echo "── pytest backend_ingestion/tests ──"
-            python -m pytest backend_ingestion/tests/ -q
+            # 2026-10-11 实测：backend 套件一例 F 后整体挂死 10.8m 被 runner SIGKILL，
+            # F 的名字与栈都没打出来。加 pytest-timeout（单测 60s 封顶，超时打栈）
+            # 与 -v（挂死时日志至少留有「最后一个开跑的用例」），一次跑出可定位现场。
+            python -m pytest backend_ingestion/tests/ -v --timeout=60
         - name: npm-test
           image: node:20
           script: |

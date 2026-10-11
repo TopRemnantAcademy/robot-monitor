@@ -420,6 +420,24 @@ def test_e2e_30k_landing() -> None:
         teardown()
 
 
+def dump_failure_logs() -> None:
+    """链路失败取证：抓 timescaledb / backend 两个关键容器的尾部日志。
+
+    只在失败路径调用；`--tail` 限幅防刷屏。compose logs 对**已退出**的容器
+    同样有效（读 stdout 缓冲），故 DB init 中途崩掉（如 CAGG 建不出来）也抓得到。
+    2026-10-11 实测教训：仅凭「/healthz 180s 未到 db=up（快照 None）」无法区分
+    ①init.sql 建表失败 ②backend 容器启动即崩 ③backend 起了但连不上 DB ——
+    三者修法完全不同，必须让日志自己说话。
+    """
+    for svc in ("timescaledb", "backend"):
+        try:
+            proc = compose("logs", "--tail=80", svc, timeout=30, check=False)
+            print(f"\n===== compose logs {svc} (tail 80) =====", flush=True)
+            print((proc.stdout or "")[-8000:] or "(no output)", flush=True)
+        except Exception as exc:  # 取证本身绝不允许改变退出码
+            print(f"(取证失败 {svc}: {exc})", flush=True)
+
+
 def main() -> int:
     """无 pytest 时的入口：0=通过 1=断言失败 3=环境不具备（skip）。"""
     try:
@@ -432,6 +450,7 @@ def main() -> int:
         ev = run_e2e()
     except AssertionError as exc:
         print(f"[e2e] 链路失败：{exc}", flush=True)
+        dump_failure_logs()
         teardown()
         return 1
 
