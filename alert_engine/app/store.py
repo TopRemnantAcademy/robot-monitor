@@ -2,6 +2,10 @@
 
 - 写入 TimescaleDB `robot_alert` 超表
 - **PUBLISH `robot:alerts`** —— 前端告警流的唯一数据源，缺此则前端永远空白
+
+两段是**独立** try/except（刻意的：发不出去不该拦住落库，落库失败也不该拦住前端告警流）。
+代价是二者会各自静默失败，所以 insert 失败必须同时递增
+`robot_alert_store_errors_total`，否则「DB 里没有」与「根本没告警」无法区分。
 """
 
 from __future__ import annotations
@@ -10,6 +14,7 @@ import json
 import logging
 import time
 
+from app import metrics
 from app.config import settings
 from app.db import get_pool, get_redis
 from app.rules.base import Alert
@@ -44,6 +49,13 @@ async def save(alert: Alert) -> None:
                 json.dumps(alert.detail),
             )
     except Exception:
+        # 指标 + 日志，缺一不可（G-4）：
+        # - 日志留现场（堆栈、robot_id），供值班定位到具体是哪条连接/哪条告警；
+        #   只打日志的行，**外部无人知晓**——看板的告警流由下面的 PUBLISH 驱动，
+        #   落库失败但发布成功时，前端该告警照常滚动，看板绿得理直气壮。
+        # - Counter 让 Prometheus 能用 increase(...[5m]) 判「正在失败」，
+        #   并配上 robot-alerts.yml 的 AlertStoreFailing 规则 → 真正的告警的告警。
+        metrics.store_errors.inc()
         log.exception("alert insert failed: %s/%s", alert.robot_id, alert.rule_id)
         alert_id = None
 

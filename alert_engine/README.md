@@ -63,3 +63,40 @@ Redis `alert:dedup:{robot_id}:{rule_id}` + `EX`，`SET ... NX` 保证幂等
 
 `joint_stuck` 的关节名取自**最新一条遥测的键**，不在此处重复硬编码 24 个名字，
 避免与 spec/00 §5.5 / 后端 / 模拟器三处定义漂移。
+
+## 落库失败可观测（G-4）
+
+`store.save()` 里 insert 与 PUBLISH 是**两段独立 try/except**，各自失败只记日志。
+于是「落库挂了」与「压根没告警」在外部看来完全同形：前端告警流照常滚动（发布还成功），
+看板一片绿，只有 DB 对账时才看得出来少数据。
+
+现在 insert 异常分支额外 `metrics.store_errors.inc()`，暴露为：
+
+```
+robot_alert_store_errors_total{...}   # Counter，只在写库失败时涨
+```
+
+配套规则 `infra/observability/rules/robot-alerts.yml` 的 `AlertStoreFailing`：
+
+```promql
+increase(robot_alert_store_errors_total[5m]) > 0     # severity: critical
+```
+
+用 `increase` 而不是 `> 0`：Counter 单调，`> 0` 一旦触发就永不复位（永远在响的死警报）；
+`increase(...[5m])` 只在"最近 5 分钟又在失败"时响，恢复即静默。
+
+语义提醒：`robot_alert_emitted_total` 涨、`robot_alert_store_errors_total` 也涨
+⇒ 告警**确实判定出来了**，只是没进库。这正是看板"假绿"的指纹。
+
+`/metrics` 走 `metrics.start()` 起的独立 HTTP 端口（默认 8001），**无任何鉴权**
+（Prometheus 是 pull 模型，加鉴权等于监控静默失效），非 `/metrics` 路径回 404。
+
+验证：
+
+```bash
+# 单测（含"把埋点摘掉必须变红"的反向护栏）
+cd alert_engine && python -m pytest tests/test_store_metrics.py -q
+
+# 规则指标名 ↔ 代码实存性
+bash infra/observability/verify_wiring.sh
+```
