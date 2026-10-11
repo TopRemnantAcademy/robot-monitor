@@ -100,3 +100,25 @@ cd alert_engine && python -m pytest tests/test_store_metrics.py -q
 # 规则指标名 ↔ 代码实存性
 bash infra/observability/verify_wiring.sh
 ```
+
+## 验收证据（订单 04 / Issue #4）
+
+本目录有两份**可复跑**的验收物，覆盖 orders/04-alert-engine.md §验收标准：
+
+```bash
+# ① 单元级：4 规则触发/不误报、offline 判定的 AST 静态检查、去重幂等、落库+发布
+cd alert_engine && python -m pytest tests/test_rules_acceptance.py -q
+
+# ② 端到端级（无 Docker 也能跑）：mock_fleet 的 payload → consume() → 规则 → 去重
+#    → store（假连接记 SQL）→ PUBLISH；并驱动真 ticker 验 offline
+cd alert_engine && python tests/verify_issue04_acceptance.py
+```
+
+② 用到的替身只有三处外部依赖（Redis→fakeredis、PG 连接池→记录器、MQTT→直接调用
+`RobotState` 生成 payload），`main.consume` / `main.ticker` / 4 条规则 / `deduplicator` /
+`store` 全是真代码。为什么需要它：容器链路（`test_integration.sh`）依赖 Docker，
+在无 Docker 环境里「模拟器 30s+ 出告警」「停机 10s 内出 offline」这两条无法在
+EMQX+TimescaleDB 里验，但引擎侧逻辑可以完整驱动。
+
+`tests/test_rules_acceptance.py` 另有**反向护栏**：把任一规则/去重器/落库改坏
+（阈值取反、去掉 NX、fetchval 换 execute 等），对应用例必须变红——已实测 6/6 全红。
