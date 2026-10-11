@@ -20,11 +20,23 @@ python3 scripts/export-openapi.py --check docs/contracts/openapi.snapshot.json
 
 echo
 echo "== 2) 生成类型必须与入库产物一致（T1/T2 核心门禁）=="
-# 前端依赖已在镜像构建期**全局安装**（见 ci/contract-gate.Dockerfile），
-# 这里不再软链 node_modules —— 曾用 `ln -s /tmp/fe/node_modules ...` 省一次 npm ci，
-# 真机失败（构建 cnb-pm7-1k4k4emnd）：.bin/ 里的 shim 是按**自身真实路径**相对回跳
-# `../esbuild/bin/esbuild` 的，跨 /tmp 与 workspace 两个挂载点后相对路径失效。
+# 【为什么要把镜像里的 node_modules 接回工作区】
+# 真机报错（构建 cnb-1tc-1k4k4ng86）：
+#   Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'ajv'
+#   imported from /workspace/frontend_dashboard/tests/ws-envelope.test.mjs
+# 根因：Dockerfile 在构建期 npm ci 出的 node_modules 留在**镜像**里，
+# 而任务运行时的工作区是从 git checkout 出来的、**没有 node_modules**；
+# 且 Node 的 ESM 解析只沿「文件所在目录 → 上级」逐级找 node_modules，
+# **既不认全局包，NODE_PATH 对 ESM 也完全无效**（两条都实测过，
+# 见 ci/contract-gate.Dockerfile 把产物固定到 /opt/fe/node_modules 的那段注释）。
+# 不接回来，第 3 步 `import 'ajv'` 必红。
+# 这里整份软链（不是单挑 ajv）——ajv 还有 fast-deep-equal / fast-uri /
+# json-schema-traverse / require-from-string 四个传递依赖，缺一就崩。
+# 只软链 node_modules、不软链 .bin，故不触发 16ae80c 记录的 .bin shim 相对回跳问题。
 cd frontend_dashboard
+if [ -d /opt/fe/node_modules ] && [ ! -e node_modules ]; then
+  ln -s /opt/fe/node_modules node_modules
+fi
 npm run gen:types
 cd ..
 git diff --exit-code -- frontend_dashboard/src/types/api.gen.ts

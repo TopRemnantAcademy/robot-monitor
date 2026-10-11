@@ -46,10 +46,29 @@ RUN python3 -m pip install --no-cache-dir --break-system-packages \
 # （openapi-typescript ^7.13.0 / typescript 5.6.3 / ajv ^8.20.0），
 # 避免 CI 与本地各跑一个版本。
 COPY frontend_dashboard/package.json frontend_dashboard/package-lock.json frontend_dashboard/
+# 【为什么装完要把 node_modules 挪到 /opt/fe/node_modules】
+# 任务运行时的工作区是**从 git checkout 出来的**，不含 node_modules；
+# 而 Node 的 ESM 解析只沿「文件 → 上级目录」找 node_modules，**不认全局包、
+# NODE_PATH 对 ESM 也无效**（两条都实测过）。所以第 3 步 `import 'ajv'` 必红
+# （真机报错：构建 cnb-1tc-1k4k4ng86，Cannot find package 'ajv'）。
+# 这里把 npm ci 的产物固定在一个**与工作区挂载点无关**的绝对路径，
+# 供 ci/contract-gate.sh 在运行时软链回 frontend_dashboard/node_modules。
+#
+# ⚠️ 目录名必须逐字叫 `node_modules`（所以是 /opt/fe/node_modules，不是 /opt/fe-modules）：
+# 包内部 `import '@redocly/openapi-core'` 是按其**自身真实路径**
+# /opt/fe/node_modules/openapi-typescript/bin/cli.js 向上找 node_modules 的。
+# 叫 /opt/fe-modules 时，祖先链只有 /opt/fe-modules/openapi-typescript/node_modules
+# 和 /opt/node_modules —— 都够不到同级的 @redocly，
+# 于是报 Cannot find package '@redocly/openapi-core'（实测）。
+# 必须是完整目录而非单个包：openapi-typescript 依赖 @redocly/*，
+# ajv 依赖 fast-deep-equal / fast-uri / json-schema-traverse / require-from-string。
 RUN cd frontend_dashboard \
  && npm ci --no-audit --fund=false \
+ && mkdir -p /opt/fe \
+ && mv node_modules /opt/fe/node_modules \
  && npm install -g --no-audit --fund=false \
       openapi-typescript@7.13.0 typescript@5.6.3 ajv@8.20.0 \
  && openapi-typescript --version \
  && tsc --version \
+ && test -d /opt/fe/node_modules/ajv \
  && python3 -m pip --version
