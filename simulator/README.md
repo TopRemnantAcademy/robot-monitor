@@ -41,3 +41,29 @@ python mock_fleet.py --robots 100 --broker localhost --port 1883 --fault-rate 0.
   并发直接 publish 会产生 "pending publish calls" 堆积。
 - 面板用 `rich.live.Live` **每秒刷新一次**，不逐条 print。
 - MQTT 断线指数退避重连（1s 起，上限 30s）。
+
+## 任务级协同仿真（Issue #63 / G-7）
+
+`mock_fleet.py` 只产独立波形；`task_sim.py` 在其 payload 构造器与 MQTT 发布器之上
+叠加**任务调度器**，让多台机器人遥测在时间上相关（流水线工位轮转 / 故障传播），
+相关性完全来自调度逻辑，**不硬编码相关系数**。
+
+```bash
+# 流水线场景：纯仿真 + 相关性断言（无需 broker，用于验收）
+python simulator/task_sim.py --scenario pipeline --stations 3 --cycle 12 --no-broker --duration 60
+
+# 故障传播场景：发给真实 broker
+python simulator/task_sim.py --scenario fault --robots 12 --broker localhost --port 1883
+```
+
+| 参数 | 默认 | 说明 |
+| :--- | :--- | :--- |
+| `--scenario` | pipeline | `pipeline`（流水线工位轮转）/ `fault`（中枢故障→邻居队列积压） |
+| `--stations` | 3 | 流水线工位数（pipeline） |
+| `--cycle` | 12 | 流水线/故障周期（秒） |
+| `--no-broker` | false | 纯仿真 + 相关性断言，不连 MQTT |
+| `--out` | task_sim_series.json | 60s 遥测样本导出路径（供绘图/复核） |
+
+验收证据：`--no-broker` 模式导出 60s 遥测并计算 Pearson 相关，断言至少一对机器人
+指标序列显著相关（|r| ≥ 0.3），退出码 0=通过 / 2=未达标。实测：pipeline r≈−0.54（相邻工位反相关），
+fault r≈+0.99（中枢-邻居正相关）。输出仍走 MQTT（topic/payload 与 mock_fleet 完全一致）。
