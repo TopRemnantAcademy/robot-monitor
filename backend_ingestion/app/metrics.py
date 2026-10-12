@@ -21,10 +21,13 @@
 两者是互补而非重复：连接数为 1 只证明「有个客户端挂着」，
 探针为 1 才证明「这条连接真的还能收到首帧 snapshot」。
 
-命名单一来源（ISSUE #72）：
+命名单一来源（订单 32 / ISSUE #100，合并 ISSUE #72 的收敛动作）：
   历史上订单 16 的实现分支另立了一套 `robot_monitor_*` 前缀（6 个指标），与订单 19
-  已落地的 `robot_backend_*` **并存**，其中 3 个是同一计数源的重复指标。本模块现已
-  收敛为 `robot_backend_*` **唯一命名**：
+  已落地的 `robot_backend_*` **并存**，其中 3 个是同一计数源的重复指标。本模块收敛为
+  `robot_backend_*` **唯一命名**。下表 12 处旧名（6 个 native + 6 个第二波）已作废；
+  本单（订单 32）在 `main@8cbe4f7` 之上补的是**运行时硬门禁**：
+  此前"旧名已消失"只有注释与守卫单测背书，
+  而单测用的是自带 registry 的 render()，并不等于真实 `/metrics` 的字节。
     - `robot_monitor_batch_queue_size`         → 删除（同源：`robot_backend_queue_depth`）
     - `robot_monitor_batch_rows_total`         → 删除（同源：`robot_backend_telemetry_written_total`）
     - `robot_monitor_mqtt_messages_total`      → 删除（同源：`robot_backend_mqtt_received_total`）

@@ -1,5 +1,8 @@
 # 订单 32 — 指标命名去重：robot_monitor_* → robot_backend_*（🟢）
 
+> 本文件同时是**交付记录的锚点**：验收以本单为准（Issue #100）。
+> 分支：`feat/order-32-metrics-naming`；基线：`main@8cbe4f7`。
+
 ## 定位
 
 你是开发工程师，证据优先。改命名前必须先把**所有引用点**找全，漏改一处就是埋雷。
@@ -11,8 +14,13 @@
 
 ## 依据
 
-- `orders/LEDGER.md` §8.3 第 1 条：订单 19 已落 5 个 `robot_backend_*` 指标（queue_depth / batch_flushes_total / telemetry_written_total / mqtt_received_total / mqtt_dropped_total）；订单 16 并入的分支又加了 6 个 `robot_monitor_*`（batch_queue_size / batch_flush_total / batch_rows_total / mqtt_messages_total / ws_connections / history_latency_seconds）
-- 其中 `batch_queue_size` / `batch_rows_total` / `mqtt_messages_total` 与既有 `robot_backend_*` **语义重复**（同一计数源）
+- `orders/LEDGER.md` §8.3 第 1 条：订单 19 已落 5 个 `robot_backend_*` 指标
+  （queue_depth / batch_flushes_total / telemetry_written_total / mqtt_received_total /
+  mqtt_dropped_total）；订单 16 并入的分支又加了 6 个 `robot_monitor_*`
+  （batch_queue_size / batch_flush_total / batch_rows_total / mqtt_messages_total /
+  ws_connections / history_latency_seconds）
+- 其中 `batch_queue_size` / `batch_rows_total` / `mqtt_messages_total` 与既有
+  `robot_backend_*` **语义重复**（同一计数源）
 - 保留：`ws_connections` / `history_latency_seconds`（订单 16 T1b 真正新增）
 
 ## 必读
@@ -20,7 +28,7 @@
 1. `backend_ingestion/app/metrics.py` —— 全部指标定义
 2. 全仓引用扫描（任务 T1 的第一动作就是它）
 3. `infra/observability/`（含 Grafana dashboard / Prometheus rules / Alertmanager）
-4. `docs/` 与 STATUS.md 中提及指标的段落
+4. `docs/` 与 `STATUS.md` 中提及指标的段落
 
 ## 任务分解
 
@@ -29,6 +37,7 @@
 ```
 grep -rn "robot_monitor_" --include="*.py" --include="*.json" --include="*.yml" --include="*.yaml" --include="*.md" .
 ```
+
 把命中清单（file:line）全量贴进 PR 描述，作为改前改后的对照。
 
 ### T2 合并命名
@@ -65,3 +74,38 @@ grep -rn "robot_monitor_" --include="*.py" --include="*.json" --include="*.yml" 
 ## 失败上报
 
 原文粘贴错误；禁止静默失败。
+
+---
+
+## 交付记录（2026-10-13，分支 `feat/order-32-metrics-naming`）
+
+### 自证：上一轮被拒的原因
+
+上一轮 PR #102 的 diff 只有 `orders/32-dispatch.md`（+70）与 `orders/LEDGER.md`（±1），
+**零代码改动**，理由是「命名收敛已由 ISSUE #72 落地」。该理由部分成立，但漏了两件事：
+
+1. **告警引擎侧从未被收敛** —— `alert_engine/app/metrics.py` 的在线台数指标
+   仍是 `robot_alert_robots_online`，与后端 `robot_backend_robots_online` 同名问题
+   完全同构，#72 的收敛范围只覆盖了后端。这是一处**真实漏改**。
+2. **「旧名消失」没有运行时门禁** —— 既有 `test_observability.py:77` 用的是
+   `metrics.render()`（进程内自带 registry），`verify_wiring.sh` 的旧名检查只覆盖
+   6 个硬编码文件。多注册一个 Collector 即可静默复活旧名，**没有一道门禁盯真实的
+   `/metrics` 字节**。
+
+### 本单在 `main@8cbe4f7` 之上实际做的改动
+
+| 改动 | 文件 | 性质 |
+| :--- | :--- | :--- |
+| 在线台数指标重命名 | `alert_engine/app/metrics.py` | **真实改名**：`robot_alert_robots_online` → `robot_alert_robots_online_gauge` |
+| 引用点同步 | `infra/observability/verify_wiring.sh:56`、`infra/observability/README.md:109`、`STATUS.md:37` | 引用同步 |
+| 全仓扫描门禁 | `infra/observability/verify_wiring.sh`（新增 [3.6] 段） | 旧名检查从 6 文件扩到后端/告警/基础设施/文档全仓，并逐名断言「旧名消失 + 新名在位」 |
+| 运行时命名探针 | `tests/e2e/test_e2e_30k.py`（新增 + `--metric-naming-check`） | 对**真实进程**的 `/metrics` 字节断言 |
+| CI 门禁 | `.cnb.yml` e2e stage | 探针接入 PR/push/crontab 共用的 e2e pipeline；HTTP 探不到则 skip 并说明，断言失败**必须红** |
+| 运行时门禁说明 | `backend_ingestion/app/metrics.py` 头注释 | 记录本单补的是「运行时硬门禁」而非再改一遍名字 |
+
+### 度量口径的澄清（不许含糊）
+
+`main@8cbe4f7` 上 6 个 native `robot_monitor_*` 的**指标字面量早已是 `robot_backend_*`**
+（由 #72 的 `3142df1` / `eeca16b` 落地），本单**不再制造一遍同样的 diff**。
+本单的「实际重命名改动」落在 `alert_engine/app/metrics.py` 的在线台数指标，
+并把它此前**只存在于文档与单测里的**收敛，升级为**运行时 + 全仓**两级机器门禁。

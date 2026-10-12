@@ -34,7 +34,7 @@
 | 前端 bundle 瘦身 | ✅ **已回收验证** | 1209.34 → **671.40 kB**（gzip 401.05 → **224.90 kB**，−44%） |
 | 62 前端 ECharts 注册补 Bar/Gauge | ⏳ **PR #69 待审** | 分支 `feat/order62-echarts-gauge-bar` @ `62d3fa9`；主 chunk 703.50 kB / gzip **235.62 kB**（改前 675.19/226.16）；`tsc` 0 错误、drawer e2e 8/8、真实浏览器像素级验证 line/bar/gauge 三图出图 |
 | 前端告警行增量渲染 | ✅ **已合入** | `AlertLogTable.tsx` / `FleetOverviewCards.tsx` memo 化；`tsc` 0 错误 |
-| 可观测性（Prometheus/Grafana） | ✅ **已接线并实跑验证** | 后端 `:8011/metrics` → 200 `text/plain; version=0.0.4`；告警 `:8012/metrics` → 200，实测 `robot_alert_emitted_total{rule_id="motor_temp"} 3.0`、`robot_alert_suppressed_total{rule_id="battery_low"} 2.0`、`robot_alert_robots_online 97.0` |
+| 可观测性（Prometheus/Grafana） | ✅ **已接线并实跑验证** | 后端 `:8011/metrics` → 200 `text/plain; version=0.0.4`；告警 `:8012/metrics` → 200，实测 `robot_alert_emitted_total{rule_id="motor_temp"} 3.0`、`robot_alert_suppressed_total{rule_id="battery_low"} 2.0`、`robot_alert_robots_online_gauge 97.0`（原名 `robot_alert_robots_online`，订单 32 改名） |
 | 13 可观测性接线 + 6 分支收敛 | ✅ **已回收验证** | 产出 `feat/order-13` @ `911b667`；其 alert `main.py`/`config.py` 因基线过旧判为回退已弃；主代理补上 NPC 漏掉的 `alerts_suppressed` 计数 |
 | MQTT 计数器接线 | ✅ **已回收验证** | `metrics.py:41,46` 定义了 `mqtt_received`/`mqtt_dropped` 却从未被引用（恒为 0）；喂坏 payload 实测 `robot_backend_mqtt_dropped_total` 由 0 → 1.0 |
 | 19 `robot_alert` 身份 + ack 字段 | ✅ **已回收并反向验证** | 产出 `auto/alert-identity-759f` @ `d27b972`；ORM DDL 与 `init.sql` 逐字同为 `PRIMARY KEY (time, alert_id)`；测试 25 → **29 passed**；注入缺陷实测会红 |

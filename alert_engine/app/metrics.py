@@ -55,8 +55,20 @@ alerts_escalated = Counter(
     ["rule_id"],
     registry=registry,
 )
+# 在线台数（订单 32 / ISSUE #100 改名）：原名 `robot_alert_robots_online`。
+#
+# 为什么改名：`_gauge` 后缀是**类型自证**，不是装饰。同名问题真实发生过 ——
+# ISSUE #72 的起因就是「同一个在线台数」在两个进程里各有一个名字
+# （后端 `robot_backend_robots_online`、告警引擎 `robot_alert_robots_online`），
+# 面板/告警要维护两套 PromQL，且**没人能从名字判断哪个是 Gauge、哪个是 Counter**。
+# 本次只改告警引擎侧：后端侧的名字被现网 PromQL 与 `rules/robot-alerts.yml` 引用，
+# 改它属跨单返工（订单 32 禁止项 5）。加 `_gauge` 后，抓取端与面板作者
+# 一眼可辨「这只可增可减、禁止对它用 rate()」，两个名字的差异也变得显式可查。
+#
+# 判据来源（阈值内 `last_seen`）见 `alert_engine/app/main.py:252` 的 ticker；
+# 分子/分母口径（在线 / 固定 100）由 ticker 每秒刷新。
 robots_online = Gauge(
-    "robot_alert_robots_online",
+    "robot_alert_robots_online_gauge",
     "ticker 线当前判定为在线的机器人数（分母固定 100）",
     registry=registry,
 )

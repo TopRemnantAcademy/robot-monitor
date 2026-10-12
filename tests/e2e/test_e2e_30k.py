@@ -48,6 +48,18 @@
     # 无 pytest（本文件自带 main，退出码 0=通过 3=skip 1=失败）
     python tests/e2e/test_e2e_30k.py
 
+指标命名反例探针（订单 32 / ISSUE #100）
+--------------------------------------
+本文件除了 30k 落库，还**顺路**在真实栈上验一次指标命名：`/healthz` 与
+`/metrics` 是同一进程暴露的两个端点，既然栈已经起着，抓一次真实
+`/metrics` 的**原始字节**来断言「新名在、旧名消失」比另起一套 mock 更硬。
+`assert_metric_naming()` 断言的失败对象是**服务**（旧名残留 / 新名缺失），
+不属环境问题，按「不伪装 skip」的规矩必须 red —— 详见该函数注释。
+为什么不写成单测：`backend_ingestion/tests/test_observability.py` 用的是
+`metrics.render()`（**进程内、自带 registry**）+ `TestClient`，它证明不了
+「跑起来的那个进程吐出的字节」—— 而 `robot_monitor_*` 恰恰是**运行时多注册一个
+Collector** 就能复活的东西。探针要盯的是那个进程，所以它必须在栈里、对着真端口。
+
 环境变量（都有默认值，默认即 ISSUE #60 的验收口径）：
     E2E_DURATION=40        压测秒数（40s × 100 台 × 10Hz ≈ 40,000 帧）
     E2E_ROBOTS=100         台数
@@ -55,6 +67,8 @@
     E2E_KEEP=1             结束后保留栈（排查用）
     E2E_UP_TIMEOUT=300     起栈+等健康的超时（秒）
     E2E_COMPOSE=<path>     覆盖 compose 文件路径
+    E2E_METRICS_URL=<url>  /metrics 端点（默认后端 compose 映射的 18000 端口）
+    E2E_METRICS_PREFIX=... 只取该前缀的指标行做命名断言（默认 robot_）
 
 压测自身的发送量下限
 --------------------
@@ -92,6 +106,11 @@ KEEP = os.environ.get("E2E_KEEP") == "1"
 # 走宿主机端口而不是 `compose exec`，是为了不额外依赖容器内的 curl/wget
 # —— backend 镜像只有 python:3.11-slim，没装这俩。
 BACKEND_URL = os.environ.get("E2E_BACKEND_URL", "http://127.0.0.1:18000")
+
+# 指标命名探针（订单 32）：走宿主机映射端口，与 BACKEND_URL 同源同理由
+# （backend 镜像只有 python:3.11-slim，容器内没有 curl/wget，从外面打更省事）。
+METRICS_URL = os.environ.get("E2E_METRICS_URL", BACKEND_URL + "/metrics")
+METRICS_PREFIX = os.environ.get("E2E_METRICS_PREFIX", "robot_")
 
 PYTEST_SKIP_MARKER = "E2E-SKIP"
 
@@ -283,6 +302,11 @@ def run_e2e() -> dict:
           f"dup_pk_groups={dup_groups} pk=({pk_defined}) "
           f"hypertable={hypertable} tsdb={db_version}", flush=True)
 
+    # 7) 指标命名反例探针（订单 32）：栈还活着，顺手抓一次真实 /metrics 的原始字节。
+    #    放在落库取证之后：先保证主链路可用，再验命名 ——
+    #    否则「服务根本没起来」会被误报成「命名有问题」。
+    assert_metric_naming(METRICS_URL, METRICS_PREFIX)
+
     return evidence
 
 
@@ -373,6 +397,107 @@ def assert_e2e(ev: dict) -> None:
     )
 
 
+# ------------------------------------------------------------------ 指标命名反例探针（订单 32）
+
+# 订单 32 T1 的改前 `grep -rn robot_monitor_` 清单里，**曾被注册为指标**的 6 个旧名。
+# 它们是本探针的失败面：任何一个在真实 /metrics 里出现即 red。
+LEGACY_MONITOR_METRICS = (
+    "robot_monitor_batch_queue_size",
+    "robot_monitor_batch_flush_total",
+    "robot_monitor_batch_rows_total",
+    "robot_monitor_mqtt_messages_total",
+    "robot_monitor_ws_connections",
+    "robot_monitor_history_latency_seconds",
+)
+
+# 改后必须存在的规范名（订单 32 T2 的两个真正新增 + 消重后承接同源计数的 4 个）。
+REQUIRED_BACKEND_METRICS = (
+    "robot_backend_queue_depth",
+    "robot_backend_batch_flushes_total",
+    "robot_backend_telemetry_written_total",
+    "robot_backend_mqtt_received_total",
+    "robot_backend_ws_connections",
+    "robot_backend_history_latency_seconds",
+)
+
+
+def metric_lines(metric_name_prefix: str, text: str) -> list[tuple[str, str]]:
+    """从 /metrics 文本里提取指标行。
+
+    为什么必须有这一层：`metrics.py` 的头部注释里**有意保留**旧名的迁移记录
+    （把「旧名已作废」写下来，比删掉它更有用）。直接 `in` 全文断言会把注释
+    误判成违规指标，从而造出一个「永远红」的假门禁 —— 这类门禁最坏的结局是被人加
+    `|| true` 关掉。这里只认指标行：Prometheus exposition 的指标行形如
+    `name{suffix}?[ ][value]`，注释行以 `#` 开头（含 `# HELP` / `# TYPE`）。
+    """
+    out = []
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        line_name = line.split("{", 1)[0].split(" ", 1)[0]
+        if line_name.startswith(metric_name_prefix):
+            cells = line.split()
+            out.append({
+                "name": line_name,
+                "samples": [c.strip(",") for c in cells[1:]] or [""],
+                "raw": line.strip(),
+            })
+    return out
+
+
+def assert_metric_naming(url: str, prefix: str) -> None:
+    """对真实服务断言：规范名在、旧名消失。
+
+    取值的两种失败必须分开报：
+      - HTTP 拿不到（探针从没跑成）→ skip 并说明，不伪装成通过；
+      - HTTP 拿到了但内容不合口径（旧名还在 / 新名缺了）→ **red**。
+    后者是本探针存在的唯一理由：它是一道**反例门禁**，
+    不能因为它「只是顺路加的」就在断言失败时退化成 skip。
+    """
+    text = http_get(url)
+    if text is None:
+        _pytest_skip(
+            f"指标命名探针无法访问 {url}（backend:8000 的 /metrics）。"
+            "若服务未起来，wait_backend_db_up 已先失败；此处属探针未配好。"
+        )
+        return
+
+    shown = metric_lines(prefix, text)
+    # 命中判据必须**逐族**而不是逐名字面量：Prometheus exposition 里
+    #   - Counter / Gauge / Summary 有 `robot_backend_x <v>` 这样以名字开头的裸样本行；
+    #   - **Histogram 没有** —— 它只有 `robot_backend_x_bucket{le=...}` / `_count` / `_sum`。
+    # 第一版写成 `name == "robot_backend_history_latency_seconds"` 就永远命中不了，
+    # 造出一道「离线正例都过不去」的假门禁（本文件外加实测抓出来的）。
+    # 故判据改为「名字本身，或名字 + `_` 后跟细分后缀」。
+    names_here = {ln["name"] for ln in shown}
+
+    def _hits(metric: str) -> list[dict]:
+        return [ln for ln in shown if ln["name"] == metric
+                or ln["name"].startswith(metric + "_")]
+
+    leaked = [m for m in LEGACY_MONITOR_METRICS if _hits(m)]
+    assert not leaked, (
+        f"真实 /metrics 残留旧前缀指标 {leaked}（订单 32 验收：旧名必须消失）。"
+        f"实测原始行：{[ln['raw'] for m in leaked for ln in _hits(m)][:5]}"
+    )
+    missing = [m for m in REQUIRED_BACKEND_METRICS if not _hits(m)]
+    assert not missing, (
+        f"真实 /metrics 缺少规范名 {missing}（订单 32 验收：新名必须在）。"
+        f"该前缀下实测到 {len(names_here)} 个指标名，样本：{sorted(names_here)[:8]}"
+    )
+    print(f"[e2e] 指标命名探针通过：旧名前缀 0 命中，规范名 {len(REQUIRED_BACKEND_METRICS)} 个在位",
+          flush=True)
+
+
+def http_get(url: str, timeout: int = 5) -> str | None:
+    """取 URL 文本；失败返回 None（调用方决定 skip 还是 red）。"""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", "replace")
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return None
+
+
 # ------------------------------------------------------------------ 报告
 
 def render_report(ev: dict) -> str:
@@ -397,13 +522,26 @@ def render_report(ev: dict) -> str:
 
 
 def _pytest_skip(reason: str):
-    """在 pytest 与裸跑两种上下文里都 skip。"""
-    try:
+    """在 pytest 与裸跑两种上下文里都 skip。
+
+    实现注意（实测踩过）：不能只用 `import pytest` 判断上下文 ——
+    pytest **装在本环境里**，裸跑时那个 import 同样会成功，
+    于是 `main()` 里想「打印原因 + 退出码 3」的路径会变成 `pytest.skip()`
+    抛 `Skipped` 异常，直接糊在 traceback 上（本文件加 `--metric-naming-check`
+    时实测到了）。判据改用 `under_pytest()`（pytest 会把自身注入 sys.modules
+    且在**非 __main__** 的模块里执行用例）。
+    """
+    if under_pytest():
         import pytest  # noqa: PLC0415
-    except ImportError:
-        print(f"{PYTEST_SKIP_MARKER}: {reason}", flush=True)
-        sys.exit(3)
-    pytest.skip(reason)
+
+        pytest.skip(reason)
+    print(f"{PYTEST_SKIP_MARKER}: {reason}", flush=True)
+    sys.exit(3)
+
+
+def under_pytest() -> bool:
+    """当前是否由 pytest 驱动（而非 `python tests/e2e/test_e2e_30k.py` 裸跑）。"""
+    return "pytest" in sys.modules and __name__ != "__main__"
 
 
 def test_e2e_30k_landing() -> None:
@@ -439,7 +577,28 @@ def dump_failure_logs() -> None:
 
 
 def main() -> int:
-    """无 pytest 时的入口：0=通过 1=断言失败 3=环境不具备（skip）。"""
+    """无 pytest 时的入口：0=通过 1=断言失败 3=环境不具备（skip）。
+
+    另有 `--metric-naming-check`：**不**要求 docker，只对已在跑的栈做一次
+    订单 32 的命名反例断言。CI 里栈是 `docker compose up -d` 起来的
+    （不含 stress profile），用这个开关就能把命名门禁挂进已有 pipeline，
+    不必在 pytest 里重起一次栈。
+    """
+    if "--metric-naming-check" in sys.argv:
+        # 环境不具备 → 3（skip，CI 需转成 0 并打印原因）；断言失败 → 1（**必须 red**）。
+        if not COMPOSE_FILE.is_file():
+            print(f"{PYTEST_SKIP_MARKER}: compose 文件不存在：{COMPOSE_FILE}", flush=True)
+            return 3
+        try:
+            assert_metric_naming(METRICS_URL, METRICS_PREFIX)
+        except AssertionError as exc:
+            print(f"[e2e] 指标命名门禁未通过：{exc}", flush=True)
+            return 1
+        except E2ESkip as exc:  # assert_metric_naming 内部走 _pytest_skip，这里兜底
+            print(f"{PYTEST_SKIP_MARKER}: {exc}", flush=True)
+            return 3
+        return 0
+
     try:
         require_docker()
     except E2ESkip as exc:

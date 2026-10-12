@@ -53,7 +53,7 @@ for m in robot_backend_queue_depth robot_backend_mqtt_dropped_total \
          robot_backend_ws_probe_alive robot_backend_ws_probe_failures_total; do
   if grep -rq "$m" backend_ingestion/app/metrics.py; then ok "$m (backend)"; else bad "$m 未定义"; fi
 done
-for m in robot_alert_emitted_total robot_alert_robots_online \
+for m in robot_alert_emitted_total robot_alert_robots_online_gauge \
          robot_alert_store_errors_total; do
   if grep -rq "$m" alert_engine/app/metrics.py; then ok "$m (alert)"; else bad "$m 未定义"; fi
 done
@@ -86,6 +86,60 @@ for f in backend_ingestion/app/metrics.py backend_ingestion/app/main.py \
   fi
 done
 [ "$dual" -eq 0 ] && ok "无 robot_monitor_* 残留（代码/规则/抓取配置）"
+
+# 订单 32 / ISSUE #100：把上面那条「无 robot_monitor_* 残留」从**6 个硬编码文件**
+# 扩成**全仓扫描**，并同时卡住「改前存在的旧名是否真的消失」。
+#
+# 为什么要扩：原来的 for 列表是手工维护的 —— 新加一个文件引用了旧前缀，
+# 巡检器**看不见**（列表外）。这正是 ISSUE #72 复发过的形态：三个回收分支各自
+# 新增引用，谁都以为巡检覆盖到了。列表可扩，遗漏不可见。
+#
+# 判定形态与上面一致（引号内指标名 / 规则表达式），故迁移记录的反引号写法不算违规。
+# 白名单（历史留档 + 本单调度的对照清单）：
+#   orders/**             —— 派工单与 LEDGER 的历史记录，逐字留档是纪律
+#   backend_ingestion/tests/test_observability.py —— FORBIDDEN_MONITOR_PREFIX 守卫常量
+#   infra/observability/verify_wiring.sh          —— 本脚本内的检测正则（自指）
+dual_all=0
+for f in $(grep -rl "robot_monitor_" \
+              backend_ingestion alert_engine infra docs \
+              --include="*.py" --include="*.json" --include="*.yml" \
+              --include="*.yaml" --include="*.md" --include="*.sh" 2>/dev/null \
+           | grep -v "test_observability.py" | grep -v "verify_wiring.sh"); do
+  if grep -qE '["'"'"']robot_monitor_[a-z_]+["'"'"']' "$f" \
+     || grep -qE '^\s*(expr|-[[:space:]]+alert):.*robot_monitor_' "$f"; then
+    bad "$f 仍引用 robot_monitor_*（全仓扫描；订单 32）"; dual_all=1
+  fi
+done
+[ "$dual_all" -eq 0 ] && ok "全仓扫描：无 robot_monitor_* 活跃引用（代码/规则/配置/文档）"
+
+echo "==> [3.6/5] 订单 32：改名前后对照（旧名必须消失、新名必须存在）"
+# 旧名清单 = 订单 32 T1 的改前 grep 清单里**曾被注册为指标**的那些。
+# 这里在**代码字面量**层面断言它们已不存在（注释里的迁移记录仍允许保留）。
+for old in robot_monitor_batch_queue_size robot_monitor_batch_flush_total \
+           robot_monitor_batch_rows_total robot_monitor_mqtt_messages_total \
+           robot_monitor_ws_connections robot_monitor_history_latency_seconds; do
+  if grep -qE '["'"'"']'"$old"'["'"'"']' backend_ingestion/app/metrics.py; then
+    bad "旧名仍被注册：$old"
+  else
+    ok "旧名已消失：$old"
+  fi
+done
+# 新名清单（后端 7 个 + 告警引擎 1 个改名）
+for m in robot_backend_queue_depth robot_backend_batch_flushes_total \
+         robot_backend_telemetry_written_total robot_backend_mqtt_received_total \
+         robot_backend_ws_connections robot_backend_history_latency_seconds; do
+  if grep -qE '["'"'"']'"$m"'["'"'"']' backend_ingestion/app/metrics.py; then
+    ok "新名在位：$m"
+  else
+    bad "新名缺失：$m"
+  fi
+done
+if grep -qE '["'"'"']robot_alert_robots_online_gauge["'"'"']' alert_engine/app/metrics.py \
+   && ! grep -qE '["'"'"']robot_alert_robots_online["'"'"']' alert_engine/app/metrics.py; then
+  ok "告警引擎在线台数改名：robot_alert_robots_online → robot_alert_robots_online_gauge"
+else
+  bad "告警引擎在线台数改名未生效（robot_alert_robots_online_gauge）"
+fi
 
 echo "==> [3.5/5] 备份指标接线（订单 31 §T3）"
 # 规则里引用的备份指标，必须能在「视图 + 查询定义」里找到来源，否则是引用空气。

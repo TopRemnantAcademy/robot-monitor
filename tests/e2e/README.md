@@ -77,6 +77,35 @@ docker compose -f tests/e2e/docker-compose.e2e.yml down -v
    台数被静默覆盖、broker 写错、发布侧持续报错，都会一路苟到断言阶段甚至被阈值放过。
    加了下限，失败发生在**离因最近的地方**，日志直接点名原因。
 
+## 订单 32：指标命名反例探针（`--metric-naming-check`）
+
+`test_e2e_30k.py` 除落库断言外，还对**真实 `/metrics` 的原始字节**断言指标命名：
+
+```bash
+# 栈已在跑（含 backend 的 18000→8000 映射）时：
+python tests/e2e/test_e2e_30k.py --metric-naming-check
+# 0=通过 1=命名不合口径（red） 3=环境不具备（skip）
+```
+
+断言两件事：6 个 `robot_monitor_*` 旧名 0 命中、6 个 `robot_backend_*` 规范名在位。
+为什么必须是运行时探针而不是单测：`backend_ingestion/tests/test_observability.py`
+跑的是 `metrics.render()`（进程内自带 registry）+ `TestClient`，
+**它证明不了「跑起来的那个进程吐出的字节」** —— 而旧前缀恰恰是「多注册一个
+Collector 就复活」的东西。探针盯的是进程，所以它必须在栈里、对着真端口。
+
+细节（都是实测踩出来的）：
+
+- 命中判据**逐指标族**而非逐名字面量：Histogram 没有 `name <value>` 裸样本行，
+  只有 `name_bucket{le=}` / `_count` / `_sum`。第一版按字面量等值匹配，
+  连正例都过不去 —— 那会造出一道「永远红」的假门禁。
+- 只认**指标行**（跳过 `#` 注释）：`metrics.py` 头注释里有意保留了旧名的迁移记录，
+  全文 `in` 断言会把迁移记录误判成违规。
+- 探针自身做了反例自检（见 PR 描述）：注入 `robot_monitor_ws_connections` 后必红。
+
+CI 里挂在 `e2e-30k-landing` stage 的**最前面**，自己 `up -d`（不带 stress profile）
+拿到活的 backend，断言完再 `down`。HTTP 探不到 → `[SKIP]` 并 exit 0；
+断言失败 → 退出码 1 → **stage 变红**（一个吞掉失败的门禁比没有门禁更糟）。
+
 ## 与 `test_integration.sh`（订单 06）的关系
 
 `test_integration.sh` 在**宿主机裸跑**且**无 Docker 就整体退出**，没有 CI 分支。

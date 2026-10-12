@@ -247,6 +247,47 @@ main:
             fi
             echo "python 可用：$($PY --version 2>&1)"
 
+            # ---- 订单 32 / ISSUE #100：指标命名反例探针 ----
+            #
+            # 为什么挂在**这里**（先把栈起好、再针对已起的栈断言）：命名门禁要断言的是
+            # 「跑起来的那个进程吐出的字节」，而 `test_e2e_30k.py` 的 run_e2e() 中途
+            # 会 teardown 掉栈；等它跑完再探就没人接了。故由本 stage 自己先 `up -d`
+            # （**不带 stress profile**，不起 mock_fleet）拿到一个活的 backend，
+            # 跑一次命名断言，然后 down 掉 —— 与 30k 落库两件事互不干扰。
+            #
+            # 判定：HTTP 探不到 → [SKIP] 并 exit 0（环境问题，不伪装通过）；
+            #       旧名残留 / 新名缺失 → 脚本退出码 1 → **本 stage 变红**。
+            # 这道门禁的价值全在「能红」：一个吞掉失败的门禁比没有门禁更糟。
+            echo "== 订单 32：指标命名反例探针 =="
+            if ! docker compose -f tests/e2e/docker-compose.e2e.yml up -d --build \
+                 emqx timescaledb redis backend; then
+              echo "【E2E SKIP】订单 32 命名探针：起栈失败（环境问题，非代码失败）"
+              docker compose -f tests/e2e/docker-compose.e2e.yml down -v --remove-orphans || true
+              exit 0
+            fi
+            i=0
+            while [ $i -lt 36 ]; do
+              if curl -sf http://127.0.0.1:18000/healthz >/dev/null 2>&1; then break; fi
+              i=$((i + 1)); sleep 5
+            done
+            if ! curl -sf http://127.0.0.1:18000/metrics >/dev/null 2>&1; then
+              echo "【E2E SKIP】订单 32 命名探针：/metrics 在 180s 内不可达（栈未就绪）"
+              docker compose -f tests/e2e/docker-compose.e2e.yml down -v --remove-orphans || true
+              exit 0
+            fi
+            $PY tests/e2e/test_e2e_30k.py --metric-naming-check
+            naming_rc=$?
+            docker compose -f tests/e2e/docker-compose.e2e.yml down -v --remove-orphans || true
+            if [ "$naming_rc" = "3" ]; then
+              echo "【E2E SKIP】订单 32 命名探针：脚本自判环境不具备（退出码 3），非代码失败。"
+              exit 0
+            fi
+            if [ "$naming_rc" != "0" ]; then
+              echo "【E2E FAIL】订单 32 命名门禁未通过（退出码 $naming_rc）—— 旧前缀指标残留或规范名缺失。"
+              exit "$naming_rc"
+            fi
+            echo "订单 32 命名门禁通过：/metrics 旧名 0 命中，robot_backend_* 规范名全部在位。"
+
             # 依赖：e2e 脚本只用标准库（subprocess/urllib），无需 pip 安装。
             $PY tests/e2e/test_e2e_30k.py
             rc=$?

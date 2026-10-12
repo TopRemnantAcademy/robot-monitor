@@ -89,6 +89,24 @@ prometheus.yml
 **面板/告警若引用过 `robot_monitor_*`，需同步改名**（本仓 rules 与 verify_wiring 已同步；
 外部 Grafana 面板不在仓库内，属运维侧动作）。改名的两个指标 PromQL 写法不变，只是名字换了。
 
+#### 4.0.1 订单 32 的收口：从「文档说已改」到「机器能证明已改」
+
+上面的表是**记录**，不是**门禁**。订单 32（ISSUE #100）补的是门禁本身：
+
+| 层级 | 门禁 | 位置 | 能红吗 |
+|---|---|---|---|
+| 单测 | `FORBIDDEN_MONITOR_PREFIX` 前缀断言 | `backend_ingestion/tests/test_observability.py` | 能（进程内 registry） |
+| 静态 | 全仓扫描 + 逐名对照（旧名消失 / 新名在位） | `infra/observability/verify_wiring.sh` [3.6] | 能（实测注入旧名即 FAIL） |
+| **运行时** | 真实 `/metrics` 字节断言 | `tests/e2e/test_e2e_30k.py --metric-naming-check`（CI 的 e2e stage） | 能（退出码 1 → stage 红） |
+
+为什么需要运行那一层：单测与静态门禁都在**源码/进程内**看问题，而
+`robot_monitor_*` 是「多注册一个 Collector 就复活」的东西 —— 只有抓**跑起来那个
+进程**吐出的字节，才等于「面板真的看不到旧名了」。
+
+告警引擎侧同步改名一处（#72 的收敛范围没覆盖到它）：
+`robot_alert_robots_online` → `robot_alert_robots_online_gauge`。
+后端侧的 `robot_backend_robots_online` **不动** —— 它被现网 PromQL 引用，改名属跨单返工。
+
 ### 4.1 两个「WS 指标」不是一回事（易混）
 
 | 指标 | 视角 | 谁能回答 | 谁在写 |
@@ -106,7 +124,7 @@ Redis Pub/Sub 断了，但连接对象还在。这正是缺口 G-3 要抓的事�
 ```bash
 # 1) 三个 exporter 的 /metrics 都有内容
 curl -sf localhost:8000/metrics | grep robot_backend_queue_depth
-curl -sf localhost:8001/metrics | grep robot_alert_robots_online
+curl -sf localhost:8001/metrics | grep robot_alert_robots_online_gauge
 curl -sf localhost:9187/metrics | head
 
 # 2) Prometheus 目标全 UP（不要只看容器在跑）
