@@ -44,6 +44,14 @@ class Settings(BaseSettings):
     db_pool_max_size: int = 10
     db_command_timeout_s: float = 30.0
     db_max_idle_s: float = 300.0
+    # 建池超时（秒）。**必须有上限**，理由见 app/db/session.py 的模块头注释：
+    # asyncpg 0.32 的 init_size 是「建池即预连」，此时 `connection.connect()` 的
+    # 默认 timeout=60 会生效 —— DB 未就绪就建池，每次调用都要阻塞满 60s。
+    # 而这是**探活路径**（/healthz 的 ping()），阻塞 60s 等于探针永久挂死、
+    # db=up 永不到达。给一个远短于任何探针周期的上限，让失败快速可见、快速重试。
+    # 0.32.0 实测：init_size=2 全部连不上时，不给该参数 60.02s 抛 TimeoutError，
+    # 加 timeout=8 则 8.01s 抛出（见 tests/test_db_pool_timeout.py）。
+    db_connect_timeout_s: float = 8.0
     # /healthz 的 DB 探活（就绪探针不应每次打库，缓存结果）
     db_health_cache_s: float = 5.0
 

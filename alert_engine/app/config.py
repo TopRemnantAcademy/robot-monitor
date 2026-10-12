@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     # 但 pool.py 的入参名是 `pool_size`，故此处取 `db_pool_size`。
     db_pool_size: int = 2          # 预建条数 = 空闲地板（见 app/pool.py:MAX_POOL_SIZE）
     db_command_timeout: float = 30.0
+    # 建池超时（秒），语义与默认值同 backend_ingestion/app/config.py:db_connect_timeout_s。
+    # 不给的话 init_size 的「建池即预连」会带上 connection.connect() 的默认 60s，
+    # DB 未就绪时把启动/探活路径挂死（机制见 app/pool.py:create_pool 的 connect_timeout 注释）。
+    db_connect_timeout_s: float = 8.0
 
     # ---- Redis 频道（与后端约定一致）----
     chan_stream_all: str = "robot:stream:all"

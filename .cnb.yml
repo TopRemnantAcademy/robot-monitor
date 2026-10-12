@@ -88,6 +88,17 @@ main:
             # fakeredis 是**测试期**依赖：订单 04 的验收用例要验去重器的 SET NX 幂等
             # 与 TTL，进程内 dict 替身测不出 Redis 服务端语义。
             python -m pip install --no-cache-dir pytest pytest-timeout 'httpx<0.28' fakeredis
+            # rich 是 tests/test_ts_sampling.py 间接需要的**测试期**依赖：该文件要 exec
+            # simulator/mock_fleet.py，而后者在 :41 `from rich.console import Console`。
+            # 上面两个 requirements 都**不含** rich（simulator 的依赖不入 CI）。
+            #
+            # 测试侧已能把「缺依赖」判为 SKIP（见 tests/test_ts_sampling.py 的
+            # Skip/_PytestSkipped），所以**不装也不会红**。这里仍然补装，是因为
+            # 「跳过」和「跑过」不是一回事：这 3 个用例盯的是 PK (time, robot_id)
+            # 的毫秒时间戳唯一性（ON CONFLICT DO NOTHING 会静默丢行），
+            # 长年 SKIP 等于门禁不存在。补装后它们在 CI 真跑。
+            # 版本与 simulator/requirements.txt 对齐，避免「本机能跑、CI 不能跑」。
+            python -m pip install --no-cache-dir rich==13.7.1
             echo "── pytest（仓库根，testpaths = tests + alert_engine/tests）──"
             python -m pytest -q
             echo "── pytest backend_ingestion/tests（顶层 app 包冲突，单独跑）──"
@@ -233,6 +244,17 @@ main:
             # fakeredis 是**测试期**依赖：订单 04 的验收用例要验去重器的 SET NX 幂等
             # 与 TTL，进程内 dict 替身测不出 Redis 服务端语义。
             python -m pip install --no-cache-dir pytest pytest-timeout 'httpx<0.28' fakeredis
+            # rich 是 tests/test_ts_sampling.py 间接需要的**测试期**依赖：该文件要 exec
+            # simulator/mock_fleet.py，而后者在 :41 `from rich.console import Console`。
+            # 上面两个 requirements 都**不含** rich（simulator 的依赖不入 CI）。
+            #
+            # 测试侧已能把「缺依赖」判为 SKIP（见 tests/test_ts_sampling.py 的
+            # Skip/_PytestSkipped），所以**不装也不会红**。这里仍然补装，是因为
+            # 「跳过」和「跑过」不是一回事：这 3 个用例盯的是 PK (time, robot_id)
+            # 的毫秒时间戳唯一性（ON CONFLICT DO NOTHING 会静默丢行），
+            # 长年 SKIP 等于门禁不存在。补装后它们在 CI 真跑。
+            # 版本与 simulator/requirements.txt 对齐，避免「本机能跑、CI 不能跑」。
+            python -m pip install --no-cache-dir rich==13.7.1
             echo "── pytest（仓库根）──"
             python -m pytest -q
             echo "── pytest backend_ingestion/tests ──"

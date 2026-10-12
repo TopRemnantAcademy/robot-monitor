@@ -53,6 +53,7 @@ async def create_pool(
     dsn: str,
     pool_size: int,
     command_timeout: float = 30.0,
+    connect_timeout: float = 8.0,
 ) -> asyncpg.Pool:
     """建一个"预建 N 条 + 空闲维持 N 条"的 asyncpg 池。
 
@@ -61,10 +62,18 @@ async def create_pool(
         pool_size: 预建条数（`init_size`）与空闲地板（`min_size`）。
             **不能同时当 `max_size`** —— 原因见下方 `MAX_POOL_SIZE` 的长注释。
         command_timeout: 单条命令的服务端超时。
+        connect_timeout: **建池**的整体超时（秒），默认 8s。
 
     注意：`command_timeout` **拦不住** `executemany()` 被锁阻塞时的挂起
     （本机对 PostgreSQL 15.19 实测，见 `batch_writer.py` 的 `asyncio.wait_for`），
     它只覆盖普通语句路径；不要把长事务护栏全押在它身上。
+
+    `connect_timeout` 存在的理由：`init_size` 即「建池即预连」，会把
+    `connection.connect()` 的默认 `timeout=60` 带进来 —— DB 未就绪就建池，
+    每次调用阻塞满 60s。任何**探活/启动**路径撞上它都会挂死而非快速失败。
+    8s 是「比任何探针周期都短、又足够容忍一次 TCP 握手重试」的折中。
+    实测：`init_size=2` 全部连不上时，不给该参数 60.02s 抛 `TimeoutError`，
+    给 8s 则 8.01s 抛出（见 `tests/test_db_pool_timeout.py`）。
     """
     return await asyncpg.create_pool(
         dsn=dsn,
@@ -72,4 +81,5 @@ async def create_pool(
         min_size=pool_size,    # 0.32.0：地板；0.29/0.31：预建（语义一致，安全）
         max_size=max(pool_size, MAX_POOL_SIZE),
         command_timeout=command_timeout,
+        timeout=connect_timeout,
     )

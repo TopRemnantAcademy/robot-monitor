@@ -42,6 +42,10 @@ async def get_pool() -> asyncpg.Pool:
                 dsn=settings.database_url,
                 pool_size=settings.db_pool_size,
                 command_timeout=settings.db_command_timeout,
+                # 建池超时：不给的话走 connection.connect() 的默认 60s，
+                # 让「DB 未就绪」把启动/探活路径挂死（机制见 app/pool.py 的
+                # connect_timeout 注释与 backend_ingestion/app/db/session.py 模块头）。
+                connect_timeout=settings.db_connect_timeout_s,
             )
     return _pool
 

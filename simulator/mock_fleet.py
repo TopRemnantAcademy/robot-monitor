@@ -74,6 +74,48 @@ MOTOR_TEMP_ALERT_C = 75.0         # spec/02：>75°C 判定过热
 TEMP_BASE_RANGE = (35.0, 65.0)    # 正常关节温度随机游走区间
 
 
+# ---------------------------------------------------------------- 时间戳发号
+
+def _next_ts_ms(last_ms: int | None, now_ms: int) -> int:
+    """给一条采样发号，保证**同一台机器人逐条严格单增**（毫秒粒度）。
+
+    为什么需要发号器，而不是每条 `int(time.time() * 1000)`
+    ---------------------------------------------------
+    `robot_telemetry` 的主键是 `(time, robot_id)`，而 `time` 取自 payload 的 `ts`
+    （`backend_ingestion/app/services/batch_writer.py:_to_row()`）。
+    于是「同一台机器人在同一毫秒发两条」= 主键冲突 = `ON CONFLICT DO NOTHING`
+    **静默丢行**，只体现在 `rows_skipped` 上。
+
+    这在「补发积压」时会真的发生，不是理论问题：
+
+    1. `run_robot` 的节奏是 `next_tick += 0.1` + `sleep(next_tick - now)`，
+       **超期时不等、due 仍落在过去**；而 `publisher` 一旦因 MQTT 抖动停摆
+       （`aiomqtt.MqttError` → 指数退避重连，最长 30s），`run_robot` 会继续往
+       `asyncio.Queue` 里投递；重连后积压被快速排空；
+    2. 排空期间 `run_robot` 的循环体在**远小于 100ms** 的真实时间内连续跑多轮，
+       每轮各调一次 `int(time.time() * 1000)` → 同一毫秒被取到多次。
+       本机实测：同一毫秒内以 0.5ms 间隔取样 200 次，只得到 111 个唯一毫秒；
+       100 台 × 10Hz 压测 10 次里撞出 1 次「同一 (ts, robot_id) 出现 2 次」。
+
+    发号规则（两条性质必须同时成立，见 tests/test_ts_sampling.py）
+    -------------------------------------------------------------
+    - **严格单增**：`next > last`，杜绝重复（重复即主键冲突丢行）；
+    - **跟随真实时间**：没有积压时 `next == now`，不把 `time` 推离真实采集时刻
+      （否则「最近 60s」这类时间窗查询会与数据对不上）。
+      两者冲突时（同一毫秒来第二次）才 +1 微调到下一个毫秒。
+
+    Args:
+        last_ms: 本机器人上一条的毫秒时间戳；首条传 None。
+        now_ms: 本次取样的墙上时钟毫秒时间戳。
+
+    Returns:
+        本次要发出的毫秒时间戳，保证 > last_ms。
+    """
+    if last_ms is None or now_ms > last_ms:
+        return now_ms
+    return last_ms + 1
+
+
 # ---------------------------------------------------------------- 机器人状态机
 
 @dataclass
@@ -161,6 +203,7 @@ class FleetCounters:
 async def run_robot(state: RobotState, queue: asyncio.Queue, start_at: float) -> None:
     """单台机器人循环：固定 10Hz 节奏生成 payload 投递到队列；掉线窗口内静默。"""
     next_tick = time.monotonic()
+    last_ts_ms: int | None = None
     while True:
         next_tick += PUBLISH_INTERVAL_S
         now = time.monotonic()
@@ -172,8 +215,14 @@ async def run_robot(state: RobotState, queue: asyncio.Queue, start_at: float) ->
             continue
 
         state.step(now, start_at)
+        # 时间戳发号走 _next_ts_ms，**不是**每条临时 `int(time.time()*1000)`：
+        # 那会在「补发积压」时让同一台机器人在同一毫秒发出两条，
+        # 撞上 robot_telemetry 的 (time, robot_id) 主键 → ON CONFLICT DO NOTHING 静默丢行。
+        # 详见 _next_ts_ms 的注释与 tests/test_ts_sampling.py。
+        ts_ms = _next_ts_ms(last_ts_ms, int(time.time() * 1000))
+        last_ts_ms = ts_ms
         await queue.put((TELEMETRY_TOPIC.format(robot_id=state.robot_id),
-                         json.dumps(state.build_payload(int(time.time() * 1000)),
+                         json.dumps(state.build_payload(ts_ms),
                                     separators=(",", ":"))))
 
         # 对齐 10Hz 节奏，消化 publish/调度耗时带来的漂移
