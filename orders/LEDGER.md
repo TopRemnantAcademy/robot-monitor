@@ -139,3 +139,45 @@
 - minutes 进 queryKey（`['robot-history', robotId, minutes]`），切窗口零手写 effect
 - 零新增 ECharts 实例；后端零改动（`/history` minutes 无上限为本单前提，main.py 已核实）
 
+## 十、最大化 CNB 派单（2026-10-13）
+
+> 经费状态变更：本轮开工时先做一次探针（`post-issue-comment --work-mode` 于 #96）→ 构建
+> `cnb-u9v-1k4od99jn`（event=`issue.comment@npc`）成功拉起且 `workMode: true`
+> —— 2026-10-11/12 的 402 配额已恢复，随即 6 单全派。
+> **教训**：别用「上次 402」推断现在不可用，每次会话重探只需一个 comment。
+
+### 10.1 派单与回收结果（6 单）
+
+| 订单 | 内容（来源=实证） | Issue | PR | 合并 | 核验结论 |
+| --- | --- | --- | --- | --- | --- |
+| 28 | G-6 元数据心跳 + offline 改读 is_online（打捞 `auto/metadata-heartbeat-3f2a@0dba075f`） | #96 | #106 | squash 91d5b70 | ✅ 净增量到位（metadata_writer 205 + 3 测试文件），CI 双绿 |
+| 29 | DB 连接池/时序采样测试打捞（素材 `auto/e2e-30k-harness-7687@23e6c6af`） | #97 | #103 | squash 3bb52dd | ✅ 合并。**超出授权**两项已接受并注明：改 `.cnb.yml` 补 `rich==13.7.1`（让 3 用例从 SKIP 变真跑）、改 `mock_fleet` 加毫秒发号器（直指 STATUS 缺陷 #4 主键冲突静默丢行） |
+| 30 | 告警抑制 inhibition（severity 分层 + 可追溯） | #98 | #104 | squash a59e890 | ✅ 合并（inhibition.py 143 + 183 行测试；对既有用例仅"关闭抑制以隔离被测路径"，未弱化断言） |
+| 31 | G-5 pgBackRest 真实备份收口 | #99 | #108 | squash 8cbe4f7 | ✅ 合并（backup.sh / verify.sh / verify-restore.sh + exporter queries + Dockerfile.timescaledb，1266 行） |
+| 32 | 指标命名去重 `robot_monitor_*` → `robot_backend_*` | #100 | #102 | ❌ **拒收** | diff 仅 `orders/32-dispatch.md`+`LEDGER.md`，**零代码改动**。已贴举证评论 + 原地重派（补产出文件白名单硬门槛） |
+| 33 | 前端大机群渲染护栏 | #101 | #107 | squash e9c22aa | ✅ 合并（含"反向护栏"用例自证渲染量统计仪器非摆设；286 行 / 11 处断言） |
+
+backlog 三个实证来源：① `git diff --stat main...(两个保留分支)` ② `STATUS.md:77-98`（C2/C4/G-5/G-6）③ `orders/LEDGER.md §8.3-1`。没有证据的单一律不开。
+
+### 10.2 不耗积分、永久交给 CNB 的部分（PR #105 → squash ad0fbfe）
+
+固化进 `.cnb.yml` 的 `test.pytest` stage（push 与 pull_request 逐字一致）：
+
+| # | 门禁 | 补的洞 | 本机实测 |
+| --- | --- | --- | --- |
+| ① | `compileall -q` 全量语法编译 | 测试收集不到的文件里的语法错从不显形 | rc=0 |
+| ② | 每个 `test_*.py` 必含 ≥1 个真实 `def test_` | STATUS.md §五手工扫过的「假覆盖测试文件」变机器门禁 | 207 文件 0 违规 |
+| ③ | 两服务 `import app.main` 冒烟 | LEDGER §8.3-5：本机 Win-ARM64 无 pydantic-core 轮子，只能 CI 承证 → **本项就此关闭** | 本机确无轮子 |
+
+### 10.3 没能交给 CNB 的两项（诚实标注）
+
+| 项 | 结论 | 证据 |
+| --- | --- | --- |
+| #64 CNB→GitHub 自动同步 | **维持暂停** | 昨日「匿名推送成功」结论**不准确**：本次 `GIT_TERMINAL_PROMPT=0` + 空 credential.helper 实跑 → `fatal: could not read Username for 'https://github.com'`。真正生效的是本机凭据而非匿名写入。注入凭据须用户授权 |
+| NPC crontab（6 段） | 仍注释；配额已恢复，待 6 单收口后评估 `cnb build build-crontab-sync` | 「跳过」≠「跑过」同样适用于此：恢复前先确认不会再每 6h 红一条 |
+
+### 10.4 派单纪律修订（本轮血亏换来的一）
+
+**所有派工单必须补「产出文件白名单」硬门槛**：写明 `PR 的 diff 必须包含 X/Y 文件`，且描述必须贴
+「改前/改后 命令输出」对照。订单 32 的验收 [ ] 清单写得再漂亮，缺了这条就让「只改文档」也能自洽通过。
+
