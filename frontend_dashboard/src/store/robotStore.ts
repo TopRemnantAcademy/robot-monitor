@@ -13,6 +13,60 @@ import { JOINT_NAMES, isRobotOnline } from '../types/robot';
 /** 告警流滚动上限，防止长时间运行内存无限增长（200px 高度可见约 6 行） */
 export const ALERT_BUFFER_LIMIT = 200;
 
+/**
+ * 机群时序采样点（UI 趋势线用，见 FleetHealthAnalytics）。
+ *
+ * 为什么不从 WS 帧直接算趋势：robots Map 是**当前快照**，没有历史；而 /history 只按
+ * 单机器人查。机群级趋势（在线率/活跃告警随时间的走向）需要一段滚动时间序列，故用
+ * 低频采样（2s 一点）在客户端累积 —— 与 100ms 刷库热路径完全解耦，采样时才 O(n) 遍历一次。
+ */
+export interface FleetSample {
+  t: number;
+  /** 在线率 0–100（保留 1 位小数） */
+  onlineRate: number;
+  /** severity ≥ 2 的活跃告警数 */
+  activeAlerts: number;
+  /** 在线机器人平均电量 % */
+  avgBattery: number;
+  /** 在线机器人平均最高关节温度 °C */
+  avgTemp: number;
+}
+
+/** 趋势滚动窗口上限：2s × 90 ≈ 3 分钟。 */
+export const FLEET_SAMPLE_LIMIT = 90;
+
+/**
+ * 从当前 store 快照算一个机群采样点。
+ *
+ * 口径与 HealthSummaryHeader 顶栏严格一致（在线只认 is_online、活跃告警 = severity≥2），
+ * 避免「顶栏一个数、趋势线另一个数」。
+ */
+export function computeFleetSample(state: {
+  robots: Map<string, RobotTelemetry>;
+  alerts: RobotAlert[];
+}): FleetSample {
+  let online = 0;
+  let batterySum = 0;
+  let tempSum = 0;
+  for (const r of state.robots.values()) {
+    if (isRobotOnline(r)) {
+      online += 1;
+      batterySum += r.battery_pct;
+      tempSum += r.max_joint_temp;
+    }
+  }
+  let activeAlerts = 0;
+  for (const a of state.alerts) if (a.severity >= 2) activeAlerts += 1;
+  const total = state.robots.size;
+  return {
+    t: Date.now(),
+    onlineRate: total === 0 ? 0 : Math.round((online / total) * 1000) / 10,
+    activeAlerts,
+    avgBattery: online === 0 ? 0 : Math.round((batterySum / online) * 10) / 10,
+    avgTemp: online === 0 ? 0 : Math.round((tempSum / online) * 10) / 10,
+  };
+}
+
 /** 100 台标准 ID：humanoid-001 ~ humanoid-100（spec/00 §1） */
 export function buildRobotIds(count = 100): string[] {
   return Array.from({ length: count }, (_, i) => `humanoid-${String(i + 1).padStart(3, '0')}`);
@@ -53,6 +107,8 @@ interface RobotState {
   wsStatus: 'connecting' | 'open' | 'closed';
   /** 当前打开的 Drawer 目标 */
   selectedRobotId: string | null;
+  /** 机群时序采样滚动缓冲（UI 趋势线；2s 一个点，见 computeFleetSample） */
+  fleetSamples: FleetSample[];
 
   /** snapshot：全量填充（spec/00 §5.2 ①） */
   applySnapshot: (list: RobotTelemetry[]) => void;
@@ -70,6 +126,8 @@ interface RobotState {
   applyAlertAck: (alertId: number, patch: Partial<RobotAlert>) => void;
   setWsStatus: (status: 'connecting' | 'open' | 'closed') => void;
   selectRobot: (robotId: string | null) => void;
+  /** 追加一个机群采样点（环形缓冲，超 FLEET_SAMPLE_LIMIT 丢弃最旧）。 */
+  pushFleetSample: (sample: FleetSample) => void;
 }
 
 /** 离线占位初值，保证首屏（WS 未连上时）就有 100 张离线卡（orders/05 验收） */
@@ -84,6 +142,7 @@ export const useRobotStore = create<RobotState>((set) => ({
   alerts: [],
   wsStatus: 'connecting',
   selectedRobotId: null,
+  fleetSamples: [],
 
   applySnapshot: (list) =>
     set((state) => {
@@ -134,6 +193,11 @@ export const useRobotStore = create<RobotState>((set) => ({
   setWsStatus: (wsStatus) => set({ wsStatus }),
 
   selectRobot: (selectedRobotId) => set({ selectedRobotId }),
+
+  pushFleetSample: (sample) =>
+    set((state) => ({
+      fleetSamples: [...state.fleetSamples, sample].slice(-FLEET_SAMPLE_LIMIT),
+    })),
 }));
 
 /**

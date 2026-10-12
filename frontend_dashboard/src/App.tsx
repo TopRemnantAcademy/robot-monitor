@@ -11,6 +11,7 @@ import { ErrorBoundary } from 'react-error-boundary';
 import { QueryClientProvider } from '@tanstack/react-query';
 import HealthSummaryHeader from './components/HealthSummaryHeader';
 import FleetOverviewCards from './components/FleetOverviewCards';
+import FleetHealthAnalytics from './components/FleetHealthAnalytics';
 import AlertLogTable from './components/AlertLogTable';
 import RobotDetailDrawer from './components/RobotDetailDrawer';
 import LoginGate from './auth/LoginGate';
@@ -38,6 +39,9 @@ function Dashboard() {
       style={{ backgroundColor: COLORS.bgBase, color: COLORS.textPrimary }}
     >
       <HealthSummaryHeader />
+      {/* UI 强化：机群级分布 + 趋势层（见 FleetHealthAnalytics 顶部说明）。
+          fixed-height strip（shrink-0），卡片墙 flex-1 自适应收缩，页面仍禁滚动。 */}
+      <FleetHealthAnalytics />
       <FleetOverviewCards />
       <AlertLogTable />
       <RobotDetailDrawer />
