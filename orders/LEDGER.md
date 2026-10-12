@@ -122,3 +122,20 @@
 4. **🟢 #60 e2e 30k / #64 GitHub 同步**：已合并，但二者构建在派发时标记 pending；落地后建议各跑一次 CNB CI 确认门禁绿。
 5. **🟢 .cnb.yml `main:` 分支作用域**：订单 24 的测试门禁与 #64 同步均挂在根级 `main:` 键下（理解为「main 分支作用域」）。若 CNB grammar 不认 `main:` 作分支作用域，则测试门禁/sync 可能不触发；建议首次推送后查一次 CNB 构建日志确认。
 
+## 九、UI 强化专项（2026-10-12，主题锁死 dark-industrial，只加信息密度不改色）
+
+> 执行方式：本地实现 + CNB PR/CI 门禁 squash 合并。订单 27 原计划派发 @codebuddy，
+> 因 CNB AI 积分耗尽（402，crontab 构建 cnb-uhp/cnb-pt8 同因挂起）改为本地直做。
+
+| 订单 | 内容 | Issue | PR | 合并 | 核验 |
+|------|------|-------|----|------|------|
+| —（UI R1） | 机群健康分析条：状态分布/电量直方/温度直方/双轴趋势（200ms 采样入 store） | —（本地） | #93 | squash 7f355c7 | 本地四门禁 + CI 绿 |
+| —（UI R2） | Drawer 诊断深化：四 series 折线（含包络）/电量趋势图/基本信息 6 格/本机告警区（robot_id 过滤） | —（本地） | #94 | squash c7719f5 | 本地四门禁 + CI 绿 |
+| 27 | Drawer 第三轮：24 关节扭矩负载条（纯 CSS）+ 告警确认/撤回按钮（admin）+ 历史窗口 5/30/60m | —（本地） | #95 | squash e768ab4 | 本地四门禁绿（tsc 0 / vitest 17 / build / gzip 246.35kB）+ CNB CI 双 pipeline 绿（test 2m22s / e2e-30k 2m4s） |
+
+订单 27 规格存档：`orders/27-dispatch.md`（随 PR #95 分支入库）。关键约束：
+- 扭矩条 aria-label 前缀「扭矩 」，与热力图 `/^left_elbow_pitch/` 正则互斥（测试契约）
+- ack 错误文案禁含 "HTTP 5"（500 用例唯一性）
+- minutes 进 queryKey（`['robot-history', robotId, minutes]`），切窗口零手写 effect
+- 零新增 ECharts 实例；后端零改动（`/history` minutes 无上限为本单前提，main.py 已核实）
+
