@@ -27,6 +27,7 @@ import userEvent from '@testing-library/user-event';
 
 import RobotDetailDrawer from '../RobotDetailDrawer';
 import { useRobotStore } from '../../store/robotStore';
+import { useAuthStore } from '../../auth/authStore';
 import { JOINT_NAMES } from '../../types/robot';
 import type { RobotTelemetry } from '../../types/robot';
 import { SAMPLE_HISTORY } from '../../test/msw/handlers';
@@ -268,5 +269,84 @@ describe('RobotDetailDrawer', () => {
     // humanoid-007 的低电量告警不得串台（规则标签与 message 两个出现点都验）
     expect(within(aside).queryByText('低电量')).not.toBeInTheDocument();
     expect(within(aside).queryByText('电量低')).not.toBeInTheDocument();
+  });
+
+  // —— 订单 27 新增三用例 ——（不改既有 9 用例的任何断言）
+
+  it('扭矩负载条：aria-label 携带关节名与实时值，点击切换选中关节（与热力图联动）', async () => {
+    const user = userEvent.setup();
+    openDrawer();
+    render(<RobotDetailDrawer />);
+
+    // aria-label 刻意以「扭矩 」开头：热力图关节块的 aria-label 以关节名开头
+    //（/^left_elbow_pitch/ 用例），两者在可访问性树上必须互不混淆。
+    // 实时帧 telemetry().joint_torques.left_elbow_pitch = 1.7 → toFixed(2) = "1.70"
+    const bar = await screen.findByRole('button', { name: '扭矩 left_elbow_pitch 1.70N·m' });
+    await user.click(bar);
+
+    // 点击后选中关节切换 → 折线的扭矩 series 取 left_elbow_pitch 的历史两点
+    await waitFor(async () => {
+      const parsed = await readChartOption();
+      expect(parsed.series[1].data).toEqual([1.5, 1.7]);
+    });
+  });
+
+  it('历史窗口切换：点击 30m 后请求 minutes=30，标题随窗口变化', async () => {
+    const user = userEvent.setup();
+    const urls: string[] = [];
+    fetchMock.mockImplementation(async (input) => {
+      urls.push(String(input));
+      return jsonResponse(SAMPLE_HISTORY);
+    });
+    openDrawer();
+    render(<RobotDetailDrawer />);
+
+    await user.click(await screen.findByRole('button', { name: '30m' }));
+    // queryKey 含 minutes → 切窗口必然产生一条 minutes=30 的新请求
+    await waitFor(() => expect(urls.some((u) => u.includes('minutes=30'))).toBe(true));
+    // 请求里其他参数不回退（resolution 恒为 10s）
+    expect(urls.some((u) => u.includes('minutes=30') && u.includes('resolution=10s'))).toBe(true);
+    // 关节图头与电量趋势头都必须反映新窗口（全串精确匹配，避免子串命中多个元素）
+    expect(screen.getByText('left_shoulder_pitch · 最近 30 分钟（10s 分辨率）')).toBeInTheDocument();
+    expect(screen.getByText('电量趋势 · 最近 30 分钟')).toBeInTheDocument();
+  });
+
+  // 置于 describe 末尾：本用例会把 authStore 提为 admin，结束前还原，避免污染其他用例。
+  it('告警确认：非 admin 无按钮；admin 点击确认后重拉反映 ack 状态', async () => {
+    const user = userEvent.setup();
+    let acked = false;
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.includes('/alerts')) {
+        // POST {API_BASE}/alerts/{id}/ack —— AckResult 契约（types/robot.ts）
+        if (init?.method === 'POST') {
+          acked = true;
+          return jsonResponse({ alert_id: 11, ack: true, ack_at: '2026-10-10T23:50:00Z', ack_by: 'a@b.c', changed: true });
+        }
+        // GET /alerts：ack 后第一次返回的 alert 11 翻成 ack=true（权威视图对账）
+        const page = {
+          ...SAMPLE_ALERT_PAGE,
+          items: [{ ...SAMPLE_ALERT_PAGE.items[0], ack: acked }, SAMPLE_ALERT_PAGE.items[1]],
+        };
+        return jsonResponse(page);
+      }
+      return jsonResponse(SAMPLE_HISTORY);
+    });
+    openDrawer();
+    render(<RobotDetailDrawer />);
+
+    const aside = screen.getByRole('complementary');
+    // 非 admin（默认 role=null）：确认按钮不渲染——"不让用户看见点不动的东西"
+    await within(aside).findByText('电机过热');
+    expect(within(aside).queryByRole('button', { name: '确认' })).not.toBeInTheDocument();
+
+    // 提为 admin → 按钮出现 → 点击 → POST /alerts/11/ack → invalidate 重拉 → 已确认
+    useAuthStore.setState({ status: 'authenticated', email: 'a@b.c', role: 'admin' });
+    await user.click(await within(aside).findByRole('button', { name: '确认' }));
+    await waitFor(() => expect(acked).toBe(true));
+    expect(await within(aside).findByText('已确认')).toBeInTheDocument();
+
+    // 还原全局 auth 状态（本用例必须保持在 describe 末尾的原因）
+    useAuthStore.setState({ status: 'unknown', email: null, role: null });
   });
 });

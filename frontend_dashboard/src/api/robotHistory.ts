@@ -8,9 +8,17 @@ import { notifyUnauthorized } from '../auth/api';
 import { authHeaders } from '../auth/session';
 import type { HistoryPoint, RobotHistoryResponse } from '../types/robot';
 
-/** 历史查询窗口（spec/00 §5.3：最近 5 分钟，10s 分辨率） */
+/** 历史查询窗口（spec/00 §5.3：默认最近 5 分钟，10s 分辨率） */
 export const HISTORY_MINUTES = 5;
 export const HISTORY_RESOLUTION = '10s';
+
+/**
+ * Drawer 历史窗口可选项（分钟）。
+ * 后端 `GET /robots/{id}/history` 的 `minutes` 查询参数**无上限约束**
+ * （backend main.py: `minutes: int = 5`，`span_s = max(1, minutes) * 60`），
+ * 因此加窗口纯属前端选择，不需要任何后端改动。
+ */
+export const HISTORY_WINDOW_OPTIONS = [5, 30, 60] as const;
 
 /**
  * 带 HTTP 状态码的错误。
@@ -25,13 +33,20 @@ export class HistoryHttpError extends Error {
   }
 }
 
-/** react-query queryKey：以 robot_id 为维度缓存，同机器人复用、换机器人各自缓存。 */
-export function robotHistoryKey(robotId: string): readonly [string, string] {
-  return ['robot-history', robotId];
+/**
+ * react-query queryKey：以 (robot_id, minutes) 为维度缓存。
+ * minutes 进 key 是刻意的——切换窗口时 key 变化 → react-query 自动重新拉取，
+ * 不需要手写 effect；同窗口内同机器人复用缓存、换机器人/换窗口各自缓存。
+ */
+export function robotHistoryKey(
+  robotId: string,
+  minutes: number = HISTORY_MINUTES,
+): readonly [string, string, number] {
+  return ['robot-history', robotId, minutes];
 }
 
 /**
- * GET {API_BASE}/robots/{id}/history?minutes=5&resolution=10s
+ * GET {API_BASE}/robots/{id}/history?minutes=N&resolution=10s
  *
  * 401 → notifyUnauthorized()（清 token 回登录页）+ 抛错。抛出的错误带 status=401，
  * queryClient 据此判定 4xx 不重试，避免"登录过期"时反复重试刷屏。
@@ -39,8 +54,9 @@ export function robotHistoryKey(robotId: string): readonly [string, string] {
 export async function fetchRobotHistory(
   robotId: string,
   signal?: AbortSignal,
+  minutes: number = HISTORY_MINUTES,
 ): Promise<HistoryPoint[]> {
-  const url = `${API_BASE}/robots/${encodeURIComponent(robotId)}/history?minutes=${HISTORY_MINUTES}&resolution=${HISTORY_RESOLUTION}`;
+  const url = `${API_BASE}/robots/${encodeURIComponent(robotId)}/history?minutes=${minutes}&resolution=${HISTORY_RESOLUTION}`;
   const res = await fetch(url, { signal, headers: authHeaders() });
 
   if (res.status === 401) {

@@ -4,8 +4,8 @@
 //   1) 实时增量：直接从 Zustand 的 robots Map 取（该机器人 10Hz 更新）
 //   2) 历史折线：GET {VITE_API_BASE}/robots/{id}/history?minutes=5&resolution=10s（spec/00 §5.3）
 
-import { useEffect, useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 // 订单 09：走 echarts-for-react 的 core 入口 + 按需注册的 echarts 实例，
 // 取代默认入口（默认入口内部 require 整个 echarts 包，无法 tree-shake）。
 // 注册清单见 src/lib/echartsCore.ts（只含本 Drawer 用到的折线图相关模块）。
@@ -25,10 +25,12 @@ import { useRobotStore } from '../store/robotStore';
 import { JOINT_NAMES } from '../types/robot';
 import type { AlertApiItem, HistoryPoint } from '../types/robot';
 import { ruleLabel } from './AlertLogTable';
-import { fetchAlerts } from '../auth/alertsApi';
+import { ackAlert, fetchAlerts, unackAlert } from '../auth/alertsApi';
+import { useIsAdmin } from '../auth/authStore';
 import {
   HISTORY_MINUTES,
   HISTORY_RESOLUTION,
+  HISTORY_WINDOW_OPTIONS,
   fetchRobotHistory,
   robotHistoryKey,
 } from '../api/robotHistory';
@@ -82,6 +84,13 @@ export default function RobotDetailDrawer() {
   const robot = useRobotStore((s) => (s.selectedRobotId ? s.robots.get(s.selectedRobotId) : undefined));
 
   const [selectedJoint, setSelectedJoint] = useState<string>(JOINT_NAMES[0]);
+  // 订单 27 T3：历史窗口（分钟）。进 queryKey —— 切窗口即换 key，react-query 自动重拉。
+  const [historyMinutes, setHistoryMinutes] = useState<number>(HISTORY_MINUTES);
+  // 订单 27 T2：告警确认（仅 admin）。busyId 与错误信息只作用于本 Drawer 的告警区。
+  const [ackBusyId, setAckBusyId] = useState<number | null>(null);
+  const [ackError, setAckError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const canAck = useIsAdmin();
 
   // 每次打开 Drawer 重置选中关节，避免残留上一台机器人的选择
   useEffect(() => {
@@ -93,8 +102,8 @@ export default function RobotDetailDrawer() {
   //   - 失败自动重试（4xx 除外，见 lib/queryClient.ts）；
   //   - 切换机器人 / 关闭 Drawer 时 react-query 自动取消在途请求（signal 透传给 fetch）。
   const historyQuery = useQuery({
-    queryKey: robotHistoryKey(selectedRobotId ?? ''),
-    queryFn: ({ signal }) => fetchRobotHistory(selectedRobotId as string, signal),
+    queryKey: robotHistoryKey(selectedRobotId ?? '', historyMinutes),
+    queryFn: ({ signal }) => fetchRobotHistory(selectedRobotId as string, signal, historyMinutes),
     enabled: selectedRobotId !== null,
   });
 
@@ -158,6 +167,49 @@ export default function RobotDetailDrawer() {
     if (!Array.isArray(items)) return [];
     return items.filter((a) => a.robot_id === selectedRobotId).slice(0, 5);
   }, [alertsQuery.data, selectedRobotId]);
+
+  // 订单 27 T1：24 关节实时扭矩负载行模型（纯 CSS 条，无新 ECharts 实例）。
+  // maxAbs 取当前帧有值关节的最大 |扭矩| 作为满刻度；全零/无数据时钳到 1 防除零，
+  // 此时所有条宽为 0——语义仍是「无负载」而不是报错。
+  const torqueRows = useMemo(() => {
+    const torques = robot?.joint_torques ?? {};
+    let maxAbs = 0;
+    for (const j of JOINT_NAMES) {
+      const v = torques[j];
+      if (typeof v === 'number') maxAbs = Math.max(maxAbs, Math.abs(v));
+    }
+    if (maxAbs < 1e-9) maxAbs = 1;
+    return JOINT_NAMES.map((joint) => {
+      const v = torques[joint];
+      const value = typeof v === 'number' ? v : null;
+      return {
+        joint,
+        value,
+        pct: value === null ? 0 : Math.min(100, (Math.abs(value) / maxAbs) * 100),
+      };
+    });
+  }, [robot?.joint_torques]);
+
+  // 订单 27 T2：确认/撤回（仅 admin 可见，403 由后端兜底——前端只是不让看见点不动的东西）。
+  // 成功后 invalidate 本 Drawer 的告警查询：REST 是 ack 状态的权威视图，重拉即对账。
+  const handleToggleAck = useCallback(
+    async (a: AlertApiItem) => {
+      setAckBusyId(a.alert_id);
+      setAckError(null);
+      try {
+        await (a.ack ? unackAlert(a.alert_id) : ackAlert(a.alert_id));
+        await queryClient.invalidateQueries({ queryKey: ['robot-alerts', selectedRobotId] });
+      } catch (e) {
+        // 刻意不透传含 "HTTP 5xx" 的原始文案：500 用例里 getByText(/HTTP 500/)
+        // 必须唯一命中历史图错误（测试契约），且 5xx 对值班员无操作价值。
+        const msg = e instanceof Error ? e.message : '操作失败';
+        setAckError(msg.includes('HTTP 5') ? '告警确认操作失败' : msg);
+      } finally {
+        setAckBusyId(null);
+      }
+    },
+    [queryClient, selectedRobotId],
+  );
 
   if (!selectedRobotId) return null;
 
@@ -348,11 +400,80 @@ export default function RobotDetailDrawer() {
             />
           </section>
 
-          {/* 选中关节的 5 分钟折线 */}
+          {/* 关节扭矩负载（实时帧快照，纯 CSS 条形——不新增 ECharts 实例以守住包体积。
+              点击切换选中关节，与热力图联动；aria-label 以「扭矩 」开头，
+              与热力图关节块的 aria-label（以关节名开头）在可访问性树上互不混淆）。 */}
           <section>
             <h3 className="mb-1" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
-              {selectedJoint} · 最近 {HISTORY_MINUTES} 分钟（{HISTORY_RESOLUTION} 分辨率）
+              关节扭矩负载（实时，点击切换选中关节）
             </h3>
+            <div className="grid grid-cols-2 gap-x-3 gap-y-1 mt-1">
+              {torqueRows.map(({ joint, value, pct }) => (
+                <button
+                  key={joint}
+                  type="button"
+                  aria-label={value === null ? `扭矩 ${joint} 无数据` : `扭矩 ${joint} ${value.toFixed(2)}N·m`}
+                  onClick={() => setSelectedJoint(joint)}
+                  className="flex items-center gap-1.5 min-w-0 cursor-pointer"
+                  style={{
+                    border: `1px solid ${joint === selectedJoint ? COLORS.accent : 'transparent'}`,
+                    borderRadius: 2,
+                    padding: '1px 2px',
+                    backgroundColor: 'transparent',
+                  }}
+                >
+                  <span
+                    className="truncate shrink-0"
+                    style={{ ...FONT.metric, color: COLORS.textSecondary, maxWidth: 104 }}
+                  >
+                    {joint}
+                  </span>
+                  <span
+                    className="flex-1 h-1.5 min-w-0"
+                    style={{ backgroundColor: COLORS.border, borderRadius: 1, overflow: 'hidden' }}
+                  >
+                    <span
+                      className="block h-full"
+                      style={{ width: `${pct}%`, backgroundColor: COLORS.accent }}
+                    />
+                  </span>
+                  <span
+                    className="tabular-nums shrink-0"
+                    style={{ ...FONT.metric, color: COLORS.textPrimary }}
+                  >
+                    {value === null ? '--' : value.toFixed(2)}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </section>
+
+          {/* 选中关节的历史折线（窗口可切：5/30/60m，切换经 queryKey 自动重拉） */}
+          <section>
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <h3 style={{ ...FONT.metric, color: COLORS.textSecondary }}>
+                {selectedJoint} · 最近 {historyMinutes} 分钟（{HISTORY_RESOLUTION} 分辨率）
+              </h3>
+              <div className="flex items-center gap-1 shrink-0">
+                {HISTORY_WINDOW_OPTIONS.map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => setHistoryMinutes(m)}
+                    className="px-1.5 py-0.5 rounded cursor-pointer"
+                    style={{
+                      fontSize: '10px',
+                      fontWeight: 600,
+                      color: historyMinutes === m ? COLORS.bgBase : COLORS.textSecondary,
+                      backgroundColor: historyMinutes === m ? COLORS.accent : 'transparent',
+                      border: `1px solid ${historyMinutes === m ? COLORS.accent : COLORS.border}`,
+                    }}
+                  >
+                    {m}m
+                  </button>
+                ))}
+              </div>
+            </div>
             {loading ? (
               <div className="h-56 flex items-center justify-center" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
                 历史数据加载中…
@@ -363,7 +484,7 @@ export default function RobotDetailDrawer() {
               </div>
             ) : chart.xAxis.length === 0 ? (
               <div className="h-56 flex items-center justify-center" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
-                最近 {HISTORY_MINUTES} 分钟无历史点
+                最近 {historyMinutes} 分钟无历史点
               </div>
             ) : (
               <ReactEChartsCore
@@ -381,7 +502,7 @@ export default function RobotDetailDrawer() {
           {!loading && !error && chart.xAxis.length > 0 ? (
             <section>
               <h3 className="mb-1" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
-                电量趋势 · 最近 {HISTORY_MINUTES} 分钟
+                电量趋势 · 最近 {historyMinutes} 分钟
               </h3>
               <ReactEChartsCore
                 echarts={echarts}
@@ -393,11 +514,17 @@ export default function RobotDetailDrawer() {
             </section>
           ) : null}
 
-          {/* 该机器人最近告警（REST 权威视图，按 robot_id 过滤最近 200 条取前 5） */}
+          {/* 该机器人最近告警（REST 权威视图，按 robot_id 过滤最近 200 条取前 5；
+              订单 27 T2：admin 可就地确认/撤回，成功后 invalidate 重拉对账） */}
           <section>
             <h3 className="mb-1" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
               该机器人最近告警
             </h3>
+            {ackError ? (
+              <div className="mb-1" style={{ ...FONT.metric, color: COLORS.statusFault }}>
+                {ackError}
+              </div>
+            ) : null}
             {alertsQuery.isPending && alertsQuery.fetchStatus !== 'idle' ? (
               <div style={{ ...FONT.metric, color: COLORS.textSecondary }}>告警加载中…</div>
             ) : alertsQuery.isError ? (
@@ -434,6 +561,24 @@ export default function RobotDetailDrawer() {
                       <span className="shrink-0" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
                         已确认
                       </span>
+                    ) : null}
+                    {canAck ? (
+                      <button
+                        type="button"
+                        disabled={ackBusyId === a.alert_id}
+                        onClick={() => void handleToggleAck(a)}
+                        className="shrink-0 px-2 py-0.5 rounded cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
+                        style={{
+                          fontSize: '10px',
+                          fontWeight: 600,
+                          color: COLORS.textPrimary,
+                          backgroundColor: COLORS.surface,
+                          border: `1px solid ${COLORS.border}`,
+                        }}
+                        title={a.ack ? '撤回确认' : '确认告警'}
+                      >
+                        {a.ack ? '撤回' : '确认'}
+                      </button>
                     ) : null}
                   </li>
                 ))}
