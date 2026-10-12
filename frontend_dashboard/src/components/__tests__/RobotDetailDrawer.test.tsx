@@ -34,6 +34,41 @@ import { SAMPLE_HISTORY } from '../../test/msw/handlers';
 // （修复 Issue #78：main 此前 npm test 8/8 全红）。
 import { render } from '../../test/render';
 
+/** 抽屉「该机器人最近告警」用例的 /alerts 响应：一条本机 + 一台他机（验证过滤）。 */
+const SAMPLE_ALERT_PAGE = {
+  items: [
+    {
+      alert_id: 11,
+      time: '2026-10-10T23:48:00Z',
+      robot_id: 'humanoid-042',
+      rule_id: 'motor_temp',
+      severity: 3,
+      message: '左肘电机温度超限',
+      detail: null,
+      ack: false,
+      ack_at: null,
+      ack_by: null,
+      escalated: true,
+    },
+    {
+      alert_id: 12,
+      time: '2026-10-10T23:40:00Z',
+      robot_id: 'humanoid-007',
+      rule_id: 'battery_low',
+      severity: 2,
+      message: '电量低',
+      detail: null,
+      ack: true,
+      ack_at: null,
+      ack_by: null,
+      escalated: false,
+    },
+  ],
+  total: 2,
+  limit: 200,
+  offset: 0,
+};
+
 // —— ECharts 替身：把 option 序列化进 DOM，供断言 ——
 vi.mock('echarts-for-react/lib/core', () => ({
   default: ({ option }: { option: unknown }) => (
@@ -102,9 +137,13 @@ interface ChartOption {
   series: { name: string; data: (number | null)[] }[];
 }
 
-async function readChartOption(): Promise<ChartOption> {
-  const el = await screen.findByTestId('echarts-option');
-  return JSON.parse(el.textContent ?? '{}') as ChartOption;
+/**
+ * Drawer 现在挂两块图（关节折线 + 电量趋势），mock 对每个实例都渲染同 testid 的 <pre>。
+ * index 0 = 关节折线（DOM 序在前），index 1 = 电量趋势。
+ */
+async function readChartOption(index = 0): Promise<ChartOption> {
+  const els = await screen.findAllByTestId('echarts-option');
+  return JSON.parse(els[index]?.textContent ?? '{}') as ChartOption;
 }
 
 describe('RobotDetailDrawer', () => {
@@ -125,17 +164,19 @@ describe('RobotDetailDrawer', () => {
     expect(within(aside).getByText('预警')).toBeInTheDocument();
   });
 
-  it('拉取 history 后把 24 关节拆成 温度/扭矩/角度 三条 series 交给 ECharts', async () => {
+  it('拉取 history 后把 24 关节与包络拆成 四条 series 交给 ECharts', async () => {
     openDrawer();
     render(<RobotDetailDrawer />);
 
     await waitFor(async () => {
       const parsed = await readChartOption();
       expect(parsed.series.map((s) => s.name)).toEqual([
-        '温度(°C)', '扭矩(N·m)', '角度(rad)',
+        '温度(°C)', '扭矩(N·m)', '角度(rad)', '全关节最高温(°C)',
       ]);
       // 默认选中第 0 个关节（JOINT_NAMES[0]），样例数据里该关节无值 → null
       expect(parsed.series[0].data).toEqual([null, null]);
+      // 包络线取后端逐桶聚合的 max_joint_temp（66.2 / 67.8），与选中关节无关
+      expect(parsed.series[3].data).toEqual([66.2, 67.8]);
     });
   });
 
@@ -154,6 +195,8 @@ describe('RobotDetailDrawer', () => {
       expect(parsed.series[0].data).toEqual([60, 62.5]);
       expect(parsed.series[1].data).toEqual([1.5, 1.7]);
       expect(parsed.series[2].data).toEqual([0.42, 0.55]);
+      // 切关节不影响包络线（max_joint_temp 与选中关节无关）
+      expect(parsed.series[3].data).toEqual([66.2, 67.8]);
     });
   });
 
@@ -165,7 +208,8 @@ describe('RobotDetailDrawer', () => {
     render(<RobotDetailDrawer />);
 
     expect(await screen.findByText(/无历史点/)).toBeInTheDocument();
-    expect(screen.queryByTestId('echarts-option')).not.toBeInTheDocument();
+    // 关节图与电量趋势图共用同一份历史——空即两块都不得挂载
+    expect(screen.queryAllByTestId('echarts-option')).toHaveLength(0);
   });
 
   it('history 请求 500 时显示错误态，且错误文案含 HTTP 状态码（便于排障）', async () => {
@@ -206,5 +250,23 @@ describe('RobotDetailDrawer', () => {
 
     await waitFor(() => expect(seen.length).toBeGreaterThan(0));
     expect(seen[0]).toBe('Bearer test-token');
+  });
+
+  it('告警区按 robot_id 过滤：只显示本机告警，升级标记可见', async () => {
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/alerts')) return jsonResponse(SAMPLE_ALERT_PAGE);
+      return jsonResponse(SAMPLE_HISTORY);
+    });
+    openDrawer();
+    render(<RobotDetailDrawer />);
+
+    const aside = screen.getByRole('complementary');
+    // humanoid-042 的 motor_temp 告警渲染（ruleLabel 复用 AlertLogTable 的映射）
+    expect(await within(aside).findByText('电机过热')).toBeInTheDocument();
+    expect(within(aside).getByText('已升级')).toBeInTheDocument();
+    // humanoid-007 的低电量告警不得串台（规则标签与 message 两个出现点都验）
+    expect(within(aside).queryByText('低电量')).not.toBeInTheDocument();
+    expect(within(aside).queryByText('电量低')).not.toBeInTheDocument();
   });
 });

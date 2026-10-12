@@ -37,7 +37,8 @@ const RULE_LABEL: Record<string, string> = {
   joint_stuck: '关节卡死',
 };
 
-function ruleLabel(ruleId: string): string {
+/** 导出给 RobotDetailDrawer 的单机告警区复用（单一事实来源，禁止两处各抄一份映射）。 */
+export function ruleLabel(ruleId: string): string {
   return RULE_LABEL[ruleId] ?? ruleId;
 }
 

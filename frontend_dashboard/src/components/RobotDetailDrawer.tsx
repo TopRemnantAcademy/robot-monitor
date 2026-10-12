@@ -19,10 +19,13 @@ import {
   FONT,
   hasEverReported,
   robotDisplayState,
+  severityColor,
 } from '../theme/tokens';
 import { useRobotStore } from '../store/robotStore';
 import { JOINT_NAMES } from '../types/robot';
-import type { HistoryPoint } from '../types/robot';
+import type { AlertApiItem, HistoryPoint } from '../types/robot';
+import { ruleLabel } from './AlertLogTable';
+import { fetchAlerts } from '../auth/alertsApi';
 import {
   HISTORY_MINUTES,
   HISTORY_RESOLUTION,
@@ -45,6 +48,16 @@ function lastSeenMs(robot: { last_seen?: number | null; ts: number } | undefined
   return robot.ts > 0 ? robot.ts : null;
 }
 
+/** 「数据帧龄」：last_seen 距现在的时长（失联诊断用——「3 小时前」比一个时刻数字直观）。 */
+function frameAge(ms: number | null): string {
+  if (ms === null) return '--';
+  const sec = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (sec < 60) return `${sec} 秒前`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min} 分钟前`;
+  return `${Math.floor(min / 60)} 小时前`;
+}
+
 interface ChartSeries {
   name: string;
   data: (number | null)[];
@@ -53,7 +66,12 @@ interface ChartSeries {
 interface ChartModel {
   xAxis: string[];
   series: ChartSeries[];
+  /** 电量逐桶（HistoryPointOut.battery_pct），供独立电量趋势图使用 */
+  battery: (number | null)[];
 }
+
+/** 折线用色：温度=故障红 / 扭矩=强调蓝 / 角度=正常绿 / 包络=预警黄（全 tokens，不自创色相）。 */
+const SERIES_COLORS = [COLORS.statusFault, COLORS.accent, COLORS.statusNormal, COLORS.statusWarning];
 
 export default function RobotDetailDrawer() {
   const selectedRobotId = useRobotStore((s) => s.selectedRobotId);
@@ -95,6 +113,8 @@ export default function RobotDetailDrawer() {
     const temp: (number | null)[] = [];
     const torque: (number | null)[] = [];
     const position: (number | null)[] = [];
+    const maxTemp: (number | null)[] = [];
+    const battery: (number | null)[] = [];
 
     for (const point of history) {
       const t = new Date(point.time);
@@ -107,6 +127,12 @@ export default function RobotDetailDrawer() {
       temp.push(typeof tv === 'number' ? Number(tv.toFixed(2)) : null);
       torque.push(typeof tq === 'number' ? Number(tq.toFixed(2)) : null);
       position.push(typeof po === 'number' ? Number(po.toFixed(3)) : null);
+      // 全关节最高温包络（后端逐桶聚合 max_joint_temp，非客户端推算）：
+      // 单看选中关节会漏「别的关节在发烧」——包络抬升即整机热问题。
+      maxTemp.push(
+        typeof point.max_joint_temp === 'number' ? Number(point.max_joint_temp.toFixed(2)) : null,
+      );
+      battery.push(typeof point.battery_pct === 'number' ? Number(point.battery_pct.toFixed(2)) : null);
     }
     return {
       xAxis,
@@ -114,9 +140,24 @@ export default function RobotDetailDrawer() {
         { name: '温度(°C)', data: temp },
         { name: '扭矩(N·m)', data: torque },
         { name: '角度(rad)', data: position },
+        { name: '全关节最高温(°C)', data: maxTemp },
       ],
+      battery,
     };
   }, [history, selectedJoint]);
+
+  // 该机器人最近告警：REST 是权威视图（含 ack/escalated 事后状态，WS 只推增量）。
+  // 后端 /alerts 暂无 robot_id 查询参数，故拉最近 200 条（_MAX_LIMIT=500 内）客户端过滤。
+  const alertsQuery = useQuery({
+    queryKey: ['robot-alerts', selectedRobotId],
+    queryFn: () => fetchAlerts({ limit: 200 }),
+    enabled: selectedRobotId !== null,
+  });
+  const robotAlerts: AlertApiItem[] = useMemo(() => {
+    const items = alertsQuery.data?.items;
+    if (!Array.isArray(items)) return [];
+    return items.filter((a) => a.robot_id === selectedRobotId).slice(0, 5);
+  }, [alertsQuery.data, selectedRobotId]);
 
   if (!selectedRobotId) return null;
 
@@ -149,9 +190,46 @@ export default function RobotDetailDrawer() {
       showSymbol: chart.xAxis.length <= 2,
       connectNulls: true,
       data: s.data,
-      lineStyle: { width: 2, color: [COLORS.statusFault, COLORS.accent, COLORS.statusNormal][idx] },
-      itemStyle: { color: [COLORS.statusFault, COLORS.accent, COLORS.statusNormal][idx] },
+      lineStyle: { width: 2, color: SERIES_COLORS[idx] },
+      itemStyle: { color: SERIES_COLORS[idx] },
     })),
+    animation: false,
+  };
+
+  // 电量趋势：卡片墙/基本信息只有瞬时电量，「5 分钟掉电 >10%」这类速率异常在这里一眼可见。
+  // 数据为后端逐桶聚合的 battery_pct（HistoryPointOut），非客户端推算。
+  const batteryChartOption = {
+    backgroundColor: 'transparent',
+    tooltip: { trigger: 'axis' },
+    grid: { left: 36, right: 12, top: 10, bottom: 22 },
+    xAxis: {
+      type: 'category',
+      data: chart.xAxis,
+      axisLine: { lineStyle: { color: COLORS.border } },
+      axisLabel: { color: COLORS.textSecondary, fontSize: 10 },
+    },
+    yAxis: {
+      type: 'value',
+      min: 0,
+      max: 100,
+      axisLine: { lineStyle: { color: COLORS.border } },
+      splitLine: { lineStyle: { color: COLORS.border } },
+      axisLabel: { color: COLORS.textSecondary, fontSize: 10 },
+    },
+    series: [
+      {
+        name: '电量(%)',
+        type: 'line' as const,
+        smooth: true,
+        showSymbol: chart.xAxis.length <= 2,
+        connectNulls: true,
+        data: chart.battery,
+        lineStyle: { width: 2, color: COLORS.accent },
+        itemStyle: { color: COLORS.accent },
+        // accent #3B82F6 的 12% 透明派生（同 tokens.overlay 的派生方式，不引入新色相）
+        areaStyle: { color: 'rgba(59, 130, 246, 0.12)' },
+      },
+    ],
     animation: false,
   };
 
@@ -230,6 +308,31 @@ export default function RobotDetailDrawer() {
                     : '--'}
                 </span>
               </div>
+              <div className="flex flex-col">
+                <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>状态码</span>
+                <span className="tabular-nums" style={{ color: COLORS.textPrimary, fontWeight: 600 }}>
+                  {robot ? robot.status_code : '--'}
+                </span>
+              </div>
+              <div className="flex flex-col">
+                <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>错误码</span>
+                <span
+                  className="tabular-nums"
+                  style={{
+                    color:
+                      robot && robot.error_code !== 0 ? COLORS.statusFault : COLORS.textPrimary,
+                    fontWeight: 600,
+                  }}
+                >
+                  {robot ? robot.error_code : '--'}
+                </span>
+              </div>
+              <div className="flex flex-col">
+                <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>数据帧龄</span>
+                <span className="tabular-nums" style={{ color: COLORS.textPrimary, fontWeight: 600 }}>
+                  {frameAge(lastSeenMs(robot))}
+                </span>
+              </div>
             </div>
           </section>
 
@@ -270,6 +373,71 @@ export default function RobotDetailDrawer() {
                 notMerge
                 lazyUpdate
               />
+            )}
+          </section>
+
+          {/* 电量趋势（后端逐桶聚合值）。只在历史成功加载时挂载——
+              空/错态文案只在上方关节图区块出现一次，避免测试与视觉的双重歧义。 */}
+          {!loading && !error && chart.xAxis.length > 0 ? (
+            <section>
+              <h3 className="mb-1" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
+                电量趋势 · 最近 {HISTORY_MINUTES} 分钟
+              </h3>
+              <ReactEChartsCore
+                echarts={echarts}
+                option={batteryChartOption}
+                style={{ height: 112, width: '100%' }}
+                notMerge
+                lazyUpdate
+              />
+            </section>
+          ) : null}
+
+          {/* 该机器人最近告警（REST 权威视图，按 robot_id 过滤最近 200 条取前 5） */}
+          <section>
+            <h3 className="mb-1" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
+              该机器人最近告警
+            </h3>
+            {alertsQuery.isPending && alertsQuery.fetchStatus !== 'idle' ? (
+              <div style={{ ...FONT.metric, color: COLORS.textSecondary }}>告警加载中…</div>
+            ) : alertsQuery.isError ? (
+              // 刻意不带 HTTP 码：500 用例里 getByText(/HTTP 500/) 必须唯一命中历史图错误
+              <div style={{ ...FONT.metric, color: COLORS.statusFault }}>告警加载失败</div>
+            ) : robotAlerts.length === 0 ? (
+              <div style={{ ...FONT.metric, color: COLORS.textSecondary }}>暂无告警记录</div>
+            ) : (
+              <ul className="flex flex-col gap-1.5">
+                {robotAlerts.map((a) => (
+                  <li key={a.alert_id} className="flex items-center gap-2 min-w-0">
+                    <span
+                      className="w-2 h-2 rounded-full shrink-0"
+                      style={{ backgroundColor: severityColor(a.severity) }}
+                    />
+                    <span
+                      className="tabular-nums shrink-0"
+                      style={{ ...FONT.metric, color: COLORS.textSecondary }}
+                    >
+                      {new Date(a.time).toLocaleTimeString('zh-CN', { hour12: false })}
+                    </span>
+                    <span className="shrink-0" style={{ ...FONT.metric, color: severityColor(a.severity) }}>
+                      {ruleLabel(a.rule_id)}
+                    </span>
+                    <span className="truncate" style={{ ...FONT.metric, color: COLORS.textPrimary }} title={a.message}>
+                      {a.message}
+                    </span>
+                    {a.escalated ? (
+                      <span className="shrink-0" style={{ ...FONT.metric, color: COLORS.statusWarning }}>
+                        已升级
+                      </span>
+                    ) : null}
+                    {a.ack ? (
+                      <span className="shrink-0" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
+                        已确认
+                      </span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
             )}
           </section>
         </div>
