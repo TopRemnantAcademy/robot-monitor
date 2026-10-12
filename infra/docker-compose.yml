@@ -15,6 +15,7 @@ services:
     #   的 Tags 只有这两个）；emqx/emqx:5.6 才是 5.6.x 的可追溯来源。
     image: emqx/emqx:5.6
     container_name: robot-monitor-emqx
+    restart: unless-stopped
     ports:
       - "1883:1883"      # MQTT
       - "18083:18083"    # Dashboard
@@ -43,6 +44,7 @@ services:
   timescaledb:
     image: timescale/timescaledb:2.13.1-pg16
     container_name: robot-monitor-timescaledb
+    restart: unless-stopped
     ports:
       - "5432:5432"
     environment:
@@ -128,6 +130,7 @@ services:
   redis:
     image: redis:7.2-alpine
     container_name: robot-monitor-redis
+    restart: unless-stopped
     ports:
       - "6379:6379"
     healthcheck:
@@ -152,6 +155,7 @@ services:
   prometheus:
     image: prom/prometheus:v3.1.0
     container_name: robot-monitor-prometheus
+    restart: unless-stopped
     ports:
       - "9090:9090"
     volumes:
@@ -172,6 +176,7 @@ services:
     # tag 0.2.3 来自官方示例：external/emqx-exporter/examples/docker-compose/docker-compose.yml
     image: emqx/emqx-exporter:0.2.3
     container_name: robot-monitor-emqx-exporter
+    restart: unless-stopped
     ports:
       - "8085:8085"
     environment:
@@ -191,6 +196,7 @@ services:
     # /probe?target=&module= 与 9115 端口实证：external/blackbox_exporter/README.md
     image: prom/blackbox-exporter:v0.26.0
     container_name: robot-monitor-blackbox-exporter
+    restart: unless-stopped
     ports:
       - "9115:9115"
     volumes:
@@ -202,6 +208,7 @@ services:
     # DATA_SOURCE_NAME 语义实证：external/postgres_exporter/README.md:252,316-325
     image: prometheuscommunity/postgres-exporter:v0.17.0
     container_name: robot-monitor-postgres-exporter
+    restart: unless-stopped
     ports:
       - "9187:9187"
     environment:
@@ -215,6 +222,7 @@ services:
     # 端口 9121 实证：external/redis_exporter/README.md:292  "-p 9121:9121"
     image: oliver006/redis_exporter:v1.67.0
     container_name: robot-monitor-redis-exporter
+    restart: unless-stopped
     ports:
       - "9121:9121"
     environment:
@@ -229,6 +237,7 @@ services:
     #   需承担 AGPL 的源码开放义务。已记录在 external/SOURCES.md。
     image: grafana/grafana:11.5.0
     container_name: robot-monitor-grafana
+    restart: unless-stopped
     ports:
       - "3000:3000"
     environment:
