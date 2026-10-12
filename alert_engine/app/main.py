@@ -26,6 +26,12 @@ from collections import deque
 from app.config import settings
 from app.db import close_all, get_redis
 from app.deduplicator import should_emit
+from app.inhibition import (
+    MIN_SOURCE_SEVERITY,
+    ActiveAlertRegistry,
+    InhibitionRecord,
+    evaluate_severity_inhibition,
+)
 from app.escalation import escalation_loop
 from app.silence import is_silenced
 from app.rules.battery import BatteryLowRule
@@ -58,6 +64,10 @@ last_seen: dict[str, float] = {}
 # （兼容 #61 既有路径）；同时供 inhibition（is_inhibited）使用。
 online_state: dict[str, bool] = {}
 
+# 每台机器人当前活跃告警登记簿（订单 30）——severity 抑制的判据来源。
+# 与 online_state 同源：进程内派生状态，见 app/inhibition.py 的说明。
+active_alerts = ActiveAlertRegistry()
+
 _tasks: set[asyncio.Task] = set()
 
 # 通知器：未配置 URL 时为 None（整条链路静默跳过）。
@@ -73,26 +83,61 @@ def spawn(coro) -> None:
     t.add_done_callback(_tasks.discard)
 
 
-def is_inhibited(alert: Alert) -> bool:
-    """抑制判定（inhibition）—— 必须在 emit() 里去重**之前**执行。
+def inhibition_reason(alert: Alert) -> InhibitionRecord | None:
+    """抑制判定，返回**可追溯凭证**；放行返回 None（订单 30：禁止静默丢弃）。
 
-    语义对齐 Alertmanager `inhibit_rules`：
-        source: rule_id == "offline"（severity 3）
-        target: 同一 robot_id 的其他所有规则
-        equal:  [robot_id]
+    两级判定，任一命中即抑制（附不同的 `reason` 以便审计归因）：
 
-    两个关键点（写错会吞掉真实告警）：
+    1. **offline 层**（订单 10 既有）：机器人已判离线 → 抑制同机所有衍生告警。
+       `reason="offline"`。
+    2. **severity 层**（订单 30 新增）：同机存在更高 severity 的活跃告警 →
+       抑制本条。`reason="severity"`。
+
+    为什么把 offline 单列而不并入 severity 层：offline 是「整机失联」这一
+    **绝对根因**，其语义是「任何衍生告警都无价值」；而 severity 层是相对压制。
+    合并会让「离线时为何抑制 battery_low」与「高温时为何抑制低电量」的成因
+    在指标上同形，运维无法区分是掉线还是过热。二者 `reason` 必须可分辨。
+
+    两个关键不变量（写错会吞掉真实告警）：
 
     1. `online_state.get(rid) is False` —— 必须显式 `is False`，
        不能用 `not online_state.get(rid)`。ticker 要跑满一轮才会给 100 台机器人
        填值，启动初期字典为空，falsy 判定会把**所有**告警全判成被抑制。
-    2. offline 规则**自身永不被抑制** —— 否则高严重度的根因告警永远报不出来。
+    2. **抑制源自身永不被抑制** —— offline 规则不被 offline 层压；
+       而 severity 层用 `exclude_rule` 排除自身，且要求 source 严格更高。
+       否则根因告警永远报不出来。
     """
-    if not settings.inhibit_offline:
-        return False
-    if alert.rule_id == INHIBIT_SOURCE_RULE:
-        return False
-    return online_state.get(alert.robot_id) is False
+    rid = alert.robot_id
+
+    # ---- 第 1 级：offline ----
+    if settings.inhibit_offline and alert.rule_id != INHIBIT_SOURCE_RULE:
+        if online_state.get(rid) is False:
+            return InhibitionRecord(
+                robot_id=rid,
+                target_rule=alert.rule_id,
+                target_severity=alert.severity,
+                source_rule=INHIBIT_SOURCE_RULE,
+                source_severity=3,
+                reason="offline",
+            )
+
+    # ---- 第 2 级：severity（高等级抑制同机低等级）----
+    if settings.inhibit_severity:
+        rec = evaluate_severity_inhibition(
+            alert, active_alerts, min_source_severity=MIN_SOURCE_SEVERITY
+        )
+        if rec is not None:
+            return rec
+
+    return None
+
+
+def is_inhibited(alert: Alert) -> bool:
+    """抑制判定的布尔门面（保持既有调用方/测试兼容）。
+
+    实现委托给 `inhibition_reason()`；需要凭证时直接调后者。
+    """
+    return inhibition_reason(alert) is not None
 
 
 async def emit(alert: Alert) -> None:
@@ -124,16 +169,37 @@ async def emit(alert: Alert) -> None:
         log.debug("alert silenced: %s %s (silence key active)", alert.robot_id,
                   alert.rule_id)
         return
+    # 先问布尔门面（保持既有 monkeypatch 接缝），命中再取凭证。
+    # 两步而非直接 `inhibition_reason()`：`is_inhibited` 是订单 10/17/24
+    # 测试与外部约定的稳定接缝，直接绕过它会让既有 spy 失效。
     if is_inhibited(alert):
+        record = inhibition_reason(alert)
         # 抑制计数必须单独埋：否则 `alerts_emitted` 的**下降**无法归因 ——
         # 到底是机器人真的健康了，还是被抑制层挡掉了。二者运维含义完全不同。
-        metrics.alerts_suppressed.labels(rule_id=alert.rule_id).inc()
-        log.debug("alert inhibited: %s %s (robot offline)", alert.robot_id,
-                  alert.rule_id)
+        # 订单 30 追加 `reason` 维度：offline 与 severity 的运维动作不同
+        # （前者查网络/电源，后者查根因告警是否已处置）。
+        # record 可能为 None：仅当 `is_inhibited` 被外部 monkeypatch 成恒真、
+        # 而真实判定放行时才会发生（测试接缝场景）。此时降级为 reason="unknown"，
+        # 不掩盖调用，也不抛异常中断告警链路。
+        reason = record.reason if record is not None else "unknown"
+        metrics.alerts_suppressed.labels(
+            rule_id=alert.rule_id, reason=reason
+        ).inc()
+        # 禁止静默丢弃：DEBUG 是给"能拿到日志的人"，运维在 INFO 级/告警台
+        # 看不到 DEBUG。故抑制凭证用 WARNING 单行输出，含 source 与 target，
+        # 可直接 grep `inhibition` 追出"这条为什么没出去"。
+        log.warning(
+            "alert inhibited: %s",
+            record.as_log_fields() if record is not None
+            else f"reason=unknown robot={alert.robot_id} target={alert.rule_id}(sev{alert.severity})",
+        )
         return
     window = DEDUP_WINDOW.get(alert.rule_id, 60)
     if await should_emit(alert, window):
         await save(alert)
+        # 登记为活跃告警（订单 30）：本条已发出，即成为同机后续低等级告警的
+        # 抑制源候选。放在 save 之后 —— 只有真的发出去的告警才配当根因。
+        active_alerts.register(alert)
         metrics.alerts_emitted.labels(rule_id=alert.rule_id).inc()
         log.info("alert: %s %s sev=%d %s", alert.robot_id, alert.rule_id,
                  alert.severity, alert.message)
@@ -174,6 +240,10 @@ async def consume() -> None:
                 continue
             if alert is not None:
                 spawn(emit(alert))
+            else:
+                # 本轮该规则未命中 = 已恢复 → 清登记，否则它会永远当"根因"
+                # 压制同机的其它告警（订单 30 关键点：不及时清除 = 永久误抑制）。
+                active_alerts.clear(rid, rule.rule_id)
 
 
 # ---------------------------------------------------------------- ticker 线
@@ -208,11 +278,20 @@ async def ticker() -> None:
                 alert = None
             if alert is not None:
                 spawn(emit(alert))
+            else:
+                # 未再判离线 = 已恢复 → 清 offline 登记（否则它作为 sev3 抑制源
+                # 会一直压低同机的告警）。订单 30。
+                active_alerts.clear(rid, INHIBIT_SOURCE_RULE)
 
             online = ls is not None and (now - ls) <= settings.offline_after_s
             if online_state.get(rid) is not online:
                 online_state[rid] = online
                 spawn(update_online(rid, online))
+                if not online:
+                    # 判离线即清该机**衍生**告警登记：此刻它们已无处置价值，
+                    # 留着只会与 offline 的抑制语义重叠，污染 severity 层的判据。
+                    # offline 自身的登记由上面的 emit 在抑制通过后写入。
+                    active_alerts.clear_robot(rid)
 
         # 拉模型下 Gauge 必须在每轮刷新：没人替我们定期 set，
         # 不刷新则抓到的永远是"上一次状态变化那一刻"的过期值。

@@ -58,6 +58,13 @@ class Settings(BaseSettings):
     # 留开关便于回滚与 A/B 对比；关闭后行为回到加抑制之前。
     inhibit_offline: bool = True
 
+    # ---- 抑制（severity 层，订单 30）----
+    # 「高等级告警抑制同一机器人上的低等级告警」：同机存在 sev3 活跃告警时，
+    # 其 sev2/sev1 告警不落库、不发布（根因在上，衍生症状无处置价值）。
+    # 与 inhibit_offline 解耦：可单独回滚任一层的 A/B，便于定位是哪层挡掉了告警。
+    # 阈值见 app/inhibition.py:MIN_SOURCE_SEVERITY（当前 3）。
+    inhibit_severity: bool = True
+
     # ---- 升级（escalation，对齐 Alertmanager 的 repeat_interval）----
     # severity=3 且超过该秒数仍未 ack → 置 escalated=TRUE 并重发一次。
     # 300s（5 分钟）取自派工单 T2；这是一个"值班员该响应了"的经验量级，

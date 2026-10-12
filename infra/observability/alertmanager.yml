@@ -39,6 +39,10 @@ inhibit_rules:
   - source_matchers: [severity="critical"]
     target_matchers: [severity="warning"]
     equal: ["alertname"]
+  # 注（订单 30）：**机器人**层的「高等级抑制同机低等级」不在此文件实现 ——
+  # 它在 alert_engine 内完成（app/inhibition.py，equal 等价于 [robot_id]，带
+  # 凭证/日志/指标可追溯）。此处若再加一条 equal=[robot_id] 的规则，会与
+  # 引擎侧抑制**重复**，同一告警被两层各压一次、指标无法归因。故刻意不加。
 
 receivers:
   - name: robot-monitor-webhook

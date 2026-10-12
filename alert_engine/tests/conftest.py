@@ -67,10 +67,12 @@ def engine(monkeypatch):
     m.online_state.clear()
     m.windows.clear()
     m.last_seen.clear()
+    m.active_alerts.clear_all()                       # 订单 30：活跃告警登记簿
 
     m.emitted = emitted                               # 供断言
     yield m
     m.online_state.clear()
+    m.active_alerts.clear_all()
     if hasattr(m, "emitted"):
         del m.emitted
 

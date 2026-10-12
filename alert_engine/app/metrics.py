@@ -39,8 +39,8 @@ alerts_emitted = Counter(
 )
 alerts_suppressed = Counter(
     "robot_alert_suppressed_total",
-    "被 inhibition 抑制的告警条数（orders/10-dispatch.md 的抑制层）",
-    ["rule_id"],
+    "被 inhibition 抑制的告警条数（订单 10 的 offline 层 + 订单 30 的 severity 层）",
+    ["rule_id", "reason"],
     registry=registry,
 )
 alerts_silenced = Counter(

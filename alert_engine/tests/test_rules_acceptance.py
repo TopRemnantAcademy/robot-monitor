@@ -481,8 +481,16 @@ def test_consume_line_feeds_window_and_emits(engine, monkeypatch):
     """消费线：一条真实 payload 进窗口 → 三条约会规则跑一遍 → 命中即走 emit。
 
     用 3 条过热 payload 模拟连续采样，验证 `consume()` 的窗口维护与规则调度。
+
+    注意（订单 30 后）：本用例断言的是**规则调度与窗口**，不是抑制行为。
+    第 3 条 payload 同时命中 motor_temp(sev3) 与 battery_low(sev2)，
+    而订单 30 的 severity 抑制会正确地把 battery_low 压掉 —— 那是另一层的
+    契约（见 test_severity_inhibition.py）。故此处显式关闭 severity 抑制，
+    只留纯调度路径，避免用「抑制副作用」去测「规则是否被跑到」。
     """
     import app.main as m
+    from app.config import settings
+    monkeypatch.setattr(settings, "inhibit_severity", False)
 
     saved: list = []
 

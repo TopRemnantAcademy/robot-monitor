@@ -44,23 +44,43 @@ python -m app.main
 
 ## 抑制（inhibition）
 
-对照 Alertmanager 的 `inhibit_rules`：`source=offline` / `equal=[robot_id]`。
+对照 Alertmanager 的 `inhibit_rules`。两层，`emit()` 入口处**前置**于去重：
 
-机器人已判离线（severity 3）时，同一 `robot_id` 的 `motor_temp` / `battery_low` /
-`joint_stuck` 告警**不落库、不发布** —— 机器都离线了，「电量低」没有处置价值，根因是离线。
+| 层 | source | target | `reason` | 开关 |
+|---|---|---|---|---|
+| **offline**（订单 10） | 该机已判离线（sev3） | 同机其余一切告警 | `offline` | `config.inhibit_offline` |
+| **severity**（订单 30） | 该机当前**最高** severity 告警（≥3） | **同机更低** severity 告警 | `severity` | `config.inhibit_severity` |
 
-判定在 `main.py` 的 `emit()` 入口，**前置**于去重；实现见 `is_inhibited()`。
+语义（订单 30）：同机存在 sev3 活跃告警时，其 sev2/sev1 告警**不落库、不发布** ——
+根因在上（如电机过热），衍生症状（低电量）无处置价值。
 
-三条不变量：
+判定实现：`main.py` 的 `is_inhibited()` / `inhibition_reason()` + `app/inhibition.py`。
+
+不变量：
 
 | 不变量 | 原因 |
 |---|---|
 | `online_state.get(rid) is False`（**不是** falsy 判定） | ticker 跑满一轮前字典为空，`not None` 会把所有告警吞掉 |
-| `offline` 自身永不被抑制 | 否则根因告警永远报不出来 |
+| 抑制源严格**高于**目标 severity | 同级互压取决于字典序，是竞态误伤 |
+| 抑制源 ≥ `MIN_SOURCE_SEVERITY`（=3） | 若取 2，「电量低」会压「关节卡死」，抑制面过宽 |
+| 抑制限定**同一 robot_id** | A 机高温不该压 B 机低电量 |
+| offline / 源自身永不被自身抑制 | 否则根因告警永远报不出来 |
+| 源恢复（登记 clear）后抑制自动解除 | 否则永久误抑制 |
 | 抑制即丢弃，恢复后不补发 | Alertmanager 语义 |
 
-开关：`config.inhibit_offline`（默认 `True`）；设为 `False` 行为回到加抑制之前。
-被抑制时打 **DEBUG** 日志，不静默丢弃。
+### 可追溯（订单 30 硬要求：禁止静默丢弃）
+
+每次抑制产出三件证据，运维必须能回答「这条为什么没出去」：
+
+1. **凭证对象** `InhibitionRecord`（`app/inhibition.py`）：含 `robot_id` / `target_rule` /
+   `source_rule` / `source_severity` / `reason` / `ts_ms`。
+2. **WARNING 日志**：`alert inhibited: reason=… robot=… target=…(sevN) source=…(sevN)`，
+   可直接 `grep inhibition` 追溯（用 WARNING 而非 DEBUG —— DEBUG 在运维侧通常拿不到）。
+3. **独立指标**：`robot_alert_suppressed_total{rule_id, reason}`，
+   `reason` 区分 `offline` / `severity`，使 `alerts_emitted` 的下降可归因。
+
+活跃告警登记簿 `active_alerts`（`ActiveAlertRegistry`）为进程内派生状态，与
+`online_state` 同源；消费线命中即登记、未命中即清除，ticker 判离线时清整机登记。
 
 ## 去重
 
