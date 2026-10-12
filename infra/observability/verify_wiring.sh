@@ -87,6 +87,31 @@ for f in backend_ingestion/app/metrics.py backend_ingestion/app/main.py \
 done
 [ "$dual" -eq 0 ] && ok "无 robot_monitor_* 残留（代码/规则/抓取配置）"
 
+echo "==> [3.5/5] 备份指标接线（订单 31 §T3）"
+# 规则里引用的备份指标，必须能在「视图 + 查询定义」里找到来源，否则是引用空气。
+for m in pgbackrest_backup_last_success_timestamp_seconds \
+         pgbackrest_backup_last_errored pgbackrest_stanza_status_code; do
+  # 规则里必须引用
+  if ! grep -q "$m" infra/observability/rules/robot-alerts.yml; then
+    bad "$m 未被任何规则引用"; continue
+  fi
+  # 来源：指标名必须在 queries.yaml 的 metrics 定义里出现
+  if grep -q "$m" infra/ops/pgbackrest/postgres-exporter-queries.yaml; then
+    ok "$m（规则引用 + queries.yaml 有定义）"
+  else
+    bad "$m 在规则里被引用，但 queries.yaml 里找不到定义"
+  fi
+done
+# exporter 必须真的挂上自定义查询文件，否则视图再全也导不出来
+if grep -q "extend.query-path=/etc/postgres-exporter/queries.yaml" \
+      infra/observability/docker-compose.observability.yml \
+   && grep -q "postgres-exporter-queries.yaml:/etc/postgres-exporter/queries.yaml" \
+      infra/observability/docker-compose.observability.yml; then
+  ok "postgres-exporter 已挂载 --extend.query-path"
+else
+  bad "postgres-exporter 未挂载自定义查询（备份指标不会被导出）"
+fi
+
 echo "==> [4/4] 上游 env 变量名对齐"
 if grep -q "DATA_SOURCE_NAME" external/postgres_exporter/README.md 2>/dev/null \
    && grep -q "DATA_SOURCE_NAME" infra/observability/docker-compose.observability.yml; then

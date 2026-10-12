@@ -83,6 +83,51 @@ groups:
             注意此时前端告警流可能照常滚动（PUBLISH 与 INSERT 解耦），
             看板变绿不代表告警已被持久化 —— 以 DB 对账为准。
 
+      # ── 备份健康（订单 31 / G-5）─────────────────────────────────────
+      # 指标来源：postgres-exporter 自定义查询 pgbackrest_backup_status
+      #   ← 视图 monitor.pgbackrest_backup_status ← 官方 `pgbackrest --output=json info`。
+      # 复用既有通道：与 AlertStoreFailing 同属 platform 组，走同一个 Alertmanager → webhook。
+      #
+      # 备份**过期**：距离最近一次成功备份超过 26h（= 24h 全量周期 + 2h 容错）。
+      # 为什么不用 `> 0` 之类的瞬时判据：备份是**周期性**事件，正确的判据是"新鲜度"。
+      - alert: BackupStale
+        expr: |
+          (time() - pgbackrest_backup_last_success_timestamp_seconds) > 93600
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "pgBackRest 最近一次成功备份已过 {{ $value | humanizeDuration }}"
+          description: >-
+            超过 26h 没有新的成功备份（stanza={{ $labels.stanza }}）。
+            可能是备份任务未调度、仓库不可写、或备份持续失败。RPO 承诺已失效，
+            请立即执行 infra/ops/pgbackrest/backup.sh full 并检查仓库容量。
+
+      # 备份**不完整**：最近一次备份被标记 error=true（备份集缺文件/校验和不符）。
+      # 注意语义边界：这不等于"没有备份"，而是"最新那份不可用于恢复"。
+      - alert: BackupErrored
+        expr: pgbackrest_backup_last_errored > 0
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "pgBackRest 最近一次备份不完整（stanza={{ $labels.stanza }}）"
+          description: >-
+            官方 info 报告最新备份 error=true。该备份集不可用于恢复，
+            需跑 backup.sh full 重做，并用 backup.sh info / verify.sh 复核。
+
+      # stanza 状态非 ok：仓库路径丢失/锁异常/配置错。此时 backup 命令本身会失败。
+      - alert: BackupStanzaUnhealthy
+        expr: pgbackrest_stanza_status_code > 0
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "pgBackRest stanza 状态异常（code={{ $value }}，stanza={{ $labels.stanza }}）"
+          description: >-
+            官方 info 的 status.code != 0（1=missing stanza path / 2=配置错 / 其他见文档）。
+            备份在此状态下不会成功，先按 DR-RUNBOOK §5.2 执行 stanza-create 与环境检查。
+
       - alert: TimescaleDown
         expr: up{job="postgres"} == 0
         for: 15s

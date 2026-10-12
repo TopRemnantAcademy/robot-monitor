@@ -19,12 +19,16 @@
 FROM debian:bookworm-slim
 
 # 官方安装路径：PGDG 仓库（user-guide.xml:343-344 的 pgdg 脚本）
+# jq：verify.sh / postgres-exporter 自定义查询都要解析 `info --output=json`。
+# 官方 user-guide.xml 的「Using jq」段即推荐 jq 提取该 JSON，故随镜像装上，
+# 避免运行期才发现工具缺失。
 RUN apt-get update \
  && apt-get install -y --no-install-recommends postgresql-common ca-certificates gnupg curl lsb-release \
  && /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y \
- && apt-get install -y --no-install-recommends pgbackrest \
+ && apt-get install -y --no-install-recommends pgbackrest jq \
  # 镜像内验证二进制存在，否则构建即失败（不让「配置了但没装」的假成功溜过去）
  && pgbackrest version \
+ && jq --version \
  && rm -rf /var/lib/apt/lists/*
 
 # 官方要求的目录布局（user-guide.xml:626-637）：日志目录 / 配置目录

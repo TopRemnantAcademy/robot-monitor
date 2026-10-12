@@ -60,6 +60,17 @@ services:
     container_name: robot-monitor-postgres-exporter
     ports:
       - "9187:9187"
+    # 订单 31 §T3：把 pgBackRest 备份状态暴露为指标
+    # （pgbackrest_backup_last_success_timestamp_seconds / _last_errored /
+    #   pgbackrest_stanza_status_code），供 robot-alerts.yml 的 BackupStale 等规则消费。
+    # 自定义查询文件与 --extend.query-path 的写法实证：
+    #   external/postgres_exporter/README.md「Adding new metrics via a config file (DEPRECATED)」段。
+    # 上游已标记该 flag 为 DEPRECATED（仍可用）：详见查询文件顶部注释的迁移点说明。
+    command:
+      - "--extend.query-path=/etc/postgres-exporter/queries.yaml"
+    volumes:
+      # 只读挂载：查询定义是代码，不打进镜像（改查询不必重建 exporter 镜像）。
+      - ../ops/pgbackrest/postgres-exporter-queries.yaml:/etc/postgres-exporter/queries.yaml:ro
     environment:
       # 变量名实证自 external/postgres_exporter/README.md:252（DATA_SOURCE_NAME）
       #

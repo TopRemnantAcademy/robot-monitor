@@ -47,6 +47,10 @@ services:
       - pgbackrest-log:/var/log/pgbackrest
       # 双端 TLS 证书（DB 侧作为 TLS 服务端，接受仓库边车连入）
       - pgbackrest-certs:/etc/pgbackrest/cert:ro
+      # 备份状态监控 DDL（订单 31 §T3）：DB 侧 psql -f /opt/dr/monitor.sql 应用一次，
+      # 建 monitor.pgbackrest_info() 函数与 monitor.pgbackrest_backup_status 视图，
+      # 供 postgres-exporter 自定义查询消费。只读挂载，不烘焙进镜像。
+      - ./ops/pgbackrest/monitor.sql:/opt/dr/monitor.sql:ro
     # timescaledb 官方镜像的 postgres 与 PG 官方镜像同源，支持 conf.d 追加片段；
     # command 追加 -c config_file 使其读取主配置。
     command:
@@ -74,9 +78,14 @@ services:
       # 仓库侧配置（含加密口令注入点，值来自 .env）
       - ./ops/pgbackrest/pgbackrest.conf:/etc/pgbackrest/pgbackrest.conf:ro
       - pgbackrest-log:/var/log/pgbackrest
-      # 运维脚本以只读方式挂载到 /opt/dr（不烘焙进镜像，便于现场修订）
-      - ./ops/pgbackrest/run-backup.sh:/opt/dr/run-backup.sh:ro
+      # 运维脚本以只读方式挂载到 /opt/dr（不烘焙进镜像，便于现场修订）。
+      # 订单 31 的 T2 三入口 backup/restore/verify（+ verify-restore 承载 L3 恢复比对）。
+      - ./ops/pgbackrest/backup.sh:/opt/dr/backup.sh:ro
       - ./ops/pgbackrest/restore.sh:/opt/dr/restore.sh:ro
+      - ./ops/pgbackrest/verify.sh:/opt/dr/verify.sh:ro
+      - ./ops/pgbackrest/verify-restore.sh:/opt/dr/verify-restore.sh:ro
+      # 订单 25 的旧入口保留（run-backup.sh 是 backup.sh 的前身，避免既有 runbook 失效）
+      - ./ops/pgbackrest/run-backup.sh:/opt/dr/run-backup.sh:ro
       # 双端 TLS 证书（仓库侧作为 TLS 服务端 + 连 DB 的客户端证书）
       - pgbackrest-certs:/etc/pgbackrest/cert:ro
     environment:

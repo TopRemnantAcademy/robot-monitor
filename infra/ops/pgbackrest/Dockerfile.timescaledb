@@ -40,6 +40,13 @@ RUN apk add --no-cache \
  && apk del build-base meson ninja pkgconf openssl-dev libxml2-dev lz4-dev bzip2-dev zstd-dev libssh2-dev \
  && rm -rf /var/cache/apk/*
 
+# jq：DB 侧 `monitor.pgbackrest_info()`（官方 user-guide.xml Monitoring 示例）
+# 与其派生查询要解析 `pgbackrest --output=json info`，随镜像装上。
+RUN apk add --no-cache jq \
+ && jq --version
+# 构建期自检：二进制与解析工具都在。
+RUN pgbackrest version
+
 # 官方要求的日志目录（user-guide.xml:626-637）
 RUN mkdir -p /var/log/pgbackrest \
  && chmod 770 /var/log/pgbackrest \

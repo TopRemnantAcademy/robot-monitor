@@ -1,4 +1,4 @@
-# pgBackRest 灾备边车（订单 25 / I-19）
+# pgBackRest 灾备边车（订单 25 / I-19 建契约；订单 31 / G-5 收口为「真能备份」）
 
 > 完整运行手册见 **`docs/DR-RUNBOOK.md`**。本文件是目录导航 + 设计要点。
 
@@ -6,14 +6,20 @@
 
 | 文件 | 作用 |
 |---|---|
-| `Dockerfile` | 仓库(repository)主机的 pgBackRest 镜像（PGDG 包安装，v2.59.3） |
-| `Dockerfile.timescaledb` | 派生 timescaledb 镜像：给基础镜像补 pgbackrest 二进制（`archive_command` 需要） |
-| `docker-compose.dr.yml` | overlay：派生 timescaledb + pgbackrest 仓库边车 |
+| `Dockerfile` | 仓库(repository)主机的 pgBackRest 镜像（PGDG 包安装，v2.59.3，含 `jq`） |
+| `Dockerfile.timescaledb` | 派生 timescaledb 镜像：给基础镜像补 pgbackrest 二进制（`archive_command` 需要），含 `jq` |
+| `docker-compose.dr.yml` | overlay：派生 timescaledb + pgbackrest 仓库边车（挂载全部 `/opt/dr/*.sh`） |
 | `pgbackrest.conf` | **仓库侧**配置（含 `repo1-cipher-pass=${PGBACKREST_CIPHER_PASS}` 注入点） |
 | `pgbackrest-db.conf` | **数据库侧**配置（不含口令；只有 `pg1-path` 等本机信息） |
 | `postgresql-dr.conf` | PG 开关：`archive_mode=on` / `archive_command` / `archive_timeout`（经 `include_dir` 载入） |
-| `run-backup.sh` | 备份调度入口（`full` / `diff` / `check` / `info`） |
-| `restore.sh` | 恢复入口（`latest` / `set <name>` / `pitr '<ts>'`，带两级确认） |
+| **`backup.sh`** | **T2 备份入口**（`full`/`diff`/`incr`/`check`/`info`/`stanza-create`；幂等、非 0 退出） |
+| **`restore.sh`** | **T2 恢复入口**（`latest`/`set <name>`/`pitr '<ts>'`，带两级确认） |
+| **`verify.sh`** | **T2 校验入口**：L1 校验和 + L2 新鲜度 +（`--scratch`）L3 恢复比对，**真断言** |
+| **`verify-restore.sh`** | L3 承载：真实恢复 + 源库/恢复库 行数·时间戳比对 |
+| **`monitor.sql`** | **T3 可观测**：官方 `monitor.pgbackrest_info()` 范式 → `monitor.pgbackrest_backup_status` 视图 |
+| **`postgres-exporter-queries.yaml`** | **T3**：postgres-exporter 自定义查询，导出备份指标 |
+| `run-backup.sh` | 订单 25 旧入口（保留，避免既有 runbook 失效） |
+| `verify-drs.sh` | **静态**自检（YAML/结构/无明文密钥/脚本语法/无 `|| true` 兜底） |
 
 ## 为什么不能「只挂一个容器」就完事
 
@@ -61,14 +67,27 @@ $DC exec pgbackrest /opt/dr/run-backup.sh check
 $DC exec pgbackrest /opt/dr/run-backup.sh full
 ```
 
-## 状态
+## 校验怎么跑（两个层次，别混）
 
-- ✅ 配置、脚本、compose、RUNBOOK 齐备；
-- ✅ 静态自检通过（无需 Docker）：
+```bash
+# ① 静态：文件形态对不对（无需 Docker，秒级）
+bash infra/ops/pgbackrest/verify-drs.sh
 
-  ```bash
-  bash infra/ops/pgbackrest/verify-drs.sh
-  ```
+# ② 运行时：备份到底可不可用（需要真实仓库，**有真断言**）
+#    在 pgbackrest 仓库边车内执行：
+/opt/dr/verify.sh              # L1 校验和 + L2 新鲜度
+/opt/dr/verify.sh --scratch    # 追加 L3：真恢复到临时目录并比对行数/时间戳
+```
 
-- ❌ **未端到端实跑**（本工作环境无 Docker）。未验证项与所需条件见
-  `docs/DR-RUNBOOK.md §6`。
+① 只保证「配置不会因语法问题起不来」；**备份可用性只由 ② 判定**。
+
+## 状态（订单 31 更新）
+
+- ✅ 配置、T2 三入口脚本、compose、RUNBOOK、T3 告警接线齐备；
+- ✅ 静态自检 + 指标接线自检通过：
+  `verify-drs.sh` / `infra/observability/verify_wiring.sh`；
+- ✅ **真实备份/恢复/校验已实跑**（本机 PG16 + pgBackRest 2.59.3，PGDG 官方包）：
+  全量备份 → `verify.sh` L1+L2+L3 全绿（含恢复后行数/时间戳比对）→
+  篡改文件后 `verify.sh` 正确变红（负向用例）。原文输出见 `docs/DR-RUNBOOK.md §6.2`；
+- ⚠️ **容器编排层仍未实跑**（本工作环境容器不可起）：镜像构建、三层合并起栈、
+  双端 TLS 握手、CAgg 恢复属未验证项，见 `docs/DR-RUNBOOK.md §6.3`。

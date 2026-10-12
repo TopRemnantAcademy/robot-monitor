@@ -1,0 +1,49 @@
+# postgres-exporter 自定义查询：把 pgBackRest 备份状态变成 Prometheus 指标（订单 31 §T3）
+#
+# 数据来源：monitor.pgbackrest_backup_status 视图（见同目录 monitor.sql），
+# 其底层是官方 `pgbackrest --output=json info` 稳定接口。
+#
+# 为什么用 postgres-exporter 而不是新起一个 exporter：
+#   订单 31 §T3 要求「复用既有告警通道，不要另造一套」。#59 的 robot_alert_store_errors_total
+#   就是经 postgres_exporter → Prometheus 规则 → Alertmanager → webhook 这条链。
+#   备份状态同样落在 Postgres 里，自然复用同一条 exporter。
+#
+# 挂载方式（见 infra/observability/docker-compose.observability.yml 的
+#   PG_EXPORTER_EXTEND_QUERY_PATH 与 --extend.query-path 参数）。
+#
+# ⚠️ 上游状态：`--extend.query-path` 在 postgres_exporter 已标记 DEPRECATED
+#    （README「Adding new metrics via a config file (DEPRECATED)」段），
+#    官方建议改用内置 collector 函数或 sql_exporter。此处沿用是因为：
+#      (a) v0.17.1 仍支持，未移除（README 选项表仍列出 --extend.query-path）；
+#      (b) 引入 sql_exporter 会新增一个服务，与「复用既有通道」相悖。
+#    若将来该 flag 被移除，迁移点仅此一处（视图 monitor.pgbackrest_backup_status 不变）。
+#
+# 指标语义：
+#   pgbackrest_backup_last_success_timestamp_seconds
+#       最近一次成功备份的 stop 时刻（epoch 秒）。规则用 time() - 它 判定"过期"。
+#   pgbackrest_backup_last_errored
+#       最近一次备份 error 标记（0=完好 1=不完整）。>0 即告警。
+#   pgbackrest_stanza_status_code
+#       官方 info 的 stanza status.code（0=ok，非 0=仓库/stanza 异常）。
+pgbackrest_backup_status:
+  query: |
+    SELECT
+      stanza,
+      last_backup_stop_epoch  AS last_success_timestamp_seconds,
+      CASE WHEN last_backup_errored THEN 1 ELSE 0 END AS last_errored,
+      status_code
+    FROM monitor.pgbackrest_backup_status
+  master: true
+  metrics:
+    - stanza:
+        usage: "LABEL"
+        description: "pgBackRest stanza 名"
+    - last_success_timestamp_seconds:
+        usage: "GAUGE"
+        description: "最近一次成功备份的 stop 时刻（epoch 秒）"
+    - last_errored:
+        usage: "GAUGE"
+        description: "最近一次备份是否带 error 标记（1=不完整）"
+    - status_code:
+        usage: "GAUGE"
+        description: "官方 info 的 stanza status.code（0=ok）"

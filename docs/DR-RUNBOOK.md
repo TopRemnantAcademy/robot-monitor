@@ -1,8 +1,20 @@
 # 灾备运行手册（DR RUNBOOK）— TimescaleDB
 
-> 订单 **25 / I-19**。关联 `external/INTEGRATION-PLAN.md §8.9`（缺口 = 审计 #28）。
+> 订单 **25 / I-19** 建立配置契约；订单 **31 / G-5** 收口为「真能备份」。
+> 关联 `external/INTEGRATION-PLAN.md §8.9`（缺口 = 审计 #28）。
 > 目标对象：`infra/docker-compose.yml` 的 `timescaledb` 服务（库对象见 `infra/init.sql`）。
 > 工具选型：**pgBackRest**（选型理由见 §1）。
+
+**订单 31 的关键变化（先读这条）**：订单 25 只交付了配置与脚本**契约**，镜像层仍是裸
+postgres，仓库内没有任何一份真实备份。本单补齐了：
+
+| 项 | 订单 25 | 订单 31 之后 |
+|---|---|---|
+| 备份入口 | `run-backup.sh`（full/diff/check/info） | **`backup.sh`**（+ incr / stanza-create，非 0 退出语义明确） |
+| 恢复入口 | `restore.sh` | `restore.sh`（保留） |
+| 校验入口 | `verify-drs.sh`（**静态**：YAML/语法） | **`verify.sh`**（L1 校验和 / L2 新鲜度 / L3 恢复比对）+ `verify-restore.sh` |
+| 备份失败告警 | 无 | `monitor.sql` + postgres-exporter 自定义查询 + `BackupStale/BackupErrored` 规则（复用 #59 通道） |
+| 端到端证据 | 无（环境无 Docker） | **真实 PG16 + pgBackRest 2.59.3 实跑**，见 §6 |
 
 ---
 
@@ -47,7 +59,30 @@ wal-g 的优势集中在「云对象存储原生」，等真有 S3 仓库需求�
 
 ---
 
-## 2. 架构：为什么是「双端」
+## 2. 架构与 T1 方案定稿（订单 31）
+
+### 2.1 T1 二选一：为什么最终是「派生镜像 + 仓库边车」两者都要
+
+订单 31 §T1 让在 (a) 换内置 pgbackrest 的 postgres 镜像 与 (b) 官方镜像 + pgbackrest
+边车 之间二选一。**结论：(a) 与 (b) 不是替代关系，而是双端架构的两个必需半边**，
+必须同时具备 —— 这不是"两个都选"，而是 pgBackRest 的架构决定的：
+
+- **WAL 归档在 DB 主机本地执行**：`archive_command = 'pgbackrest … archive-push %p'`
+  是 PostgreSQL 进程自己 fork 执行的命令，**不可能**由仓库边车代替
+  （边车不在 PG 的进程空间里）。⇒ **DB 侧必须有 pgbackrest 二进制** ⇒ 需要 (a) 派生镜像。
+- **仓库（备份落点）是独立主机**：备份数据、加密、retention 都在仓库侧，
+  必须有一个专职容器持有 `pgbackrest-repo` 卷 ⇒ 需要 (b) 边车。
+- 且两端**版本必须完全一致**：user-guide.xml:2770
+  > "The pgBackRest version installed on the repository host must exactly match …"
+
+所以本方案 = `Dockerfile.timescaledb`（在 timescaledb 镜像上补 pgbackrest）**且**
+`Dockerfile` + `pgbackrest` 边车。二者都锁定 **v2.59.3**（§1 已核对为当前 stable）。
+
+**为什么不选「纯 (b) 边车 + 把 PGDATA 挂进边车」**：那条路要求边车直接对 PG 的
+data directory 做物理读写，同时还要让 PG 自己去 archive，等于让两个容器争用同一份
+PGDATA —— 官方文档从未支持这种布局，且会与 PG 的 checkpoint 语义冲突。淘汰。
+
+### 2.2 为什么是「双端」
 
 pgBackRest 是**双端架构**：PostgreSQL 主机与仓库(repository)主机**各自**都要有
 **完全相同版本**的 pgbackrest 二进制与配置。
@@ -198,6 +233,9 @@ docker compose -f infra/docker-compose.yml -f infra/ops/pgbackrest/docker-compos
 
 ### 4.4 恢复后一致性核对（必做，不得跳过）
 
+> 订单 31 起，这一步**已自动化**：`verify.sh --scratch` / `verify-restore.sh` 会真实恢复
+> 到临时目录、启动只读实例，并比对行数 / 最新时间戳（见 §4.6）。下列 SQL 是人工排查时的等价手段。
+
 ```sql
 -- 1) 基础对象
 SELECT count(*) FROM robot_metadata;                      -- 期望 100
@@ -210,21 +248,85 @@ SELECT indexdef FROM pg_indexes WHERE tablename='robot_alert' AND indexname LIKE
 --     期望 PRIMARY KEY (time, alert_id)
 ```
 
-### 4.5 备份触发（日常）
+### 4.5 备份触发（日常，订单 31 §T2 三入口）
+
+`/opt/dr/` 下有三个入口脚本（**都是幂等的，失败一律非 0 退出**）：
+
+| 脚本 | 用途 | 关键退出码 |
+|---|---|---|
+| `backup.sh` | `full` / `diff` / `incr` / `check` / `info` / `stanza-create` | 0 成功；2 用法错；3 前置条件缺失；其余透传 pgbackrest |
+| `restore.sh` | `latest` / `set <name>` / `pitr '<ts>'` | 需 `DR_FORCE_RESTORE=yes` 才动手（两级确认） |
+| `verify.sh` | L1 校验和 + L2 新鲜度（+ `--scratch` 时 L3 恢复比对） | 0 通过；1 断言失败；2 用法错；3 前置条件缺失 |
 
 ```bash
-# 配置校验（新环境/改配置后必须先跑）
-... exec pgbackrest /opt/dr/run-backup.sh check
+# 0) 新环境：先建 stanza（幂等）
+... exec pgbackrest /opt/dr/backup.sh stanza-create
 
-# 全量（建议每周日 06:30）
-... exec pgbackrest /opt/dr/run-backup.sh full
+# 1) 配置/归档链路校验（改配置后必须先跑这条）
+... exec pgbackrest /opt/dr/backup.sh check
 
-# 差异（建议周一~周六 06:30）
-... exec pgbackrest /opt/dr/run-backup.sh diff
+# 2) 全量（建议每周日 06:30）
+... exec pgbackrest /opt/dr/backup.sh full
+
+# 3) 差异（建议周一~周六 06:30）
+... exec pgbackrest /opt/dr/backup.sh diff
+
+# 4) 备份后自证：只有 verify.sh 通过，才算"这份备份可用"
+... exec pgbackrest /opt/dr/verify.sh
+#    需要真恢复比对时（更强，耗时更长）：
+... exec pgbackrest /opt/dr/verify.sh --scratch
 ```
 
-调度语义参考官方示例（`external/pgbackrest/doc/xml/user-guide.xml:1515-1520`）的 crontab 段。
-容器环境用 cron / systemd timer / 编排器定时任务均可；关键是**全量周期 ≤ 保留窗口的一半**。
+**调度建议**（cron 语义，实证 `external/pgbackrest/doc/xml/user-guide.xml:1515-1520` 的 crontab 段）：
+
+```cron
+#  m   h  dom mon dow  command
+   30  06   *   *   0   /opt/dr/backup.sh full
+   30  06   *   *  1-6  /opt/dr/backup.sh diff
+   00  07   *   *   *   /opt/dr/verify.sh                 # 每日校验新鲜度
+   00  03   *   *   0   /opt/dr/verify.sh --scratch       # 每周真恢复演练
+```
+
+容器环境用 cron / systemd timer / 编排器定时任务均可。
+**关键约束**：全量周期 ≤ 保留窗口的一半（§4.7 保留策略）。
+
+### 4.6 备份真实性校验（订单 31 §T2：`verify.sh` 三层断言）
+
+`verify.sh` **不是 echo OK**，它逐层用可证伪的断言判定：
+
+- **L1 仓库一致性**：`pgbackrest verify --verbose` 输出里
+  - stanza 段必须 `status: ok`
+  - 每份备份必须 `status: valid`
+  - 不得出现 `invalid checksum` / `missing: N>0` / `size invalid: N>0` / `other: N>0`
+  > ⚠️ **实测陷阱（2.59.3）**：`verify` 检出校验和不符时**进程退出码仍是 0**！
+  > 只判退出码 = 假绿。故本层解析输出文本（见脚本注释）。
+- **L2 备份新鲜度**：解析 `info --output=json`（官方稳定接口），断言
+  - `status.code == 0`
+  - 至少 1 份全量备份
+  - 最新备份 `error == false`
+  - `now - timestamp.stop <= 阈值`（默认 86400s，可用 `--max-age-seconds` 调）
+  - WAL 归档区间非空（`archive[-1].min/max` 均存在）
+- **L3 恢复真实性**（`--scratch`）：真实 restore 到临时目录 → 启动只读实例 →
+  **比对源库与恢复库的 `count(*)` 与 `max(time)`**（默认表：robot_telemetry /
+  robot_metadata / robot_alert）。环境不具备时打印明确 skip 原因并以 0 退出。
+
+```bash
+# 加阈值：超过 2h 没有新备份即失败
+... exec pgbackrest bash -c 'PGBACKREST_MAX_BACKUP_AGE_SECONDS=7200 /opt/dr/verify.sh'
+```
+
+### 4.7 保留策略（与 `pgbackrest.conf` 一致）
+
+| 项 | 值 | 配置键 |
+|---|---|---|
+| 全量保留 | 2 份（count 语义） | `repo1-retention-full=2` |
+| 差异保留 | 6 份 | `repo1-retention-diff=6` |
+| 仓库加密 | aes-256-cbc | `repo1-cipher-type`（§5） |
+| WAL 归档队列上限 | 4GiB（仓库不可用时本地堆积不丢） | `archive-push-queue-max` |
+
+> count 语义实证 `reference.xml:944`（`repo-retention-full-type`）：`count` 时
+> 「超出的全量才被过期」；`time` 时才按天。默认 `count`。
+> 约束：全量周期 ≤ 保留窗口一半 —— 保留 2 份全量 ⇒ 全量间隔 ≤ 1 周（与 §4.5 cron 一致）。
 
 ---
 
@@ -285,30 +387,283 @@ chmod 600 *.key
 
 ---
 
-## 6. 未验证清单（诚实边界）
+### 5.2 备份失败的告警接入（订单 31 §T3，复用 #59 既有通道）
 
-本工作环境（CNB NPC 沙箱）**无 Docker**，故以下项**未实跑**，需在有 Docker 的环境中补齐：
+**不另造一套告警通道**：`#59` 已把「告警落库失败」做成
+`robot_alert_store_errors_total` → Prometheus 规则 `AlertStoreFailing` →
+Alertmanager(`infra/observability/alertmanager.yml`) → webhook。
+备份失败复用同一条链，只补一个**指标来源**：
+
+```
+pgbackrest --output=json info         (官方稳定接口)
+        │  COPY FROM PROGRAM（官方 user-guide.xml Monitoring 示例）
+        ▼
+monitor.pgbackrest_info()  →  view monitor.pgbackrest_backup_status
+        │  infra/ops/pgbackrest/monitor.sql
+        ▼
+postgres-exporter --extend.query-path=postgres-exporter-queries.yaml
+        ▼
+pgbackrest_backup_last_success_timestamp_seconds / _last_errored / pgbackrest_stanza_status_code
+        ▼
+infra/observability/rules/robot-alerts.yml：BackupStale / BackupErrored / BackupStanzaUnhealthy
+        ▼
+Alertmanager → robot-monitor-webhook（与 AlertStoreFailing 同一条）
+```
+
+落地三步：
+
+```bash
+# ① DB 侧建函数与视图（一次即可；见 monitor.sql，官方示例范式）
+docker compose -f infra/docker-compose.yml -f infra/ops/pgbackrest/docker-compose.dr.yml \
+  exec timescaledb psql -U postgres -d robot_monitor -f /opt/dr/monitor.sql
+
+# ② 确认视图能读到仓库状态（返回一行：status_code=0 即健康）
+... exec timescaledb psql -U postgres -d robot_monitor \
+  -tAc 'SELECT * FROM monitor.pgbackrest_backup_status'
+
+# ③ 把自定义查询挂给 postgres-exporter（observability overlay 已配好）
+docker compose -f infra/docker-compose.yml -f infra/observability/docker-compose.observability.yml up -d
+curl -s localhost:9187/metrics | grep pgbackrest_
+```
+
+三条规则的语义边界：
+
+- `BackupStale`：`time() - pgbackrest_backup_last_success_timestamp_seconds > 93600`（26h）。
+  **周期性**事件，判据是"新鲜度"，不是瞬时 `> 0`。
+- `BackupErrored`：`pgbackrest_backup_last_errored > 0`。最新那份备份不完整
+  （≠ 没有备份，而是"最新那份不可用于恢复"）。
+- `BackupStanzaUnhealthy`：`pgbackrest_stanza_status_code > 0`。
+  stanza 路径丢失/配置错 —— 此时 `backup.sh` 本身就会失败。
+
+> ⚠️ 上游状态：`--extend.query-path` 在 postgres_exporter 已标记 DEPRECATED
+> （README「Adding new metrics via a config file (DEPRECATED)」段），v0.17.1 仍支持。
+> 若将来被移除，迁移点只有一处（视图 `monitor.pgbackrest_backup_status` 不变）。
+
+---
+
+## 6. 验证状态（订单 31 更新：从「未验证」到「有真实证据」）
+
+### 6.1 环境与版本（实测）
+
+订单 31 的验收在 **本机真实 PG 集群**上完成（不是 mock）：用官方 PGDG 仓库
+（与 `Dockerfile` 相同的安装路径）装了 `postgresql-16` + `pgbackrest`：
+
+```
+$ pgbackrest version
+pgBackRest 2.59.3          # 与 pgbackrest.conf / Dockerfile 锁定版本一致
+
+$ /usr/lib/postgresql/16/bin/postgres --version
+postgres (PostgreSQL) 16.15 (Debian 16.15-1.pgdg12+2)
+```
+
+> 为什么这算"真"验证：`pgbackrest` 是官方包、版本就是仓库锁的 2.59.3；
+> 备份/恢复/校验走的是 **同一条 pgBackRest 代码路径**（§4 / §5 的命令逐字执行），
+> 只是把「容器」换成了「本机进程」。**容器编排层**另有未验证项（§6.4）。
+
+### 6.2 已完成并通过的实跑（附原文输出）
+
+**① 真实全量备份 + 校验**（`backup.sh`）：
+
+```
+$ backup.sh full
+INFO: backup start archive = 000000010000000000000002, lsn = 0/2000028
+INFO: new backup label = 20261013-000357F
+INFO: full backup size = 32.6MB, file total = 1379
+INFO: backup command end: completed successfully (4601ms)
+
+$ backup.sh check      # 触发 pg_switch_wal 并确认所需 WAL 已到仓库
+… completed successfully
+```
+
+**② 三层真实性校验**（`verify.sh --scratch`，退出码 0）：
+
+```
+== L1 仓库一致性（pgbackrest verify：逐文件校验和）==
+L1a OK：verify 报告 stanza status: ok
+L1b OK：verify 逐份备份 status: valid（共 4 份）
+L1c OK：无 invalid/missing/checksum/other 异常项
+== L2 备份新鲜度与完整性（断言 info JSON）==
+L2a OK：stanza status.code=0（ok）
+L2b OK：仓库内共 2 份备份，其中全量 2 份（retention 基准存在）
+L2c OK：最新备份 20261013-000617F 无错误（error=false）
+L2d OK：最新成功备份距今 359s ≤ 阈值 86400s
+L2e OK：WAL 归档区间非空 [000000010000000000000006 .. 00000001000000000000000C]
+== L3 恢复真实性（真恢复到临时目录 + 行数/时间戳比对）==
+基线 robot_telemetry：count=5000 max_time=2026-10-13 00:03:54.696285+08
+基线 robot_metadata：count=100
+恢复产物校验：PG_VERSION=16，文件数=1381
+OK 表 robot_telemetry 行数一致：5000
+OK 表 robot_telemetry max(time) 一致：2026-10-13 00:03:54.696285+08
+OK 表 robot_metadata 行数一致：100
+恢复库 timescaledb=2.30.2，chunk 数=1
+恢复真实性全部通过：源库与恢复库 行数 / 最新时间戳 一致。
+全部断言通过（L1 + L2 + L3）。        # 退出码 0
+```
+
+**③ 负向用例：断言真的会失败**（否则就是假绿）。篡改仓库内一份备份文件的一个字节块：
+
+```
+$ verify.sh
+L1a FAIL：verify 未报告 stanza status: ok
+L1c FAIL：verify 检出无效文件 —— 仓库已损坏，备份不可用于恢复
+存在未通过断言。                        # 退出码 1
+
+# 恢复被篡改的文件后
+$ verify.sh … 退出码 0（回到全绿）
+```
+
+> 这条负向用例同时暴露了一个**真实陷阱**：`pgbackrest verify` 检出
+> `invalid checksum` 时**进程退出码仍是 0**。故 `verify.sh` 的 L1 解析输出文本，
+> 而不是只判退出码 —— 只判退出码的实现会在仓库损坏时给出假绿。
+
+**④ 备份状态可观测**（`monitor.sql` → postgres-exporter → 规则）：
+
+```
+$ psql -d robot_monitor -tAc 'SELECT * FROM monitor.pgbackrest_backup_status'
+robot_monitor|0|1791821181|f|00000001000000000000000C
+                │        └ last_backup_stop (epoch 1791821181 = 2026-10-13 00:06:21)
+                └ status_code=0（ok）
+```
+
+Prometheus 规则经官方 `promtool` 校验（版本 v3.2.1，与 compose 锁定一致）：
+
+```
+$ promtool check rules infra/observability/rules/robot-alerts.yml
+SUCCESS: 12 rules found      # 含新增的 BackupStale / BackupErrored / BackupStanzaUnhealthy
+```
+
+**⑤ 静态与门禁校验**（可复现）：
+
+```bash
+bash infra/ops/pgbackrest/verify-drs.sh          # 文件形态：YAML/结构/无明文密钥/脚本语法
+bash infra/observability/verify_wiring.sh        # 备份指标接线：规则引用 ↔ 来源 ↔ exporter 挂载
+docker compose -f infra/docker-compose.yml -f infra/ops/pgbackrest/docker-compose.dr.yml config
+docker compose -f infra/ops/pgbackrest/docker-compose.dr.yml config
+```
+
+前三条均通过（compose config 退出码 0；见附录 A 的完整输出）。`verify-drs.sh`
+**只证明「配置不会因语法问题起不来」**，备份可用性由 `verify.sh` 判定 —— 二者分工已在脚本头注明。
+
+### 6.3 未验证清单（诚实边界，勿删）
+
+以下项**没有**在本环境实跑，因为它们依赖「真实容器编排层」或「真实磁盘带宽」：
 
 | # | 未验证项 | 所需条件 | 验证方法 |
 |---|---|---|---|
-| U1 | 派生镜像 `Dockerfile.timescaledb` 能否构建 | `timescale/timescaledb:2.13.1-pg16` 的底层发行版（alpine vs debian）**未实测** | `docker build`；若报 `apk: not found` 改 debian 分支（Dockerfile 已注明） |
-| U2 | `Dockerfile`（PGDG 安装 pgbackrest）能否构建 | 需联网访问 apt.postgresql.org | `docker build -f Dockerfile .`，看 `pgbackrest version` 输出 |
-| U3 | overlay 与基础 compose 能否合并启动 | Docker Compose v2 | `docker compose -f infra/docker-compose.yml -f infra/ops/pgbackrest/docker-compose.dr.yml config` |
-| U4 | `include_dir` 是否被 timescaledb 镜像的 PG 接受 | 运行时 | `SHOW include_dir;` + 确认 `archive_mode=on` 生效（`SHOW archive_mode;`） |
-| U5 | `stanza-create` / `check` / `backup` 端到端 | 起容器 | `run-backup.sh check` 全绿 → `full` |
-| U6 | **恢复演练（RTO 实测）** | 起容器 + 造数据 | 按 §4 走一遍并计时，用实测值替换 §3.3 |
-| U7 | TimescaleDB 超表在物理备份下的恢复一致性 | 社区有讨论，本项目未实测 | 恢复后比对 `_timescaledb_catalog` 与 chunk 完整性 |
-| U8 | 实测仓库读带宽（决定 RTO） | 真实磁盘 | `pgbackrest ... restore` 计时 |
+| U1 | `Dockerfile.timescaledb`（Alpine 源码构建 pgbackrest）能否构建 | 能跑 Docker build 的机器 | `docker build -f Dockerfile.timescaledb`；构建期已内置 `pgbackrest version` 自检 |
+| U2 | `Dockerfile`（PGDG 安装）能否构建 | 联网访问 apt.postgresql.org | `docker build -f Dockerfile .`；构建期已内置 `pgbackrest version` + `jq --version` 自检 |
+| U3 | overlay 三层合并后容器能否真正起栈 | Docker Compose v2 + 可用内核 | `docker compose … up -d`（本地已用 `config` 判定配置层可解析，见附录 A） |
+| U4 | `include_dir` 被 timescaledb 的 PG 接受 | 运行时 | `SHOW include_dir;` / `SHOW archive_mode;` |
+| U5 | 双端 TLS 证书握手 | 运行时 | 生成证书（§5.1）后跑 `backup.sh check` |
+| U6 | **RTO 实测计时** | 真实磁盘 + 造数据 | 按 §4.2/§4.3 走一遍并计时，用实测值替换 §3.3 的算术推算 |
+| U7 | 仓库读带宽实测 | 真实磁盘 | `pgbackrest … restore` 计时 |
+| U8 | TimescaleDB 连续聚合（CAgg）在物理备份下的恢复 | 需社区版 timescaledb | 本地验证用的是 Apache 版（CAgg 不可用，故 `init.sql` 的 CAgg 段未覆盖）；生产镜像为社区版，需在容器内复核 |
 
-> 订单 25 §2 T2 允许「若环境可跑附演练记录，否则贴『未验证+条件』」。
-> 本节即该「未验证 + 条件」。**没有伪造任何演练记录**（订单 §4 禁止项 2）。
+> **没有伪造任何演练记录**（订单 31 §禁止项 / 订单 25 §4 禁止项 2）。
+> 本地实跑的证据（§6.2）是**真实命令的真实输出**；容器层的缺口单列在 §6.3。
 
-### 6.1 已完成的静态校验（可复现）
+### 6.4 本地实跑与容器环境的差异（必须知道）
 
-```bash
-bash infra/ops/pgbackrest/verify-drs.sh
+| 维度 | 本地验证 | 生产（compose） |
+|---|---|---|
+| pgbackrest 版本 | 2.59.3（PGDG 包） | 2.59.3（PGDG 包 / Alpine 源码构建），**一致** |
+| PG 版本 | 16.15 | 16（timescaledb 2.13.1-pg16 内置 16.1），**主版本一致** |
+| timescaledb 扩展 | 2.30.2（Apache 版，PGDG） | 2.13.1（社区版，镜像内置），**版本不同** |
+| `postgresql.conf` 位置 | Debian split-config（`/etc/postgresql/16/main/`） | PGDATA 内（`/var/lib/postgresql/data/`） |
+| 双端认证 | 本机 Unix socket | TLS 双端证书（`pg1-host-type=tls`） |
+
+**结论**：备份/恢复**代码路径**已验证；**容器编排 + TLS + CAgg** 属 §6.3 未验证项。
+timescaledb 扩展版本差异不影响物理备份本身的正确性（备份的是文件与 WAL），
+但 CAgg 相关的恢复断言需在生产镜像内复核（U8）。
+
+---
+
+## 附录 A：可复现的判定命令与原文输出（订单 31 验收）
+
+### A.1  compose config（T1 可判定判据）
+
+```console
+$ PGBACKREST_CIPHER_PASS=demo docker compose \
+    -f infra/docker-compose.yml -f infra/ops/pgbackrest/docker-compose.dr.yml config
+name: infra
+  emqx:
+    image: emqx/emqx:5.6
+        target: 1883
+        target: 18083
+  pgbackrest:
+      dockerfile: Dockerfile
+    image: robot-monitor-pgbackrest:local
+        target: /var/lib/pgbackrest
+        source: /workspace/infra/ops/pgbackrest/pgbackrest.conf
+        target: /etc/pgbackrest/pgbackrest.conf
+        target: /var/log/pgbackrest
+        source: /workspace/infra/ops/pgbackrest/backup.sh
+        target: /opt/dr/backup.sh
+        source: /workspace/infra/ops/pgbackrest/restore.sh
+        target: /opt/dr/restore.sh
+        source: /workspace/infra/ops/pgbackrest/verify.sh
+        target: /opt/dr/verify.sh
+        source: /workspace/infra/ops/pgbackrest/verify-restore.sh
+        target: /opt/dr/verify-restore.sh
+        source: /workspace/infra/ops/pgbackrest/run-backup.sh
+        target: /opt/dr/run-backup.sh
+        target: /etc/pgbackrest/cert
+  redis:
+    image: redis:7.2-alpine
+        target: 6379
+  timescaledb:
+      dockerfile: Dockerfile.timescaledb
+    image: robot-monitor-timescaledb:p16-pgbackrest
+        target: 5432
+        target: /var/lib/postgresql/data
+        target: /docker-entrypoint-initdb.d/init.sql
+        source: /workspace/infra/ops/pgbackrest/pgbackrest-db.conf
+        target: /etc/pgbackrest/pgbackrest.conf
+        target: /var/lib/pgbackrest
+        source: /workspace/infra/ops/pgbackrest/postgresql-dr.conf
+        target: /etc/postgresql/conf.d/zz-dr.conf
+        target: /var/log/pgbackrest
+        target: /etc/pgbackrest/cert
+  default:
+... (退出码 0；完整 200+ 行省略，可本地重跑得到)
 ```
 
-覆盖：compose YAML 解析、两份 pgbackrest.conf 结构、明文密钥扫描、脚本语法、shellcheck。
-全部通过。**这只证明「配置不会因语法问题起不来」，不等于「备份能恢复」**——
-后者必须走 U1~U6。
+单独解析 DR overlay 文件（订单 31 §验收标准第 1 条的字面命令）：
+
+```console
+$ PGBACKREST_CIPHER_PASS=demo docker compose -f infra/ops/pgbackrest/docker-compose.dr.yml config
+name: pgbackrest
+services:
+  pgbackrest:
+    build:
+      context: /workspace/infra/ops/pgbackrest
+      dockerfile: Dockerfile
+    command:
+      - -c
+      - sleep infinity
+    container_name: robot-monitor-pgbackrest
+    depends_on:
+      timescaledb:
+# 退出码 0
+```
+
+### A.2  T2 三入口 --help / dry-run（无真实库时的 skip 语义）
+
+```console
+$ /opt/dr/backup.sh --help      # 退出码 0
+$ /opt/dr/backup.sh bogus       # 退出码 2（未知模式，打印可选值）
+$ /opt/dr/backup.sh full        # 退出码 3（stanza 不存在时，打印"先跑 stanza-create"）
+$ /opt/dr/verify.sh             # 退出码 0（L1+L2 通过）/ 1（断言失败）/ 3（前置缺失）
+$ /opt/dr/verify.sh --scratch   # 追加 L3 真恢复比对；环境不具备时打印 skip 原因并退出 0
+```
+
+### A.3  负向用例（证明断言非假绿）
+
+篡改仓库内一份备份文件后：
+
+```console
+$ verify.sh
+L1a FAIL：verify 未报告 stanza status: ok
+L1c FAIL：verify 检出无效文件 —— 仓库已损坏，备份不可用于恢复
+# 退出码 1
+```
