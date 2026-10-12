@@ -106,6 +106,36 @@ main:
             # F 的名字与栈都没打出来。加 pytest-timeout（单测 60s 封顶，超时打栈）
             # 与 -v（挂死时日志至少留有「最后一个开跑的用例」），一次跑出可定位现场。
             python -m pytest backend_ingestion/tests/ -v --timeout=60
+
+            # ── 2026-10-13 追加三道门禁（此前只在主代理本机手验，现已固化）──
+            # ① 全量语法编译：抓「测试收集不到、因此从没人发现」的语法错。
+            #    本机实测 rc=0（backend_ingestion/app + alert_engine/app + simulator + tests）。
+            echo "── python 全量语法编译 ──"
+            python -m compileall -q backend_ingestion/app alert_engine/app simulator tests
+
+            # ② 测试文件健全性：STATUS.md §五曾手工扫过一次「假覆盖测试文件」，
+            #    这里把它变成机器门禁 —— 任何 test_*.py 不含真实 def test_ 即红。
+            echo "── 测试文件健全性（每个 test_*.py 至少一个真实 test 函数）──"
+            missing=0
+            for f in $(find tests alert_engine/tests backend_ingestion/tests -name 'test_*.py'); do
+              if ! grep -qE '^[[:space:]]*def test_' "$f"; then
+                echo "无真实测试函数: $f"
+                missing=1
+              fi
+            done
+            if [ "$missing" != "0" ]; then
+              echo "发现假覆盖测试文件 —— 门禁拒绝"
+              exit 1
+            fi
+
+            # ③ 后端 import 冒烟：LEDGER §8.3 第 5 条长期挂着的未验项。
+            #    本机 Win-ARM64 装不了 pydantic-core 轮子（需 Rust 编译），故只能由 CI 承证；
+            #    python:3.11 镜像有现成轮子。JWT_SECRET 只占位让 Settings() 实例化成功，
+            #    不参与签名，真实密钥绝不入仓（AGENTS.md §5）。
+            echo "── 后端 import 冒烟 ──"
+            (cd backend_ingestion && JWT_SECRET=ci-import-smoke-placeholder python -c "import app.main; print('backend app.main import OK')")
+            (cd alert_engine && JWT_SECRET=ci-import-smoke-placeholder python -c "import app.main; print('alert_engine app.main import OK')")
+
         - name: npm-test
           image: node:20
           script: |
@@ -262,6 +292,29 @@ main:
             # F 的名字与栈都没打出来。加 pytest-timeout（单测 60s 封顶，超时打栈）
             # 与 -v（挂死时日志至少留有「最后一个开跑的用例」），一次跑出可定位现场。
             python -m pytest backend_ingestion/tests/ -v --timeout=60
+
+            # 与 push 分支**逐字相同**的三道门禁 —— 两边口径必须一致，
+            # 否则会出现「PR 绿了、合到 main 才变红」，直接污染回归信号：
+            #   ① compileall 全量语法编译
+            #   ② test_*.py 真实测试函数健全性
+            #   ③ 后端 import 冒烟（LEDGER §8.3-5 历史上只能在本机跑不了的那一项）
+            echo "── python 全量语法编译 ──"
+            python -m compileall -q backend_ingestion/app alert_engine/app simulator tests
+            echo "── 测试文件健全性 ──"
+            missing=0
+            for f in $(find tests alert_engine/tests backend_ingestion/tests -name 'test_*.py'); do
+              if ! grep -qE '^[[:space:]]*def test_' "$f"; then
+                echo "无真实测试函数: $f"
+                missing=1
+              fi
+            done
+            if [ "$missing" != "0" ]; then
+              echo "发现假覆盖测试文件 —— 门禁拒绝"
+              exit 1
+            fi
+            echo "── 后端 import 冒烟 ──"
+            (cd backend_ingestion && JWT_SECRET=ci-import-smoke-placeholder python -c "import app.main; print('backend app.main import OK')")
+            (cd alert_engine && JWT_SECRET=ci-import-smoke-placeholder python -c "import app.main; print('alert_engine app.main import OK')")
         - name: npm-test
           image: node:20
           script: |
