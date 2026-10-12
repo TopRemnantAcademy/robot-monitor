@@ -154,7 +154,7 @@
 | 29 | DB 连接池/时序采样测试打捞（素材 `auto/e2e-30k-harness-7687@23e6c6af`） | #97 | #103 | squash 3bb52dd | ✅ 合并。**超出授权**两项已接受并注明：改 `.cnb.yml` 补 `rich==13.7.1`（让 3 用例从 SKIP 变真跑）、改 `mock_fleet` 加毫秒发号器（直指 STATUS 缺陷 #4 主键冲突静默丢行） |
 | 30 | 告警抑制 inhibition（severity 分层 + 可追溯） | #98 | #104 | squash a59e890 | ✅ 合并（inhibition.py 143 + 183 行测试；对既有用例仅"关闭抑制以隔离被测路径"，未弱化断言） |
 | 31 | G-5 pgBackRest 真实备份收口 | #99 | #108 | squash 8cbe4f7 | ✅ 合并（backup.sh / verify.sh / verify-restore.sh + exporter queries + Dockerfile.timescaledb，1266 行） |
-| 32 | 指标命名去重 `robot_monitor_*` → `robot_backend_*` | #100 | #102 | ❌ **拒收** | diff 仅 `orders/32-dispatch.md`+`LEDGER.md`，**零代码改动**。已贴举证评论 + 原地重派（补产出文件白名单硬门槛） |
+| 32 | 指标命名去重（LEDGER §8.3-1） | #100 | #102 | squash 77ec64c | ⚠️ **首轮拒收后返工合格**：首轮 diff 仅 2 个文档、**零代码改动**；重派（补「产出文件白名单」硬门槛）后 9 files/+377−17：两处 `metrics.py` 真改名（`robot_alert_robots_online` → 加 `_gauge` 类型自证）+ observability 引用同步 + `.cnb.yml` 自建**运行时/全仓两级硬门禁**。CI 双绿；重基后与主代理三道门禁共存 |
 | 33 | 前端大机群渲染护栏 | #101 | #107 | squash e9c22aa | ✅ 合并（含"反向护栏"用例自证渲染量统计仪器非摆设；286 行 / 11 处断言） |
 
 backlog 三个实证来源：① `git diff --stat main...(两个保留分支)` ② `STATUS.md:77-98`（C2/C4/G-5/G-6）③ `orders/LEDGER.md §8.3-1`。没有证据的单一律不开。
