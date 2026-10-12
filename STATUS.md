@@ -94,7 +94,7 @@
 | G-3 | 「看板假的绿」无人识别 | 无客户端视角探针 | `mqtt-probe` 已铺；WS 合成探针已落地（`robot_backend_ws_probe_alive` / `robot_backend_ws_probe_failures_total`，ISSUE #58） |
 | G-4 | 告警落库失败静默 | `alert_engine/app/store.py:53` 只 `log.exception` | 用 postgres_exporter 指标 + Prometheus 规则 |
 | G-5 | 零备份（≈8.64M 行/天） | `infra/ops/pgbackrest/` 只有配置契约 | 换带 pgbackrest 的镜像或起边车 |
-| G-6 | `robot_metadata` 的 `last_seen`/`is_online` 从没人写 | `infra/init.sql:39-40` 建了列 | 与 `offline` 规则耦合，单独一单 |
+| G-6 | `robot_metadata` 的 `last_seen`/`is_online` 从没人写 | ✅ **已收口（ISSUE #96）**：批量写方 = `backend_ingestion/app/services/metadata_writer.py`（按 robot_id 折叠 + 单语句 `UPDATE ... FROM unnest`，服务端时钟）；`alert_engine` 的 offline 规则改为**优先读**该列，列不可用时回落到时间差 | — |
 | G-7 | 无多机器人任务级仿真 | `mock_fleet.py` 只产波形 | `AgentVerse` 已下载（未验证能否驱动 100 agent） |
 
 ---

@@ -45,6 +45,7 @@ from app.schemas.api import (
 )
 from app.services import liveness, mqtt_subscriber, state_cache
 from app.services.batch_writer import BatchWriter
+from app.services.metadata_writer import metadata_writer
 from app import ws_probe
 from app.ws_backpressure import WsOutbound
 from app.ws_hub import hub as ws_hub
@@ -62,6 +63,10 @@ writer = BatchWriter()
 async def lifespan(app: FastAPI):
     # startup
     writer_task = asyncio.create_task(writer.run())
+    # robot_metadata 心跳（G-6 / ISSUE #96）：独立于 batch_writer 的旁路线，按 1s
+    # 折叠 + 单语句批量 UPDATE。它与 writer 的守护方式一致 —— 都是「启动即常驻、
+    # 关闭前显式冲刷」。开关关闭时 run() 立刻 return，任务自灭。
+    metadata_task = asyncio.create_task(metadata_writer.run())
     mqtt_task = asyncio.create_task(mqtt_subscriber.run(writer))
     # WS 合成探针：客户端视角验活（缺口 G-3）。它只读指标，不碰数据流；
     # 关闭时 `run()` 立刻 return，任务自灭，无需在 shutdown 里特判。
@@ -70,6 +75,7 @@ async def lifespan(app: FastAPI):
     # 必须先于第一个 WS 连接 start()，否则早期连接扇不到增量帧。
     await ws_hub.start()
     app.state.writer_task = writer_task
+    app.state.metadata_task = metadata_task
     app.state.mqtt_task = mqtt_task
     app.state.probe_task = probe_task
     # 订单 16 T3：endpoint 为空则 no-op，返回 False 也不影响启动（可降级）。
@@ -97,10 +103,14 @@ async def lifespan(app: FastAPI):
     #      最后一批遥测（订单 06 验收关注的 30000 行附近）会丢。
     await writer.graceful_shutdown()
     await asyncio.gather(writer_task, return_exceptions=True)
-    #   ③ 探针只是旁观者，没有存量要冲刷，直接取消（它 slept 在 interval 上）。
+    #   ③ 再冲刷 metadata 心跳存量。必须排在 close_pool() **之前**：stop() 只是
+    #      置位并唤醒 run()，真正的 flush() 要等 run() 跑完，此时池还必须活着。
+    await metadata_writer.stop()
+    await asyncio.gather(metadata_task, return_exceptions=True)
+    #   ④ 探针只是旁观者，没有存量要冲刷，直接取消（它 slept 在 interval 上）。
     probe_task.cancel()
     await asyncio.gather(probe_task, return_exceptions=True)
-    #   ④ WS 中枢：先停扇出与共享订阅，再清注册表 —— 必须在 close_redis 之前，
+    #   ⑤ WS 中枢：先停扇出与共享订阅，再清注册表 —— 必须在 close_redis 之前，
     #      否则 _consume_loop 会对着已关的 Redis 退避重连、日志刷屏。
     await ws_hub.stop()
     await close_pool()
@@ -158,6 +168,10 @@ async def healthz() -> HealthResponse:
         "rows_submitted": writer.rows_submitted,
         "rows_written": writer.written,
         "rows_skipped": writer.rows_skipped,
+        # robot_metadata 心跳（G-6 / ISSUE #96）：flushes 是刷新轮数，rows_written
+        # 是被 UPDATE 命中的台数，deduped 是被折叠掉的重复条数 —— 100 台 10Hz
+        # 稳态下 deduped/flushes ≈ 900，是「批量语义确实生效」的直接读数。
+        "metadata": metadata_writer.stats,
     }
 
 

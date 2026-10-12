@@ -3,7 +3,9 @@
 两条驱动线：
 1. **消费线**：订阅 Redis `robot:stream:all`，维护每台机器人滑动窗口，
    依次跑 motor_temp / battery_low / joint_stuck 三条规则。
-2. **ticker 线**：每秒遍历 100 台机器人跑 offline 规则
+2. **ticker 线**：每秒遍历 100 台机器人跑 offline 规则。
+   判据**优先读** `robot_metadata.is_online`（后端 metadata_writer 心跳写入，ISSUE #96）；
+   该列读不到时回落到内存 last_seen 时间差，避免部署初期误报。
    —— **不依赖 Redis Key 过期事件**（keyspace notification 默认关闭）。
 
 告警先经**三层过滤**，顺序固定为 **silence → inhibition → dedup**
@@ -33,7 +35,7 @@ from app.rules.offline import OfflineRule
 from app.rules.base import Alert
 from app import metrics
 from app.notifiers import build_notifier
-from app.store import save, update_online
+from app.store import load_online_state, save, update_online
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -49,7 +51,11 @@ OFFLINE_RULE = next(r for r in RULES if r.rule_id == "offline")
 INHIBIT_SOURCE_RULE = "offline"
 
 windows: dict[str, deque] = {}
+# last_seen 仍由消费线维护，作为 offline 的**回落**判据（ISSUE #96：列不可用时）
+# 以及告警文案（"已 Ns 无遥测"）。
 last_seen: dict[str, float] = {}
+# 本引擎按内存 last_seen 推算的在线态，仍按状态变化低频写 robot_metadata
+# （兼容 #61 既有路径）；同时供 inhibition（is_inhibited）使用。
 online_state: dict[str, bool] = {}
 
 _tasks: set[asyncio.Task] = set()
@@ -173,15 +179,30 @@ async def consume() -> None:
 # ---------------------------------------------------------------- ticker 线
 
 async def ticker() -> None:
-    """每秒一轮：跑 offline 规则 + 维护 robot_metadata 在线状态。"""
+    """每秒一轮：跑 offline 规则（判据优先读 robot_metadata.is_online）+ 维护在线状态。
+
+    为什么先读一次库（ISSUE #96）
+    -----------------------------
+    判据必须是「后端看到过这台机器人吗」，而不是「本进程内存里记的 last_seen」。
+    后者会在本引擎重启 / Redis pubsub 断连时悄悄失真（内存被清空 → 100 台集体
+    判离线）。故每轮先 `load_online_state()` 取回 100 行，再逐台判 offline：
+    每轮 **1 次**库往返，不按台数放大。
+
+    读不到（返回 {}）→ 传给规则的 `is_online` 是 None → 规则回落到 last_seen
+    时间差判定（迁移期安全网，见 `app/rules/offline.py`）。
+    """
     while True:
         await asyncio.sleep(settings.tick_interval_s)
         now = time.time()
+        db_state = await load_online_state()
         for rid in settings.robot_ids:
             ls = last_seen.get(rid)
             w = windows.get(rid) or deque()
+            is_online = db_state.get(rid)      # 缺行 / 读库失败 → None（回落）
             try:
-                alert = OFFLINE_RULE.evaluate({"robot_id": rid, "last_seen": ls}, w)
+                alert = OFFLINE_RULE.evaluate(
+                    {"robot_id": rid, "is_online": is_online, "last_seen": ls}, w
+                )
             except Exception:
                 log.exception("offline rule failed on %s", rid)
                 alert = None

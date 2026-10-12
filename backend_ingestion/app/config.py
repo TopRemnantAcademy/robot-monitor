@@ -50,6 +50,16 @@ class Settings(BaseSettings):
     # ---- Redis 最新状态缓存（spec/01 §4.3）----
     state_ttl_seconds: int = 10
 
+    # ---- robot_metadata 心跳（G-6 / ISSUE #96）----
+    # 总开关。关闭后 metadata_writer 的 run() 直接退出、flush() 直接返回：
+    # 既不改写 robot_metadata，也不做离线扫描，遥测写路径（batch_writer）语义与
+    # 吞吐完全不受影响 —— 这正是「不得改变既有遥测写路径」的落地方式。
+    metadata_heartbeat_enabled: bool = True
+    # metadata 心跳的刷盘周期。语义上必须 ≤ state_ttl_seconds：Redis 里的
+    # `robot:state:{id}` 活 10s，若心跳比它慢，会出现「Redis 已判过期、DB 里
+    # is_online 还是 true」的窗口期。1s 同时把写放大压到 ≤100 行/秒的量级。
+    metadata_flush_seconds: float = 1.0
+
     # ---- 在线判定阈值（ISSUE #77）----
     # 「现在还活着吗」只由后端判定：前端此前拿 `status_code === 0` 猜在线，
     # 于是停报的机器人把最后一帧的 status_code 冻在那里，永远显示在线。

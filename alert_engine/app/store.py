@@ -79,6 +79,28 @@ async def save(alert: Alert) -> None:
         log.exception("alert publish failed: %s/%s", alert.robot_id, alert.rule_id)
 
 
+async def load_online_state() -> dict[str, bool]:
+    """读 robot_metadata 的 (robot_id → is_online)，作为 offline 规则的首要判据。
+
+    ISSUE #96：判定来源从「本进程内存推算」改成「读后端心跳写入的列」。
+    后端 `metadata_writer` 才是该列的权威写方（它在收到遥测的那条链路上批量落库），
+    本引擎只做读者 —— 一次 `fetch` 取回 100 行，不按台数放大往返。
+
+    **读不到时返回空字典（而不是抛错）**：调用方按「列不可用」处理，回落到
+    last_seen 时间差判定。既不误报离线，也不把 ticker 整轮带崩。
+    """
+    try:
+        # get_pool() 也放进 try：建池失败（网络/PG 抖动）与查询失败是同一类
+        # 「读不到就回落」的情形，不该让 ticker 整轮带崩。
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("SELECT robot_id, is_online FROM robot_metadata")
+    except Exception:
+        log.exception("metadata online-state read failed")
+        return {}
+    return {r["robot_id"]: bool(r["is_online"]) for r in rows}
+
+
 async def update_online(robot_id: str, online: bool) -> None:
     """维护 robot_metadata.is_online / last_seen（仅在状态变化时调用）。"""
     pool = await get_pool()

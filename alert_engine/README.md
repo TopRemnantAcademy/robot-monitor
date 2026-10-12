@@ -16,13 +16,15 @@ python -m app.main
 | :--- | :--- | :--- | :--- |
 | `motor_temp` | 任一关节 > **75°C** 且**连续 ≥3 个采样点** | 3 critical | 60s |
 | `battery_low` | `battery_pct` < **15%** | 2 warning | 120s |
-| `offline` | 无遥测 > **10s**（含从未上报） | 3 critical | 30s |
+| `offline` | `robot_metadata.is_online = false`（**列不可用时回落**到无遥测 > 10s） | 3 critical | 30s |
 | `joint_stuck` | 5s 窗内角度方差 < 1e-6 但平均扭矩 > 8.0 | 2 warning | 60s |
 
 ## 两条驱动线
 
 1. **消费线** — 订阅 `robot:stream:all`，跑 motor_temp / battery_low / joint_stuck。
-2. **ticker 线** — 每秒遍历 100 台跑 offline，并维护 `robot_metadata.is_online / last_seen`。
+2. **ticker 线** — 每秒遍历 100 台跑 offline。判据**优先读** `robot_metadata.is_online`
+   （该列由后端 `metadata_writer` 心跳批量维护，见 ISSUE #96）；该列读不到时回落到
+   内存 `last_seen` 时间差判定。本引擎同时按状态变化低频回写该列（#61 既有路径）。
 
 ### 为什么 offline 必须用 ticker
 
@@ -30,9 +32,15 @@ python -m app.main
 - Redis 的 keyspace notification（`notify-keyspace-events`）**默认关闭**；
 - 且 TTL 到期后 `robot:state:{id}` 已被删除，引擎反而读不到 `last_seen`。
 
-故用**进程内内存字典** `last_seen` 判定；机器人从未上线时 `last_seen is None`，同样判离线。
+故用**独立 ticker** 每轮判定，不依赖 Redis 通知机制。
 机器人 ID 全集来自 `config.robot_ids`（100 台，与 `init.sql` 预置一致），
-保证"从未上线"的机器人也能被正确判离线。
+保证"从未上线"的机器人也能被判离线（后端心跳会把它们的 `is_online` 置 false）。
+
+判据优先级（ISSUE #96，见 `app/rules/offline.py`）：
+1. `is_online is True` → 不报；`False` → 报（**列即判据**，本进程不再自行推算）；
+2. `is_online is None`（列还没被写入 / 本引擎读不到该行）→ **回落**到内存 `last_seen`
+   时间差判定，避免部署初期把"列还没写"误报成 100 台离线。
+开关：`config.offline_use_is_online`（默认 `True`）。
 
 ## 抑制（inhibition）
 

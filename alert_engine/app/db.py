@@ -24,6 +24,10 @@ _redis: Redis | None = None
 # 每个池预建 `db_pool_size` 条连接 → 远超 `max_connections`，
 # 332 次 `TooManyConnectionsError`。故障态自相矛盾（`pg_stat_activity` 只有 8 条连接，
 # 因为连接根本没建成），根因是**池的数量**而不是池的大小。
+# 注（ISSUE #96）：现在 ticker 每轮**先调一次** `load_online_state()` 取回全网
+# 在线态（1 次往返，不按台数放大），`update_online()` 仅在状态变化时低频调用，
+# 上面的并发建池场景不复现；但这条锁是历史护栏，且 `consume()` 侧的告警落库
+# 仍可能并发（spawn 多个 emit），故保留。
 _pool_lock = asyncio.Lock()
 
 

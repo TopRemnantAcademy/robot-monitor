@@ -185,3 +185,88 @@ def test_ticker_writes_metadata_once_per_transition(monkeypatch):
         f"相位 2 后共 {len(calls)} 次写入，期望 {2 * len(ids)} 次 —— 迁移闸门重复触发"
     )
     assert all(online is False for _, online in calls[len(ids):]), "离线相位应写 False"
+
+
+# ------------------------------------------------- 4. 读路径（ISSUE #96）
+
+def test_load_online_state_reads_is_online_column(monkeypatch):
+    """`load_online_state()` 必须真的 `SELECT robot_id, is_online`，且按行解析。
+
+    这是 #96 的核心读路径：ticker 每轮靠它拿到判据。断言落在 SQL 文本与返回值上 ——
+    只断言"调用了某函数"等于没测（把列名改成别的照样绿）。
+    """
+    sink: list = []
+
+    class _RowPool:
+        class _Conn:
+            async def fetch(self, sql, *args):
+                sink.append((sql, args))
+                return [
+                    {"robot_id": "humanoid-001", "is_online": True},
+                    {"robot_id": "humanoid-002", "is_online": False},
+                ]
+
+        def acquire(self):
+            return _AsyncCtx(self._Conn())
+
+    monkeypatch.setattr(store, "get_pool", _patched_get_pool(_RowPool()))
+
+    out = run(store.load_online_state())
+
+    assert out == {"humanoid-001": True, "humanoid-002": False}
+    assert len(sink) == 1
+    sql = sink[0][0]
+    assert "SELECT robot_id, is_online FROM robot_metadata" in sql
+
+
+def test_load_online_state_returns_empty_on_db_failure(monkeypatch):
+    """读库失败必须返回空字典（而不是抛）：调用方按「列不可用」回落到时间差判定。"""
+    monkeypatch.setattr(store, "get_pool", _patched_get_pool(_BoomPool()))
+
+    out = run(store.load_online_state())
+
+    assert out == {}, "读库失败时不得抛出，也不得伪造在线态"
+
+
+def test_ticker_passes_is_online_from_db_to_rule(monkeypatch):
+    """ticker 必须把读到的 `is_online` 传进规则（而不是只传内存 last_seen）。
+
+    做法：把 `load_online_state` 打成固定值、把规则换成记录入参的桩，
+    跑恰好一轮 ticker，断言规则收到的 state 里带 `is_online` 且值与库一致。
+    """
+    import app.main as m
+
+    seen: list = []
+
+    class _RuleStub:
+        def evaluate(self, state, window):
+            seen.append(state)
+            return None
+
+    async def fake_load():
+        return {"humanoid-001": False}
+
+    monkeypatch.setattr(m, "load_online_state", fake_load)
+    monkeypatch.setattr(m, "OFFLINE_RULE", _RuleStub())
+    monkeypatch.setattr(type(m.settings), "robot_ids",
+                        property(lambda self: ["humanoid-001"]))
+    monkeypatch.setattr(m.settings, "tick_interval_s", 0.2)
+
+    async def one_round():
+        task = asyncio.create_task(m.ticker())
+        await asyncio.sleep(0.3)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        if m._tasks:
+            await asyncio.gather(*list(m._tasks), return_exceptions=True)
+
+    m.last_seen.clear()
+    m.online_state.clear()
+    run(one_round())
+
+    assert seen, "ticker 未把任何 state 交给 offline 规则"
+    assert all("is_online" in s for s in seen), f"规则收到的 state 缺少 is_online：{seen}"
+    assert seen[0]["is_online"] is False, f"is_online 未从库透传：{seen[0]}"

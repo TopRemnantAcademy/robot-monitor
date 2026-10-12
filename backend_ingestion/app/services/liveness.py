@@ -22,7 +22,9 @@
 AGENTS.md §3 与 ISSUE #77 的约束都写着「不得引入每条遥测的额外写库（批量更新）」。
 1000 msg/s 下逐条 `UPDATE robot_metadata` 就是 1000 次事务/秒。
 所以热路径只碰 Redis（已在同一条 `write_and_publish` 里，O(1)）；
-`robot_metadata.is_online/last_seen` 由告警引擎按状态变化低频落库（见 alert_engine）。
+`robot_metadata.is_online/last_seen` 由 `metadata_writer` 在同一处**投递**，
+再按 1s 折叠成单语句批量 UPDATE 落库（ISSUE #96）——
+「收到一帧」与「台账更新」由此同源，不再有两个真相。
 
 ## 为什么不用 Redis Key 过期事件
 

@@ -3,6 +3,14 @@
 - Hash `robot:state:{robot_id}`，TTL 10s（断连后自动过期）
 - 发布 `robot:stream:all`（全量）与 `robot:stream:{robot_id}`（单机）
 - 同时写入预计算标量 max_joint_temp（spec/00 §4.3）
+- 投递 `robot_metadata` 心跳（G-6 / ISSUE #96）：`put()` 只做一次入队，真正的
+  UPDATE 由 metadata_writer 按（满 1s / 关闭）批量折叠后一条语句发出。
+
+为什么心跳挂在 state_cache 而不是 mqtt_subscriber 里单独调
+----------------------------------------------------------
+`write_and_publish()` 是「这台机器人这一帧已被受理」的唯一事实点：
+MQTT 收到 → pydantic 校验通过 → 每次合法遥测都会走到这里。
+挂在消费循环里另起一处的话，以后再加数据源（HTTP 推流 / 回放）就会漏投心跳。
 """
 
 from __future__ import annotations
@@ -14,6 +22,7 @@ from app.config import settings
 from app.db.redis import get_redis
 from app.schemas.telemetry import Telemetry
 from app.services import liveness
+from app.services.metadata_writer import metadata_writer
 
 log = logging.getLogger("state_cache")
 
@@ -54,6 +63,10 @@ async def write_and_publish(t: Telemetry) -> None:
         # 它是「接收侧事实」（我们何时收到这一帧），与机器人自述的 status_code 不同源 ——
         # 停报的机器人不会再来这里，last_seen 自然不再前进。O(1) Redis 写，不碰数据库。
         await liveness.record(t.robot_id, t.status_code)
+
+        # robot_metadata 心跳（G-6 / ISSUE #96）：入队即返回，不碰 DB。
+        # 与 liveness.record 同在「这一帧已被受理」的时点，故两者语义一致。
+        metadata_writer.put(t.robot_id, t.ts)
 
         payload = json.dumps(_decode(mapping), separators=(",", ":"))
         await r.publish(settings.chan_stream_all, payload)

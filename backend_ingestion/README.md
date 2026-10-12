@@ -44,6 +44,21 @@ docker build -t robot-monitor-backend ..
   故刷批统一加 `asyncio.wait_for` 上限：宁可丢一批 + 打 error 日志，也不堵死消费循环。
 - 计数出口：`/healthz` 给瞬时快照，`/metrics` 给 Counter/Gauge（Prometheus 才能算 `rate()`）。
 
+### robot_metadata 心跳（G-6 / ISSUE #96）
+
+`robot_metadata.is_online / last_seen` 的批量写方是
+`app/services/metadata_writer.py`，从 `state_cache.write_and_publish()` 投递
+（与 `liveness.record()` 同一时点）。它遵守同一套护栏：
+
+- **按 robot_id 折叠**：1000 msg/s（100 台 × 10Hz）在 1s 窗口内只折算成 ≤100 行；
+- **单语句批量**：`UPDATE ... FROM unnest($1::text[], $2::timestamptz[])`，
+  1000 条遥测 → **恰好 1 次**库往返（不是 executemany、更不是 for 循环）；
+- **`last_seen` 取服务端时钟**：不取 payload 的 `ts`（客户端时钟偏差 / 重放 / 离线缓发
+  会让同轮离线扫描把它刚写 TRUE 的行立刻翻回 FALSE —— 实测踩过）；
+- 开关 `METADATA_HEARTBEAT_ENABLED=false` 时 `run()` 直接退出、`flush()` 不发语句，
+  既有遥测写路径的语义与吞吐不受影响。
+- 计数出口：`/healthz` 的 `metadata` 字段（`flushes` / `rows_written` / `offline_marks` / `deduped`）。
+
 ## 写入降级链（写路径的核心设计）
 
 spec/01 §4.2 允许 `copy_records_to_table` **或** 批量 `execute`。本机实测两者吞吐都在

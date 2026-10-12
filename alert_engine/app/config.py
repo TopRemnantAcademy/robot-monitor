@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     # ---- offline（无遥测 >10s，severity 3，去重 30s）----
     offline_after_s: float = 10.0
     offline_dedup_s: int = 30
+    # 判据来源切换（ISSUE #96）：True 时离线判定优先读 `robot_metadata.is_online`
+    # （由后端 metadata_writer 心跳批量维护），读不到该值时才回落到 `last_seen`
+    # 时间差。False 则永远走时间差 —— 保留开关是为了「一句话回滚」，
+    # 而不是因为两套语义等价（它们不等价，回退即可复现旧行为）。
+    offline_use_is_online: bool = True
 
     # ---- joint_stuck（5s 内角度方差≈0 但扭矩超阈值，severity 2，去重 60s）----
     joint_stuck_window_s: float = 5.0
