@@ -222,3 +222,10 @@ backlog 三个实证来源：① `git diff --stat main...(两个保留分支)` �
 - **⚠️ 402 复发——修正 §11.5 的「402 未复发」结论**：04:00Z / **12:00 CST** crontab 自主构建 `cnb-bd0-1k4pmljt2` 在 `pm-call` 阶段 `error`（27786ms，后续 6 段全 skipped）；`build-runner-download-log` 实锤：`[12:00:40] [llm error] HTTP 402 — [EXCEEDING_LIMIT] AI 积分已用尽，请联系根组织管理员提升配额`。即「复活后首轮（cnb-6pq）无 402」只是配额**暂时恢复**；到 12:00 CST 轮配额已耗尽。**G-7 work-mode 构建（04:15Z，晚于 402）当前仍 `pending`/`npc go=start`，能否跑通取决于配额是否被回填**——后台 watcher（issue_bodies/g7-watch.sh）持续核验至终态/出 PR。
 - **影响与待决（属用户决策，未擅改）**：4×/day 的 7 段 crontab 流水线 + work-mode 派单共同消耗 AI 积分，当前配额无法支撑常态 4 轮/日，402 将在多数 crontab 轮次复发。根治二选一：(1) root 组织管理员提额；(2) crontab 提示词降频（如 1-2×/day）。G-7 若也 402，需等配额回填后重派或提额。
 
+### 11.7 G-7（订单 36）收口 + crontab 配额治理（2026-10-13 下午）
+- **G-7 收口 ✅**：NPC 走 PR #115（分支 `feat/g7-agentverse-sim`，build `cnb-arc-1k4pnh9d8`）→ squash 合并 main `8c3f3b9`。
+  - **白名单两点 diff 真增量**（merge-base `0bdc8cb`..`2ad3ca9`）仅 8 文件，全在 `simulator/**`/`docs/**`/`tests/**`/`orders/36-dispatch.md`；无 `backend_ingestion/`/`alert_engine/`/`frontend_dashboard/` 主业改动、无伪造。`fdca936..FETCH_HEAD` 曾误显 `issue_bodies/*`+`LEDGER.md` 为「删除」——是分支早于 §11.6 派生产生的假象，用 merge-base 两点 diff 消去（§11.4 纪律再次验证）。
+  - **CI 双绿实证**：pipeline-1 test `success [3m36s]`；pipeline-2 e2e-30k-landing `success [2m20s]`，runner 日志实锤真跑 `/healthz` 落定 `rows_written=39844 ≥ 30000`、`rows_skipped=0`、【E2E SKIPPED】横幅未触发 → 绿是真绿。
+  - **实证结论（禁伪造达标）**：`verify_agentverse_report.json` 含真实 `ImportError: cannot import name 'DEFAULT_CLIENT' from 'agentverse.llms.openai'`（真 import 实测）、`verdict: loadable-but-not-telemetry`——AgentVerse 是 LLM 对话框架、消息不含本系统遥测字段，驱动 100 agent 任务级仿真路线**判不可行**。NPC 未伪造 harness，转交正确形态 `simulator/task_sim.py`（复用 mock_fleet payload + MQTT，任务调度器使多机遥测时间相关），并加 `tests/test_task_sim_harness.py` 固化验收（≥10 机协同、相关性非硬编码 |r|≥0.3，CI 已跑通证明 task_sim.py 存在可用）。Issue #114 关 completed，分支已删，远程仅 main。
+- **crontab 配额治理（用户「你自己写 @codebuddy 加上需求，自己做」）**：402 在 12:00 CST 轮复发（cnb-bd0），当前 4×/day 7 段流水线耗不起配额。下一步=降频 + 加积分保护（见下条实施）。
+
