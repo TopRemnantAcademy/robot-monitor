@@ -196,7 +196,7 @@ backlog 三个实证来源：① `git diff --stat main...(两个保留分支)` �
 | 订单 | 内容 | 依据（取证） | Issue | NPC 构建 | 结果 |
 | --- | --- | --- | --- | --- | --- |
 | 34 | e2e 假绿专项：SKIP 静默变绿 + 镜像声明失效归因修复 | `cnb-st7-1k4onp4ok-001` 日志实锤：e2e stage 仅 240ms、SKIP（缺省镜像）却 success；crontab 块 e2e 漏 `docker.image`；push 块声明了 image 却仍跑缺省镜像（归因未明，正是要派出去的活） | #109 | cnb-c71 → PR #111 | ✅ **已收口**：squash 合并 → main `f41a90a`；硬门槛达成（e2e 实跑 `rows_written=39785 ≥ 30000`，非 SKIP）；CI 双绿（test 165+26 passed / e2e 真跑）；白名单三点 diff 核验仅 5 文件；分支已删、Issue #109 关 completed |
-| 35 | UI 第四轮：告警「抑制」呈现（全栈） | `grep -rn 抑制 frontend_dashboard/src` = 0 命中；订单 30 的可选 T4 确认未做；WS 连接态 chip 已存在（不重派） | #110 | cnb-mnr（首轮挂起未产出）→ **重派 cnb-4m1-1k4pdpcnl** | 🔄 重派中（见 11.3） |
+| 35 | UI 第四轮：告警「抑制」呈现（全栈） | `grep -rn 抑制 frontend_dashboard/src` = 0 命中；订单 30 的可选 T4 确认未做；WS 连接态 chip 已存在（不重派） | #110 | cnb-mnr（首轮挂起）→ 重派 cnb-4m1-1k4pdpcnl → PR #112 | ✅ **已收口**：squash 合并 → main `4487101`；T1 判 c 路（后端落字段+契约再生）；CI 双绿 + e2e 真跑 39830 行；契约门禁绿（api.gen.ts 经 openapi-typescript 再生，非手改）；白名单 `merge-base..branch` 两点 diff 仅 20 文件核验通过；分支已删、Issue #110 关 completed |
 
 两单均带**产出文件白名单**硬门槛（订单 32 血亏教训的制度化）。
 
@@ -205,4 +205,9 @@ backlog 三个实证来源：① `git diff --stat main...(两个保留分支)` �
 - 首轮 `--work-mode` 触发（cnb-mnr-1k4pbnigd）停在 `npc go` 阶段（duration 0、无分支、无 PR），与同批订单 34 的 cnb-c71（4 分钟内产出 PR #111）形成对照 → 判定为**孤立挂起**，非排队。
 - 处理方式：在 issue #110 追加一条新的 `--work-mode` 评论重派（issue 正文不含 `@codebuddy`，触发干净、无双触发陷阱）；新构建 `cnb-4m1-1k4pdpcnl` 立即以 `sourceRef: feat/order-35-suppressed-ui` 出现，且已越过 `npc go`、进入 CI（test/pytest + e2e-30k-landing prepare）→ 证实重派生效。
 - **教训**：workMode 构建若长期停在 `npc go`（duration 0）且同批其他单已产出 PR，应视为挂起而非慢；可安全重派，重派评论本身不造成重复提交（NPC 以最新构建为准）。监控只看「有没有分支/PR」比看 stage 文本更可靠。
+
+### 11.4 合并核验补充纪律（本轮踩坑）
+- **`refs/cnb/main` 本地陈旧分支是隐形炸弹**：本仓存在本地分支 `refs/cnb/main`（58513490，远古），会遮蔽 `refs/remotes/cnb/main`（当前 main）。任何写 `cnb/main` 的 `git diff/rev-parse` 都会落到陈旧基线，导致三点 diff 把订单 28-33/34 当「新增」（70 文件假象），并让 `grep &e2e-image` 在陈旧 .cnb.yml 上误报 0。已 `git update-ref -d refs/cnb/main` 删除。**此后一律用 `main`（本地）/ `HEAD` / 完整 SHA / `refs/remotes/cnb/main`，绝不裸写 `cnb/main`。**
+- **两点 diff 才是真增量**：派工分支多从旧 main 派生，`git diff A...B`（三点，对 merge-base）会把派生点以来的 ALL 历史当新增。核验白名单必须用 `git diff <merge-base>..<branch>`（两点）或 `git diff main..branch`（HEAD=当前 main），只看本单增量。本轮订单 34/35 均靠此法确认白名单干净（订单 34 仅 5 文件、订单 35 仅 20 文件）。
+- **squash 合并不会回退既有文件**：订单 35 分支派生早于订单 34 合并，但其 `merge-base..branch` 不含 .cnb.yml，故 squash 到 main 后订单 34 的 `&e2e-image` 锚点（.cnb.yml:216/452/558）完好——已用 SHA 直接 `git show 4487101:.cnb.yml` 复核，非依赖易遮蔽的 ref。
 
