@@ -191,12 +191,18 @@ backlog 三个实证来源：① `git diff --stat main...(两个保留分支)` �
 | NPC crontab 恢复 | ✅ 6h×7 段流水线复活 | `4552492` uncomment → `build-crontab-sync --branch main` 返回 "successfully synchronized" |
 | ⚠️ 一次返工 | `c4252b3` 首推 422 CONFIG_ERROR | **pyyaml 宽容、CNB js-yaml 严格**：uncomment 后键缩进 3sp，pyyaml 照单全收、CNB 拒收。`4552492` 修正为 2sp 过审。教训：**CI 配置校验要用 CNB 自己的 build-crontab-sync 当真理，本地 pyyaml 通过≠过审** |
 
-### 11.2 新派两单（均 `--work-mode` 触发，workMode=true 已核验：cnb-c71 / cnb-mnr）
+### 11.2 新派两单（均 `--work-mode` 触发，workMode=true 已核验）
 
-| 订单 | 内容 | 依据（取证） | Issue | NPC 构建 |
-| --- | --- | --- | --- | --- |
-| 34 | e2e 假绿专项：SKIP 静默变绿 + 镜像声明失效归因修复 | `cnb-st7-1k4onp4ok-001` 日志实锤：e2e stage 仅 240ms、SKIP（缺省镜像）却 success；crontab 块 e2e 漏 `docker.image`；push 块声明了 image 却仍跑缺省镜像（归因未明，正是要派出去的活） | #109 | cnb-c71 执行中 |
-| 35 | UI 第四轮：告警「抑制」呈现（全栈） | `grep -rn 抑制 frontend_dashboard/src` = 0 命中；订单 30 的可选 T4 确认未做；WS 连接态 chip 已存在（不重派） | #110 | cnb-mnr 执行中 |
+| 订单 | 内容 | 依据（取证） | Issue | NPC 构建 | 结果 |
+| --- | --- | --- | --- | --- | --- |
+| 34 | e2e 假绿专项：SKIP 静默变绿 + 镜像声明失效归因修复 | `cnb-st7-1k4onp4ok-001` 日志实锤：e2e stage 仅 240ms、SKIP（缺省镜像）却 success；crontab 块 e2e 漏 `docker.image`；push 块声明了 image 却仍跑缺省镜像（归因未明，正是要派出去的活） | #109 | cnb-c71 → PR #111 | ✅ **已收口**：squash 合并 → main `f41a90a`；硬门槛达成（e2e 实跑 `rows_written=39785 ≥ 30000`，非 SKIP）；CI 双绿（test 165+26 passed / e2e 真跑）；白名单三点 diff 核验仅 5 文件；分支已删、Issue #109 关 completed |
+| 35 | UI 第四轮：告警「抑制」呈现（全栈） | `grep -rn 抑制 frontend_dashboard/src` = 0 命中；订单 30 的可选 T4 确认未做；WS 连接态 chip 已存在（不重派） | #110 | cnb-mnr（首轮挂起未产出）→ **重派 cnb-4m1-1k4pdpcnl** | 🔄 重派中（见 11.3） |
 
 两单均带**产出文件白名单**硬门槛（订单 32 血亏教训的制度化）。
+
+### 11.3 订单 35 首轮 workMode 构建挂起 → 重派（2026-10-13 上午）
+
+- 首轮 `--work-mode` 触发（cnb-mnr-1k4pbnigd）停在 `npc go` 阶段（duration 0、无分支、无 PR），与同批订单 34 的 cnb-c71（4 分钟内产出 PR #111）形成对照 → 判定为**孤立挂起**，非排队。
+- 处理方式：在 issue #110 追加一条新的 `--work-mode` 评论重派（issue 正文不含 `@codebuddy`，触发干净、无双触发陷阱）；新构建 `cnb-4m1-1k4pdpcnl` 立即以 `sourceRef: feat/order-35-suppressed-ui` 出现，且已越过 `npc go`、进入 CI（test/pytest + e2e-30k-landing prepare）→ 证实重派生效。
+- **教训**：workMode 构建若长期停在 `npc go`（duration 0）且同批其他单已产出 PR，应视为挂起而非慢；可安全重派，重派评论本身不造成重复提交（NPC 以最新构建为准）。监控只看「有没有分支/PR」比看 stage 文本更可靠。
 
