@@ -396,7 +396,7 @@ main:
   # 按下方注释预留的恢复路径取消注释 + `cnb build build-crontab-sync` 复活。
   # 若再次 402：error 构建每 6h 一条属预期信号，处理方式同前（注释回去 + build-crontab-sync）。
   #
-   "crontab: 0 0,6,12,18 * * *":
+  "crontab: 0 0,6,12,18 * * *":
     - stages:
         - name: pm-call
           image: docker.cnb.cool/bring/agents/agent:latest
