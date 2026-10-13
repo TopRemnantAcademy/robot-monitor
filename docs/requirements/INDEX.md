@@ -107,7 +107,22 @@ codebuddy 的 CNB token **缺 `repo-pr:rw`（历史上也缺 `repo-code:rw`）**
 | **R-11** | 业务 Grafana 看板（robot_backend_*/robot_alert_* 可视化） | ✅ **已回收**（PR #118→`2327ec2`，#117 关） | 无；V3/V4 需 docker 栈复验（本机无 docker） |
 | **R-12** | `/history` 长期趋势查询（小时级下采样） | ✅ **已回收**（PR #120→`f2969746`，#119 关；e2e-30k-landing 真绿） | 无（改 `init.sql`+`main.py`，中风险，R-03 回归护栏为硬门槛，已实证守住） |
 | R-10 | C4 GitHub 同步端到端验证 | ⏳ 规格在 `R-10-cnb-github-sync.md` | **需用户备 GitHub PAT（只写 `robot-monitor`）+ 建 CNB 密钥仓库 `flow.237/RobotMonitor-secrets`**；本地无法执行 |
-| **R-13** | `robot_history_1h`/`robot_history_10s` 实时聚合修复（`materialized_only=false`）+ 真库回归测试（GAP-1 复核：**真 bug**，初版误判已推翻） | 🟡 **派发执行中**（Issue #121 + `@//codebuddy/`；codebuddy 真库实测证伪初版误判，主代理指令 B：改 `init.sql` 两 cagg 属性 + 测试） | 中风险（改 cagg 属性，非刷新策略/列/查询）；robot_status_10s sibling 留后续 |
+| **R-13** | `robot_history_1h`/`robot_history_10s` 实时聚合修复（`materialized_only=false`）+ 真库回归测试（GAP-1 复核：**真 bug**，初版误判已推翻） | ✅ **已回收**（PR #122 squash→`c020fc6`，#121 关；两点 diff 白名单 + 真库测试实证 + CI 双绿） | 中风险（改 cagg 属性，非刷新策略/列/查询）；robot_status_10s sibling 留后续 |
+
+| **R-14** | 告警引擎 `consume()` Redis 断连监督（进程级韧性） | 🟡 **已写规格·待派 CNB 执行**（GAP-2，MED） | 中风险（动 `alert_engine` 协程树）；禁改 ticker/escalation/规则求值；禁弱化既有 except |
+| **R-15** | 告警通知投递失败指标 + 有界重试（可观测） | 🟡 **已写规格·待派 CNB 执行**（GAP-3，MED） | 低-中风险；**硬门槛**：通知失败不得阻塞/丢失告警落库；禁无限重试；沿用 `robot_alert_*` 前缀 |
+| **R-16** | `robot_status_10s` 实时聚合回填（看板最新态 1min 空洞，R-13 同类 sibling） | 🟡 **已写规格·待派 CNB 执行** | 中风险；**禁回退** R-13 的 `init.sql:307-308`；禁改刷新策略/列/前端 |
+| **R-17** | 后端 CORS + 可选限流（不同源部署/滥用防护） | 🟡 **已写规格·待派 CNB 执行**（GAP-4，LOW） | 低风险；**硬门槛**：限流不得破坏 `e2e-30k-landing` 真绿；CORS 禁默认 `*`；契约/鉴权不变 |
 
 > 其余 backlog（G-1~G-7、C1~C3、A1~A3）经 `STATUS.md` 对账 + 代码实证均已收口或转为已落地规格。
-> 下一轮需求派单继续在本目录新增 `R-14-*.md` 起，并遵循第一节模式约定。
+>
+> **GAP-5（init.sql 保留/压缩策略缺 `if_not_exists`）＝ 误判，不派单**：本轮 grep + 读原文实证，
+> `init.sql:347-356`（遥测压缩）、`:359-368`（遥测保留）、`:378-394`（告警压缩+保留）**四段策略均已**
+> 用 `IF NOT EXISTS (SELECT 1 FROM timescaledb_information.jobs WHERE proc_name=… AND hypertable_name=…)`
+> 包裹实现幂等，`:326-332` 注释亦说明「改用 `timescaledb_information.jobs` 存在性判断做幂等，重跑安全」。
+> 原 GAP-5 描述的「重跑会报错」**不成立**，故不重复造需求（幻觉）。
+>
+> **R-10（CNB→GitHub 同步）仍阻塞**：需用户备 GitHub PAT（仅写 `robot-monitor`）+ 建 CNB 密钥仓库
+> `flow.237/RobotMonitor-secrets`，本地无法执行、不可派单。
+>
+> 下一轮需求派单继续在本目录新增 `R-18-*.md` 起，并遵循第一节模式约定。
