@@ -4,6 +4,11 @@
 
 ## 程序
 1. 读取 `STATUS.md` 与开放 Issue，挑选一个「待实现」且已有架构设计（或 spec 已足够明确）的模块。
+   - **防 race（2026-10-13 实证：自主流水线曾与人工 work-mode 派单抢同一 Issue，开出冗余 PR #113 落 conflict）**：挑选前先排除满足任一条件的 Issue，改挑下一个：
+     a) 近 24h 内存在 `@codebuddy` 的 work-mode 评论（= 已通过人工 work-mode 派单，NPC 正并行处理）；
+     b) 已关联开放 PR（`list-pulls` 中 head 指向该 Issue 或 body 含 `Closes #N`）；
+     c) `STATUS.md` / `orders/LEDGER.md` 标注为「人工派单 / 进行中 / NPC 已认领」。
+   - 排除后仍无可选 Issue → 本轮 dev-call **直接结束**，不要新开 Issue 或重复实现（避免与人工派单撞车）。
 2. 严格按 `spec/05_master_execution_playbook.md` 四阶段顺序推进，不要跳步。
 3. 实现时逐条遵守 AGENTS.md 铁律：
    - 无幻觉：只用 spec 锁定依赖/API；编造的类名/端点/端口一律禁止；不可查的标「未验证」。
