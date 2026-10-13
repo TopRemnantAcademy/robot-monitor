@@ -391,89 +391,89 @@ main:
   #   [llm error] HTTP 402 — {"message":"[EXCEEDING_LIMIT]AI 积分已用尽，
   #   请联系根组织管理员提升配额。/ AI credits are exhausted. ..."}
   #   [error] Agent 执行出错：402 ... exit code: 1, duration: 1.5s
-  # 失败的不是 pm-call 的业务逻辑，是**调用 LLM 之前的配额校验** —— 与 spec/ci/*-call.md
-  # 的程序、AGENTS.md 纪律、本仓代码全部无关。保留注释而不是删除，是因为它确认负债：
-  # 积分恢复（或换到有配额的根组织）后取消注释 + `cnb build build-crontab-sync` 即可复活。
-  # 不暂停的代价：每 6h 一条 error 构建，把 push 门禁的真实回归信号淹没在同一片红色里。
+  # ✅ NPC 自主流水线已恢复（2026-10-13）：账号级 AI 积分此前耗尽（两次 crontab 在
+  # pm-call 首段秒退，402 [EXCEEDING_LIMIT]），2026-10-13 经 Issue #96 探针证实配额恢复，
+  # 按下方注释预留的恢复路径取消注释 + `cnb build build-crontab-sync` 复活。
+  # 若再次 402：error 构建每 6h 一条属预期信号，处理方式同前（注释回去 + build-crontab-sync）。
   #
-  #   "crontab: 0 0,6,12,18 * * *":
-  #     - stages:
-  #         - name: pm-call
-  #           image: docker.cnb.cool/bring/agents/agent:latest
-  #           settings:
-  #             max_turns: 30
-  #             workspace_preflight: on
-  #             system_prompt: |
-  #               你是本仓库 RobotMonitor 的产品经理。严格遵守 AGENTS.md 全局纪律。
-  #               你的身份与职责见 .cnb/settings.yml 中「产品经理」角色定义。
-  #             user_prompt: |
-  #               定时巡检。先用 bash 读取 ./spec/ci/pm-call.md，严格按其程序、禁止事项、产出格式执行，不要自创流程。
-  #
-  #         - name: architect-call
-  #           image: docker.cnb.cool/bring/agents/agent:latest
-  #           settings:
-  #             max_turns: 40
-  #             workspace_preflight: on
-  #             system_prompt: |
-  #               你是本仓库 RobotMonitor 的架构师。严格遵守 AGENTS.md 全局纪律。
-  #               你的身份与职责见 .cnb/settings.yml 中「架构师」角色定义。
-  #             user_prompt: |
-  #               定时巡检。先用 bash 读取 ./spec/ci/architect-call.md，严格按其程序执行，不要自创流程。
-  #
-  #         - name: dev-call
-  #           image: docker.cnb.cool/bring/agents/agent:latest
-  #           settings:
-  #             max_turns: 120
-  #             workspace_preflight: on
-  #             system_prompt: |
-  #               你是本仓库 RobotMonitor 的开发工程师。严格遵守 AGENTS.md 全局纪律（无幻觉/完整可运行/性能护栏/数据契约）。
-  #               你的身份与职责见 .cnb/settings.yml 中「开发工程师」角色定义。
-  #             user_prompt: |
-  #               定时巡检。先用 bash 读取 ./spec/ci/dev-call.md，严格按其程序执行，不要自创流程。
-  #
-  #         - name: review-call
-  #           image: docker.cnb.cool/bring/agents/agent:latest
-  #           settings:
-  #             max_turns: 60
-  #             workspace_preflight: on
-  #             system_prompt: |
-  #               你是本仓库 RobotMonitor 的代码审查工程师。严格遵守 AGENTS.md 全局纪律。
-  #               你的身份与职责见 .cnb/settings.yml 中「代码审查」角色定义。
-  #             user_prompt: |
-  #               定时巡检。先用 bash 读取 ./spec/ci/review-call.md，严格按其程序执行，不要自创流程。
-  #
-  #         - name: test-call
-  #           image: docker.cnb.cool/bring/agents/agent:latest
-  #           settings:
-  #             max_turns: 60
-  #             workspace_preflight: on
-  #             system_prompt: |
-  #               你是本仓库 RobotMonitor 的测试工程师。严格遵守 AGENTS.md 全局纪律。
-  #               你的身份与职责见 .cnb/settings.yml 中「测试工程师」角色定义。
-  #             user_prompt: |
-  #               定时巡检。先用 bash 读取 ./spec/ci/test-call.md，严格按其程序执行，不要自创流程。
-  #
-  #         - name: compliance-call
-  #           image: docker.cnb.cool/bring/agents/agent:latest
-  #           settings:
-  #             max_turns: 30
-  #             workspace_preflight: on
-  #             system_prompt: |
-  #               你是本仓库 RobotMonitor 的合规门禁。严格遵守 AGENTS.md 全局纪律。
-  #               你的身份与职责见 .cnb/settings.yml 中「合规」角色定义。
-  #             user_prompt: |
-  #               定时巡检。先用 bash 读取 ./spec/ci/compliance-call.md，严格按其程序执行，不要自创流程。
-  #
-  #         - name: integration-call
-  #           image: docker.cnb.cool/bring/agents/agent:latest
-  #           settings:
-  #             max_turns: 60
-  #             workspace_preflight: on
-  #             system_prompt: |
-  #               你是本仓库 RobotMonitor 的测试/集成工程师。严格遵守 AGENTS.md 全局纪律。
-  #               负责端到端联调：docker-compose 起栈 + 后端 + 告警引擎 + 模拟器压测 30s + 校验写入与告警。
-  #             user_prompt: |
-  #               定时巡检。先用 bash 读取 ./spec/ci/integration-call.md，严格按其程序执行，不要自创流程。
+   "crontab: 0 0,6,12,18 * * *":
+    - stages:
+        - name: pm-call
+          image: docker.cnb.cool/bring/agents/agent:latest
+          settings:
+            max_turns: 30
+            workspace_preflight: on
+            system_prompt: |
+              你是本仓库 RobotMonitor 的产品经理。严格遵守 AGENTS.md 全局纪律。
+              你的身份与职责见 .cnb/settings.yml 中「产品经理」角色定义。
+            user_prompt: |
+              定时巡检。先用 bash 读取 ./spec/ci/pm-call.md，严格按其程序、禁止事项、产出格式执行，不要自创流程。
+
+        - name: architect-call
+          image: docker.cnb.cool/bring/agents/agent:latest
+          settings:
+            max_turns: 40
+            workspace_preflight: on
+            system_prompt: |
+              你是本仓库 RobotMonitor 的架构师。严格遵守 AGENTS.md 全局纪律。
+              你的身份与职责见 .cnb/settings.yml 中「架构师」角色定义。
+            user_prompt: |
+              定时巡检。先用 bash 读取 ./spec/ci/architect-call.md，严格按其程序执行，不要自创流程。
+
+        - name: dev-call
+          image: docker.cnb.cool/bring/agents/agent:latest
+          settings:
+            max_turns: 120
+            workspace_preflight: on
+            system_prompt: |
+              你是本仓库 RobotMonitor 的开发工程师。严格遵守 AGENTS.md 全局纪律（无幻觉/完整可运行/性能护栏/数据契约）。
+              你的身份与职责见 .cnb/settings.yml 中「开发工程师」角色定义。
+            user_prompt: |
+              定时巡检。先用 bash 读取 ./spec/ci/dev-call.md，严格按其程序执行，不要自创流程。
+
+        - name: review-call
+          image: docker.cnb.cool/bring/agents/agent:latest
+          settings:
+            max_turns: 60
+            workspace_preflight: on
+            system_prompt: |
+              你是本仓库 RobotMonitor 的代码审查工程师。严格遵守 AGENTS.md 全局纪律。
+              你的身份与职责见 .cnb/settings.yml 中「代码审查」角色定义。
+            user_prompt: |
+              定时巡检。先用 bash 读取 ./spec/ci/review-call.md，严格按其程序执行，不要自创流程。
+
+        - name: test-call
+          image: docker.cnb.cool/bring/agents/agent:latest
+          settings:
+            max_turns: 60
+            workspace_preflight: on
+            system_prompt: |
+              你是本仓库 RobotMonitor 的测试工程师。严格遵守 AGENTS.md 全局纪律。
+              你的身份与职责见 .cnb/settings.yml 中「测试工程师」角色定义。
+            user_prompt: |
+              定时巡检。先用 bash 读取 ./spec/ci/test-call.md，严格按其程序执行，不要自创流程。
+
+        - name: compliance-call
+          image: docker.cnb.cool/bring/agents/agent:latest
+          settings:
+            max_turns: 30
+            workspace_preflight: on
+            system_prompt: |
+              你是本仓库 RobotMonitor 的合规门禁。严格遵守 AGENTS.md 全局纪律。
+              你的身份与职责见 .cnb/settings.yml 中「合规」角色定义。
+            user_prompt: |
+              定时巡检。先用 bash 读取 ./spec/ci/compliance-call.md，严格按其程序执行，不要自创流程。
+
+        - name: integration-call
+          image: docker.cnb.cool/bring/agents/agent:latest
+          settings:
+            max_turns: 60
+            workspace_preflight: on
+            system_prompt: |
+              你是本仓库 RobotMonitor 的测试/集成工程师。严格遵守 AGENTS.md 全局纪律。
+              负责端到端联调：docker-compose 起栈 + 后端 + 告警引擎 + 模拟器压测 30s + 校验写入与告警。
+            user_prompt: |
+              定时巡检。先用 bash 读取 ./spec/ci/integration-call.md，严格按其程序执行，不要自创流程。
 
   "crontab: 0 3 * * *":
     - name: e2e-30k-landing
