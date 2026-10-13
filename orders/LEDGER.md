@@ -181,3 +181,22 @@ backlog 三个实证来源：① `git diff --stat main...(两个保留分支)` �
 **所有派工单必须补「产出文件白名单」硬门槛**：写明 `PR 的 diff 必须包含 X/Y 文件`，且描述必须贴
 「改前/改后 命令输出」对照。订单 32 的验收 [ ] 清单写得再漂亮，缺了这条就让「只改文档」也能自洽通过。
 
+## 十一、继续派单 + NPC 自主流水线复活（2026-10-13 上午，用户「在CNB里 @//codebuddy/ 替我干活！不要在本地干。继续」）
+
+### 11.1 Ops（主代理直做，非工程活）
+
+| 项 | 结果 | 证据 |
+| --- | --- | --- |
+| 素材分支删除 | ✅ `auto/metadata-heartbeat-3f2a`、`auto/e2e-30k-harness-7687` 已删 | 先验证三份独有文件均在 main（`git cat-file -e main:…` ×3 ✓），内容已榨干 |
+| NPC crontab 恢复 | ✅ 6h×7 段流水线复活 | `4552492` uncomment → `build-crontab-sync --branch main` 返回 "successfully synchronized" |
+| ⚠️ 一次返工 | `c4252b3` 首推 422 CONFIG_ERROR | **pyyaml 宽容、CNB js-yaml 严格**：uncomment 后键缩进 3sp，pyyaml 照单全收、CNB 拒收。`4552492` 修正为 2sp 过审。教训：**CI 配置校验要用 CNB 自己的 build-crontab-sync 当真理，本地 pyyaml 通过≠过审** |
+
+### 11.2 新派两单（均 `--work-mode` 触发，workMode=true 已核验：cnb-c71 / cnb-mnr）
+
+| 订单 | 内容 | 依据（取证） | Issue | NPC 构建 |
+| --- | --- | --- | --- | --- |
+| 34 | e2e 假绿专项：SKIP 静默变绿 + 镜像声明失效归因修复 | `cnb-st7-1k4onp4ok-001` 日志实锤：e2e stage 仅 240ms、SKIP（缺省镜像）却 success；crontab 块 e2e 漏 `docker.image`；push 块声明了 image 却仍跑缺省镜像（归因未明，正是要派出去的活） | #109 | cnb-c71 执行中 |
+| 35 | UI 第四轮：告警「抑制」呈现（全栈） | `grep -rn 抑制 frontend_dashboard/src` = 0 命中；订单 30 的可选 T4 确认未做；WS 连接态 chip 已存在（不重派） | #110 | cnb-mnr 执行中 |
+
+两单均带**产出文件白名单**硬门槛（订单 32 血亏教训的制度化）。
+
