@@ -211,3 +211,8 @@ backlog 三个实证来源：① `git diff --stat main...(两个保留分支)` �
 - **两点 diff 才是真增量**：派工分支多从旧 main 派生，`git diff A...B`（三点，对 merge-base）会把派生点以来的 ALL 历史当新增。核验白名单必须用 `git diff <merge-base>..<branch>`（两点）或 `git diff main..branch`（HEAD=当前 main），只看本单增量。本轮订单 34/35 均靠此法确认白名单干净（订单 34 仅 5 文件、订单 35 仅 20 文件）。
 - **squash 合并不会回退既有文件**：订单 35 分支派生早于订单 34 合并，但其 `merge-base..branch` 不含 .cnb.yml，故 squash 到 main 后订单 34 的 `&e2e-image` 锚点（.cnb.yml:216/452/558）完好——已用 SHA 直接 `git show 4487101:.cnb.yml` 复核，非依赖易遮蔽的 ref。
 
+### 11.5 NPC crontab 复活后首轮观察（2026-10-13 上午）
+- **402 未复发 ✅**：复活后首轮自主构建 `cnb-6pq-1k4pdmtam`（sourceRef main，NPC 7 段流水线）`status: success`，`npc go` 跑满 1528s → BeforeEnd/End 全绿；近 10 次构建 `pipelineFailCount: 0`，无 402/denied。积分已恢复，自主流水线可常态运行。
+- **race 副产物（无害）**：该轮在 01:23Z 启动时 issue #110 仍 open（我正以 work-mode 重派订单 35），crontab NPC 自行认领 #110 → 重建分支 `feat/order-35-suppressed-ui` 并开 **PR #113**（标题与 #112 几乎相同）。因 #112 已合并、#110 已关，#113 落 `conflict` 被关、**未合并**（main 仍 9ce271d，订单 34/35 功能各一份、无重复）；重建分支已再次删除，远程仅余 main。
+- **纪律提醒（待用户拍板是否改 crontab 提示词）**：自主 crontab 与人工 work-mode 派单可能抢同一 Issue 产生冗余 PR。根治法=在 `.cnb.yml` crontab 段提示词加「只认领 state=open 且 24h 内无 work-mode 评论的 Issue」，或派单前先 `grep` 既有 PR。本轮未改 crontab 配置（属自主流水线行为调整，需用户确认再动）。
+
