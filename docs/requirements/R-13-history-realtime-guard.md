@@ -1,98 +1,97 @@
-# R-13 — `robot_history_1h` 实时聚合回填保证 + 真库回归测试（GAP-1 复核：原「1h 空洞」为误判）
+# R-13 — `robot_history_1h`/`robot_history_10s` 实时聚合回填修复 + 真库回归测试（GAP-1 **复核为真 bug**）
 
 > **@//codebuddy/** — 本需求由本地（主代理）撰写，指派 codebuddy NPC 读仓执行。
 > 本地**只写需求规格、不写业务修复代码**；codebuddy 落地后主代理按两点 diff 白名单
 > 核验 + CI 双绿回收。
 >
-> 状态：**待执行（防回归 / 文档化类）**。实证见 §1，非推测。
-> ⚠️ 本需求**不修洞**（洞不存在）；只做「锁定实时聚合保证 + 回归测试 + 文档化 footgun」，
-> 属**低风险**（仅增测试 + 注释，不动查询/刷新语义）。
+> 状态：**待执行（修复类，中风险）**。实证见 §1，非推测。
+> ⚠️ 本需求**改 `init.sql` 的 cagg 属性**（非刷新策略/列/查询），§6 红线为硬门槛。
+> ⚠️ **更正（2026-10-13 续）**：初版（commit `7ed6cba`）误判 GAP-1 为 false positive（基于未核实的
+> 「TimescaleDB 2.x 默认 materialized_only=false」假设）。codebuddy 在**真** timescaledb 2.13.1 实测后
+> 驳回：默认实为 **true**（源码 + 上游测试双证据）。故 GAP-1 是**真 bug**，本需求改为**修复版**（见 §1.2）。
 
 ---
 
-## 1. 背景（file:line 实证，含 GAP-1 误判复核）
+## 1. 背景（file:line 实证，含 GAP-1 误判→真 bug 的复核）
 
-### 1.1 原 GAP-1 判定与推翻
-深度缺口扫描（`docs/GAP-SCAN-2026-10-13.md` GAP-1）曾判定：长跨度 `/history` 走 `robot_history_1h`，
-其 `end_offset=1h` + `WITH NO DATA` → materialized-only → 窗口 `[now-1h, now]` **整段空白**。
+### 1.1 原 GAP-1 判定（深度扫描）
+`docs/GAP-SCAN-2026-10-13.md` GAP-1 判定：长跨度 `/history` 走 `robot_history_1h`（R-12 加，`HOURILY_AFTER_MINUTES=180`，`backend_ingestion/app/main.py:308-309`），其 `end_offset=1h`（`infra/init.sql:254-258`）+ `WITH NO DATA`（`:224,239`）→ 长查询右端 `[now-1h, now]` 空洞。
 
-**复核结论：该判定为误判（false positive）。** 证据链（全部 file:line 实证）：
+### 1.2 主代理初版误判（已推翻，诚实记录）
+主代理初版假定「TimescaleDB 2.x 连续聚合默认 `materialized_only=false`（实时聚合），故无空洞」→ 把 GAP-1 当 false positive，R-13 初版只做「防回归注释 + 测试」、禁止改 DDL。
+**该假定未经真库核实，是错的。**
 
-- `robot_history_1h` 定义为 `CREATE MATERIALIZED VIEW … WITH (timescaledb.continuous) … WITH NO DATA`
-  （`infra/init.sql:224-239`）；
-- 刷新策略 `add_continuous_aggregate_policy('robot_history_1h', end_offset => INTERVAL '1 hour', …)`
-  （`infra/init.sql:254-258`）；
-- **全仓库 grep `materialized_only` 0 命中**，且无 `ALTER MATERIALIZED VIEW … SET (materialized_only=true)`
-  → 该 cagg 的 `materialized_only` 取 TimescaleDB 2.x 默认值 **`false`**；
-- 库版本 `timescale/timescaledb:2.13.1-pg16`（`infra/docker-compose.yml:45`、
-  `infra/ops/grafana/provisioning/datasources/datasources.yaml:31`、
-  `tests/e2e/docker-compose.e2e.yml:42`）；
-- **TimescaleDB 2.x 连续聚合默认为实时聚合（real-time aggregate）**：查询 cagg 视图时，
-  引擎自动 `UNION`【已物化区 `>= now-3d AND < now-1h`】+【对底层 `robot_telemetry` 的实时查询 `[now-1h, now]`】，
-  **透明回填右端 1h**，无需 `WITH DATA` 或任何查询层改造；
-- `history()` 长跨度查询即
-  `SELECT … FROM robot_history_1h WHERE robot_id=$2 AND bucket >= now() - ($3||' seconds')::interval …`
-  （`backend_ingestion/app/main.py:328-336`），无屏蔽实时段的写法。
+### 1.3 codebuddy 真库实测（权威证据，推翻 1.2）
+codebuddy 装**真** `timescaledb 2.13.1`（与 `infra/docker-compose.yml:45` 同版本）+ 跑 `infra/init.sql`（rc=0），实测：
 
-⇒ **长跨度 `/history` 当前无右端 1h 空洞**。原 GAP-1 推荐的「`history()` UNION `robot_history_1h` + `robot_history_10s` 补最新生效 1h」修复**不必要**，落地反而引入冗余/重复点，故**禁止**（见 §6）。
+- **① cagg 目录**：`_timescaledb_catalog.continuous_agg.materialized_only` →
+  `robot_history_10s = t`、`robot_history_1h = t`、`robot_status_10s = t`（**三者皆 true**）；
+  `timescaledb_information.continuous_aggregates` 同值；
+  `pg_get_viewdef('robot_history_1h')` 是**纯物化表** `SELECT … FROM _materialized_hypertable_5`，**无 `UNION ALL` 实时段**（实时聚合的 viewdef 必含 `UNION ALL … FROM robot_telemetry`）。
+- **② 按原 T2 原样执行**：`INSERT robot_telemetry` 1800 行、`time ∈ [now-1800s, now]`（即 `[now-30min, now]`）；
+  `SELECT count(*) FROM robot_history_1h WHERE bucket >= now()-'90 min' AND robot_id='humanoid-001'` → **0**（实时段未回填）；
+  底层 `robot_telemetry` 同条件 = 1800（数据在，只是没进 cagg）。
+- **③ 对照实验**：`ALTER MATERIALIZED VIEW robot_history_1h SET (timescaledb.materialized_only=false);` → 同一查询立刻 **1**。
+  ⇒ 「0 / 1」差异完全由 `materialized_only` 决定。
+- **④ 根因（上游源码 + 上游测试，双证据）**：
+  - `timescaledb 2.13.1` 源码 `src/ts_catalog/continuous_agg.c:58-62`：
+    `[ContinuousViewOptionMaterializedOnly] = { .arg_name = "materialized_only", .default_val = (Datum)true };`
+    **默认值是 `true`**；`WITH NO DATA` 时无人翻转它，仅显式 `materialized_only=false` 才翻转。
+  - 上游回归测试 `tsl/test/expected/cagg_union_view-15.out`：
+    `WITH (..., materialized_only=false)` → `materialized_only = f` + **UNION 实时视图**；
+    `ALTER … SET (materialized_only=true)` → `materialized_only = t` + 非 union 视图、`SELECT` 返 `(0 rows)`。
 
-### 1.2 为什么仍需本需求（真正的可防护缺口）
-当前正确性**仅依赖** `materialized_only` 始终为 `false`。这是一个**隐性 footgun**：
-
-- 未来某次「优化 / 清理」可能误加 `materialized_only=true`（或 `WITH DATA` 后改建为 materialized-only）；
-- 一旦如此，`robot_history_1h` 不再实时回填 `[now-1h, now]`，且 `end_offset=1h` 的刷新策略**永远不覆盖**
-  该实时段 → 长跨度 `/history` 右端 1h 瞬间变空白（**这正是原 GAP-1 描述的故障**）；
-- 该回归**无单测覆盖**（既有 `test_history_source.py` 用 mock pool，验证的是 SQL 拼装，非 DB 引擎实时回填行为）。
-
-故本需求的真实价值 = **把「实时聚合回填」这一隐性不变量变成可验证、可文档化的显式保证**，
-防未来回归。属防御性 hardening，非补当前 bug。
+⇒ **GAP-1 是真 bug**：`robot_history_1h`（长跨度）+ `robot_history_10s`（短跨度，end_offset=10s）都因 `materialized_only=true` 缺失右端实时段；`/history` 两条路径右端均有空洞（1h / 10s）。初版 R-13 的「防回归注释」不足以修复，必须显式 `SET (materialized_only=false)`。
 
 ---
 
 ## 2. 目标
 
-- 在 `infra/init.sql` 的 `robot_history_1h` 定义处**显式文档化**：实时聚合（`materialized_only=false`）是当前正确行为；
-  禁止设 `materialized_only=true`（否则长查询右端 1h 空洞）；`end_offset=1h` 仅界定物化边界，实时段由底层 hypertable 透明回填。
-- 新增**真 TimescaleDB 回归测试**：灌入落在 `[now-1h, now]` 实时区的数据，断言 `robot_history_1h` 能查回该段，
-  把「实时回填生效」锁成可失败的信号（一旦被改成 materialized-only，测试立即红）。
-- 不改动任何查询 / 刷新语义，不引入 UNION 补洞。
+- **修复**：对 `/history` 的两个数据源 cagg（`robot_history_1h` + `robot_history_10s`）显式 `SET (timescaledb.materialized_only=false)`，
+  开启实时聚合，使查询透明回填 `[now-end_offset, now]`，消除 `/history` 右端空洞。
+- **回归测试（真 TimescaleDB）**：灌 `[now-30min, now]` 数据，断言 `robot_history_1h` 与 `robot_history_10s` 均能查回该段（>0），
+  把「实时回填生效」锁成可失败信号（一旦被改回 true，测试立即红）。
+- **注释（准确）**：`init.sql` 标注 2.13.1 默认 `materialized_only=true` 的 footgun + 本修复的作用。
 
 ---
 
 ## 3. 范围边界（明确不做）
 
-- **不引入** `history()` UNION `robot_history_1h` + `robot_history_10s` 补洞（GAP-1 误判修复，冗余且有害）。
-- **不改** `robot_history_1h` 的刷新策略（`end_offset` / `schedule` / `start_offset` 保持 `init.sql:254-258`）。
-- **不设** `materialized_only=true`（禁止项，见 §6）。
-- **不改** 10s 路径、`_parse_resolution`、R-03/R-09 契约（与 R-12 同护栏）。
-- 不在 mock pool 单测里「伪造」实时回填（ISSUE #60 禁止 mock 替身冒充真实 TimescaleDB；本测试须跑真库）。
+- **修 `/history` 两个 cagg**：`robot_history_1h` + `robot_history_10s`（同缺陷、同 1 行修复，避免 `/history` 半修）。
+- **不修 `robot_status_10s`**（看板「最新态」，end_offset=1min → 1min 空洞）：属**同类 sibling 缺口**，影响前端实时看板最新值，
+  不在 R-13 范围；列为**后续单独评估**（避免未授权改动看板最新态语义）。如需一并修，另开需求。
+- **不改** 刷新策略（`init.sql:198-202` / `:254-258` 的 `start/end_offset`/`schedule` 保持）。
+- **不改** cagg 列集 / `_select` 模板 / `history()` 路由 / `_parse_resolution`（R-03 §4 / §4.1 硬红线不变；实时回填透明，列与 SQL 字节级不变）。
+- **禁止** 设 `materialized_only=true`（那正是 bug 本身）。
+- 不在 mock pool 单测里伪造实时回填（ISSUE #60 禁止 mock 替身冒充真实 TimescaleDB）。
 
 ---
 
 ## 4. 任务分解
 
-### T1 — 文档化 footgun（`infra/init.sql`，仅注释，不改 DDL）
-在 `CREATE MATERIALIZED VIEW IF NOT EXISTS robot_history_1h …`（`:224`）定义块上方新增注释块，明确：
-- 本视图**依赖实时聚合**（`materialized_only=false`，TimescaleDB 2.x 默认）；
-- `end_offset => 1 hour`（`:256`）只界定**物化**边界；`[now-1h, now]` 由引擎对 `robot_telemetry` 的实时查询透明回填；
-- **禁止** `SET (materialized_only=true)` 或改建为 materialized-only —— 否则长跨度 `/history` 右端 1h 变空白
-  （原 GAP-1 故障模式），且刷新策略永远不覆盖该实时段，无法自愈；
-- 回归测试见 T2，改此视图前先确保该测试仍 PASS。
+### T1 — 准确注释（`infra/init.sql`，仅注释，置于 cagg 定义块上方）
+在 `robot_history_1h`（`:224`）/ `robot_history_10s`（`:168`）定义块上方补注释：
+- TimescaleDB `2.13.1` 连续聚合**默认 `materialized_only=true`**（源码 `continuous_agg.c:58-62`），非实时聚合；
+- 故 cagg 不回填 `[now-end_offset, now]`，`/history` 右端有空洞（1h / 10s）；
+- 本需求用 `ALTER … SET (timescaledb.materialized_only=false)` 改实时聚合（见 T2）；**禁止**改回 true；
+- `end_offset` 仅界定物化边界，实时段由引擎对 `robot_telemetry` 透明回填。
 
-### T2 — 真 TimescaleDB 回归测试（证明实时回填生效）
-- 位置：复用既有真库测试入口（`tests/e2e/`，沿用 `tests/e2e/docker-compose.e2e.yml` 的 `timescaledb:2.13.1-pg16`；
-  或 `backend_ingestion/tests/` 下接真库 fixtures，与现有 `test_history_source.py` 隔离——后者是 mock 拼装测试，不混用）。
-- 步骤：
-  1. 跑 `infra/init.sql` 建表 + 建 `robot_history_1h`（确保 cagg 为实时聚合）；
-  2. 向 `robot_telemetry` 插入若干行，`time` 落在 `[now-30min, now]`（即实时区，未物化）；
-  3. 执行 `SELECT count(*) FROM robot_history_1h WHERE bucket >= now() - INTERVAL '90 minutes' AND robot_id = $1`；
-  4. **断言 `count(*) > 0`** —— 证明 `[now-30min, now]` 这段被实时回填进了 cagg 查询（而非等刷新）。
-- 反向不变量（可选但推荐）：同样查询在「若有人把 cagg 改成 materialized-only」时应返 0 —— 本测试即可作为该回归的警报。
-- 标记：该测试为**真库测试**，禁止用 mock pool 替代（ISSUE #60）；CI 真绿门槛沿用 R-07/R-12 的 `e2e-30k-landing` 同栈。
+### T2 — 修复 cagg 属性（`infra/init.sql`，DDL 变更，幂等）
+在 cagg 创建之后追加（re-run `init.sql` 安全，幂等）：
+```sql
+-- R-13 修复：2.13.1 默认 materialized_only=true → /history 右端空洞。改实时聚合。
+ALTER MATERIALIZED VIEW IF EXISTS robot_history_1h  SET (timescaledb.materialized_only=false);
+ALTER MATERIALIZED VIEW IF EXISTS robot_history_10s SET (timescaledb.materialized_only=false);
+```
+（`ALTER … SET (…=false)` 重复执行是 no-op，不报错；`IF EXISTS` 兜底重跑安全。）
 
-### T3 — 注释一致性（可选）
-若 `robot_history_10s`（`:168`）/`robot_status_10s`（`:122`）亦依赖实时回填，可在其注释补一句「同 `robot_history_1h` 实时聚合约定」，
-但不强制；本需求核心是 `robot_history_1h`（长跨度路径）。
+### T3 — 真 TimescaleDB 回归测试（证明实时回填生效）
+- 位置：复用 `tests/e2e/docker-compose.e2e.yml` 的 `timescaledb:2.13.1`（ISSUE #60 禁 mock）。
+- 步骤：跑 `infra/init.sql`（含 T2 修复）→ 向 `robot_telemetry` 插 `[now-30min, now]` 数据 →
+  断言 `SELECT count(*) FROM robot_history_1h WHERE bucket >= now()-90min AND robot_id=$1` **>0**
+  **且** `SELECT count(*) FROM robot_history_10s WHERE bucket >= now()-90min AND robot_id=$1` **>0**。
+- 反向不变量（推荐）：若把某 cagg 改回 `materialized_only=true`，对应断言应红 → 本测试即该回归警报。
+- 标记真库测试，禁 mock pool 替代。
 
 ---
 
@@ -100,35 +99,36 @@
 
 | # | 用例 | 期望 | 判定依据 |
 |---|---|---|---|
-| V1 | 注释就位 | `infra/init.sql` 的 `robot_history_1h` 块上方含「实时聚合 / 禁止 materialized_only=true / end_offset 仅界物化」说明 | 读 `init.sql:224` 上方注释 |
-| V2 | 实时回填测试 PASS | 灌 `[now-30min, now]` 数据后，`robot_history_1h` 查 `>= now()-90min` 返 `count>0`（真 timescaledb:2.13.1 跑） | 真库测试输出 |
-| V3 | 无 materialized-only | 全仓 grep `materialized_only\s*=\s*true` / `SET (materialized_only` 0 命中 | `grep -niE "materialized_only" **/*.sql` |
-| V4 | 既有契约不动 | `test_history_source.py` 原断言（V3 指 `?minutes=1440`→`robot_history_1h`、V5 上限 400 等）仍 PASS | 单测 + CI |
+| V1 | 注释准确 | `init.sql` 的 `robot_history_1h`/`robot_history_10s` 块上方含「2.13.1 默认 materialized_only=true / 本修复改 false / 禁 true」 | 读 `init.sql` |
+| V2 | 真库修复生效 | 真 timescaledb 2.13.1 上，`robot_history_1h` 与 `robot_history_10s` 查 `[now-90min,now]` 均返 `>0`（灌 `[now-30min,now]` 后） | 真库测试输出 |
+| V3 | 显式 false | `init.sql` 含 `SET (timescaledb.materialized_only=false)` 且无 `=true` | `grep materialized_only init.sql` |
+| V4 | 既有契约不动 | `test_history_source.py` 原断言（10s 路由 / 1h 路由 / 上限 400 等）仍 PASS；列集/`_select` 字节级不变 | 单测 + CI |
 | V5 | CI 双绿 | `pipeline-1(test)` + `pipeline-2(e2e-30k-landing)` 均 success（e2e 真绿：rows_written≥30000 且无 `【E2E SKIPPED】`） | `cnb pulls list-pull-commit-statuses` + 按需 `get-build-logs` |
 
 ---
 
-## 6. 约束 / 禁止项
+## 6. 约束 / 禁止项（白名单）
 
-- 禁止引入 `history()` UNION `robot_history_1h` + `robot_history_10s` 补洞（GAP-1 误判修复，冗余且可能重复点）。
-- 禁止设 `materialized_only=true` 或把 `robot_history_1h` 改建为 materialized-only。
-- 禁止改 `robot_history_1h` 刷新策略（`init.sql:254-258` 的 `start/end_offset`/`schedule` 保持）。
-- 禁止改 10s 路径 / `_parse_resolution`（R-03 §4 / §4.1 硬红线）。
+- `git diff` 白名单：`infra/init.sql`（准确注释 + 2× `ALTER … SET (materialized_only=false)`，幂等）+ 新增真库测试文件。
+- 禁止设 `materialized_only=true`（即 bug 本身）。
+- 禁止改刷新策略（`init.sql:198-202`/`:254-258`）、cagg 列集、`_select` 模板、`history()` 路由、`_parse_resolution`（R-03 §4/§4.1）。
+- 禁止改 `robot_status_10s`（看板最新态，sibling，留后续评估）。
 - 禁止在 mock pool 单测里伪造实时回填（ISSUE #60）。
-- `git diff` 白名单：`infra/init.sql`（仅注释）+ 新增真库测试文件；不得夹带其它模块改动。
+- 不得夹带其它模块改动（metrics/prometheus/dashboards/前端等）。
 
 ---
 
 ## 7. 交付物（codebuddy 产出，主代理回收核验）
 
-- `infra/init.sql`：`robot_history_1h` 块上方新增「实时聚合 / 禁 materialized_only=true」注释（无 DDL 语义变化）。
-- 真 TimescaleDB 回归测试（如 `tests/e2e/test_cagg_realtime_backfill.py` 或并入现有 e2e）：灌 `[now-30min,now]` → 断言 `robot_history_1h` 查回。
-- PR 的 `git diff` 白名单仅 `init.sql`（注释）+ 测试文件；CI 双绿（test + e2e-30k-landing 真绿）。
+- `infra/init.sql`：`robot_history_1h`/`robot_history_10s` 块上方准确注释 + 2× `ALTER … SET (timescaledb.materialized_only=false)`（幂等）。
+- 真 TimescaleDB 回归测试（如 `tests/e2e/test_cagg_realtime_backfill.py` 或并入现有 e2e）：灌 `[now-30min,now]` → 断言两 cagg 均查回。
+- PR 的 `git diff` 白名单仅 `init.sql`（注释 + 2 ALTER）+ 测试文件；CI 双绿（test + e2e-30k-landing 真绿）。
 
 ---
 
 ## 8. 关联
 
-- 来源：`docs/GAP-SCAN-2026-10-13.md` GAP-1（已复核为误判，本需求为其防回归落地）。
-- 依赖不变式：`robot_history_1h` 实时聚合（TimescaleDB 2.13.1 默认 `materialized_only=false`）。
-- 上层契约：R-12（`/history` 长期趋势查询）+ R-03 §4（`/history` 响应契约）。
+- 来源：`docs/GAP-SCAN-2026-10-13.md` GAP-1（**复核为真 bug**，非误判）。
+- 根因：`timescaledb 2.13.1` 连续聚合默认 `materialized_only=true`（源码 `continuous_agg.c:58-62`）。
+- 上层契约：R-12（`/history` 长期趋势）+ R-03 §4（`/history` 响应契约，列/SQL 不变即守住）。
+- 后续：`robot_status_10s` 同类 sibling（看板最新态 1min 空洞）→ 单独评估。
