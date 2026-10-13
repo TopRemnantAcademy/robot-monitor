@@ -107,6 +107,7 @@ codebuddy 的 CNB token **缺 `repo-pr:rw`（历史上也缺 `repo-code:rw`）**
 | **R-11** | 业务 Grafana 看板（robot_backend_*/robot_alert_* 可视化） | ✅ **已回收**（PR #118→`2327ec2`，#117 关） | 无；V3/V4 需 docker 栈复验（本机无 docker） |
 | **R-12** | `/history` 长期趋势查询（小时级下采样） | ✅ **已回收**（PR #120→`f2969746`，#119 关；e2e-30k-landing 真绿） | 无（改 `init.sql`+`main.py`，中风险，R-03 回归护栏为硬门槛，已实证守住） |
 | R-10 | C4 GitHub 同步端到端验证 | ⏳ 规格在 `R-10-cnb-github-sync.md` | **需用户备 GitHub PAT（只写 `robot-monitor`）+ 建 CNB 密钥仓库 `flow.237/RobotMonitor-secrets`**；本地无法执行 |
+| **R-13** | `robot_history_1h` 实时聚合回填保证 + 真库回归测试（GAP-1 复核：原「1h 空洞」为误判） | 🟡 **已写规格·待派 CNB 执行**（本账户 Bearer 推 `cnb/main` + 建 Issue + `@//codebuddy/` work-mode） | 无（仅注释 + 测试，低风险）；洞不存在，本需求为防回归锁定 |
 
 > 其余 backlog（G-1~G-7、C1~C3、A1~A3）经 `STATUS.md` 对账 + 代码实证均已收口或转为已落地规格。
-> 下一轮需求派单继续在本目录新增 `R-13-*.md` 起，并遵循第一节模式约定。
+> 下一轮需求派单继续在本目录新增 `R-14-*.md` 起，并遵循第一节模式约定。
