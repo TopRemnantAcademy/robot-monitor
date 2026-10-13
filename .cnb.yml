@@ -183,7 +183,7 @@ main:
     #           git_user: RobotMonitor Sync
     #           git_email: robot-monitor@users.noreply.github.com
     # ============================================================
-    # e2e：端到端 30,000 行落库验证（ISSUE #60）—— 锚点定义处（&e2e-env / &e2e-stages）
+    # e2e：端到端 30,000 行落库验证（ISSUE #60）—— 锚点定义处（&e2e-image / &e2e-env / &e2e-stages）
     #
     # 为什么单独一条 pipeline：它需要 **Docker-in-Docker**（services: [docker]）
     # 才能起 emqx + timescaledb:2.13.1 + redis + backend + mock_fleet。
@@ -200,7 +200,20 @@ main:
       # 即「环境判定全绿 → 脚本起不来」，属于最坏的一类失败（红得莫名其妙）。
       # 所以这里把运行环境写死成有 python3 的镜像，而不是靠默认镜像碰运气。
       # 同理，脚本里也**不再**用 `python3` 裸命令，见下方 runner 探测。
-      docker:
+      #
+      # ---- 订单 34 T1/T2：image 改为**锚点**并在三处 e2e 全部引用 ----
+      # 归因结论（file:line + 日志双证据，详见 PR 描述）：
+      #   本行 image 声明**一直是生效的**，push 构建 cnb-152-1k4ohjp3k-002（sha 68b7b8b）
+      #   prepare 日志有 `docker pull python:3.11-slim`，e2e stage 打出
+      #   `python 可用：Python 3.11.17`。真正在缺省镜像里跑的是 **crontab 构建**
+      #   cnb-st7-1k4onp4ok-001（同一 sha）—— 因为 `"crontab: 0 3 * * *"` 这条
+      #   pipeline（原 `.cnb.yml:479`）**只写了 services/env/stages，漏了 docker.image**
+      #   （≠ 订单 34 初判的「push 块声明失效」）。crontab 的 prepare 日志因此是
+      #   `docker pull cnbcool/default-build-env`。
+      # 修法：把 image 提成锚点，三处引用同一个值 —— 一致性由 YAML 层保证，
+      # 而不是靠人记得改三遍（订单 32 的改动让 push/PR 增了行，crontab 却没同步，
+      # 正是「三份拷贝靠人维护」的必然结果）。
+      docker: &e2e-image
         image: python:3.11-slim
       services: [docker]
       env: &e2e-env
@@ -214,6 +227,18 @@ main:
             set -uo pipefail
             echo "== e2e 30k 落库验证（ISSUE #60）=="
 
+            # SKIP 横幅（订单 34 T2）：任何一次「没实跑」的退出都必须先打这一行，
+            # 且**必须**是显著的、可 grep 的固定串，让「绿」不再能冒充实跑。
+            # 背景：push 构建 cnb-st7-1k4onp4ok 的 e2e 只有 240ms、status=success，
+            # 日志里只有一句【E2E SKIP】——肉眼扫 CI 列表只看到「绿」，看不出没跑。
+            skip_banner() {
+              echo "================================================================"
+              echo "【E2E SKIPPED —— 本构建未实跑 30k 落库】"
+              echo "原因：$1"
+              echo "本构建的 e2e 为绿色但**未产生任何落库数字**，不可当作 ISSUE #60 的证据。"
+              echo "================================================================"
+            }
+
             # ---- 环境判定：无 Docker 即明确 skip，绝不 red ----
             if ! command -v docker >/dev/null 2>&1; then
               echo "【E2E SKIP】PATH 内找不到 docker 命令。"
@@ -221,11 +246,13 @@ main:
               echo "且 ISSUE #60 禁止用 mock 替身冒充真实 TimescaleDB。"
               echo "需要：在提供 docker 的构建机/自托管 runner 上运行本 job，或本地执行"
               echo "  python -m pytest tests/e2e/test_e2e_30k.py -v -s"
+              skip_banner "PATH 内找不到 docker 命令（runner 未提供 Docker-in-Docker）"
               exit 0
             fi
             if ! docker info >/dev/null 2>&1; then
               echo "【E2E SKIP】docker daemon 不可达（docker info 非 0）。原始输出（尾部）："
               docker info 2>&1 | tail -5 || true
+              skip_banner "docker daemon 不可达"
               exit 0
             fi
             echo "docker 可用：$(docker --version)"
@@ -235,6 +262,11 @@ main:
             # 脚本根本没起来（返回码 127）。所以顺序必须是
             # 「先探 docker（本 job 的核心依赖）→ 再探 python（脚本自身的依赖）」，
             # 两层都给出原因与解法，读者不必翻配置就知道卡在哪一层。
+            #
+            # 订单 34 补充：本判定之所以会命中，唯一成因是**本 pipeline 没声明
+            # `docker.image`**。push / pull_request / crontab 三处 e2e 现统一由
+            # YAML 锚点 `&e2e-image` 注入 image，配置层就不该再有缺口；
+            # 若这里仍打 SKIP，说明锚点没被这三处引用到（file:line 可查）。
             if command -v python3 >/dev/null 2>&1; then
               PY=python3
             elif command -v python >/dev/null 2>&1; then
@@ -242,7 +274,9 @@ main:
             else
               echo "【E2E SKIP】镜像内 PATH 找不到 python3/python（当前镜像：${CNB_BUILD_IMAGE:-缺省镜像}）。"
               echo "本 job 需要 python 来驱动 tests/e2e/test_e2e_30k.py（只用标准库，无需 pip 安装）。"
-              echo "修复：在本 pipeline 上声明 docker.image（如 python:3.11-slim），不要沿用缺省镜像。"
+              echo "修复：本 pipeline 必须引用 docker.image 锚点（.cnb.yml 的 &e2e-image = python:3.11-slim），"
+              echo "      不要沿用缺省镜像 cnbcool/default-build-env（它没有 python3）。"
+              skip_banner "运行镜像内没有 python3/python（docker.image 锚点未生效）"
               exit 0
             fi
             echo "python 可用：$($PY --version 2>&1)"
@@ -258,44 +292,82 @@ main:
             # 判定：HTTP 探不到 → [SKIP] 并 exit 0（环境问题，不伪装通过）；
             #       旧名残留 / 新名缺失 → 脚本退出码 1 → **本 stage 变红**。
             # 这道门禁的价值全在「能红」：一个吞掉失败的门禁比没有门禁更糟。
+            #
+            # ⚠️ 订单 34 修复：原实现用 `curl -sf` 探 /healthz 与 /metrics，而本 job
+            #   运行镜像是 **python:3.11-slim** —— 该镜像**不带 curl**（Debian slim
+            #   不含 curl/wget）。于是无论栈起没起，两处探测都恒为「不可达」，
+            #   这道门禁从挂上去那天起**一次都没真跑过**（三次 push/PR 构建日志实证：
+            #   cnb-sfb-1k4oh9va6-002 / cnb-152-1k4ohjp3k-002 的 e2e stage 里
+            #   都是 `【E2E SKIP】订单 32 命名探针：/metrics 在 180s 内不可达`）。
+            #   改为调用 `$PY`（本 job 的运行时本体）做 HTTP 探测，不引入新依赖。
+            # ---- 顺序：先命名探针、后 30k；但两者结果**各自独立**收集，最后合并判定 ----
+            # 为什么不让命名探针「失败即 return」：它是订单 32 的门禁，而本 job 的主产出
+            # 是 30k 落库数字（订单 34 硬门槛）。若命名探针一走红就提前结束，
+            # 30k 永远拿不到输出，读者无法区分「命名回归」与「落库回归」两件事。
+            # 故：命名探针的 rc 先存下，30k 照跑，最后两者都为 0 才 exit 0。
+            naming_rc=0
+
             echo "== 订单 32：指标命名反例探针 =="
-            if ! docker compose -f tests/e2e/docker-compose.e2e.yml up -d --build \
+            # ⚠️ 每一条可能非 0 的命令都必须就地吞掉退出码（`|| naming_rc=$?`）：
+            #   实测（PR #111 首次 CI：cnb-dr0-1k4pbtmr7-002）本 stage 的 shell 会在
+            #   一条非 0 命令后**直接终止整段脚本**（`set -e` 语义），
+            #   于是「命名探针红」会连带把 30k 也掐死 —— 主产出拿不到，两件事分不清。
+            #   这不是靠 `set -uo pipefail` 能关掉的，只能不给它触发机会。
+            naming_rc=0
+            if docker compose -f tests/e2e/docker-compose.e2e.yml up -d --build \
                  emqx timescaledb redis backend; then
-              echo "【E2E SKIP】订单 32 命名探针：起栈失败（环境问题，非代码失败）"
-              docker compose -f tests/e2e/docker-compose.e2e.yml down -v --remove-orphans || true
-              exit 0
+              i=0
+              while [ $i -lt 36 ]; do
+                if $PY -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:18000/healthz',timeout=3)" >/dev/null 2>&1; then break; fi
+                i=$((i + 1)); sleep 5
+              done
+              if $PY -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:18000/metrics',timeout=3)" >/dev/null 2>&1; then
+                $PY tests/e2e/test_e2e_30k.py --metric-naming-check || naming_rc=$?
+                if [ "$naming_rc" = "3" ]; then
+                  echo "【E2E SKIP】订单 32 命名探针：脚本自判环境不具备（退出码 3），非代码失败。"
+                  skip_banner "订单 32 命名探针自判环境不具备（退出码 3）"
+                  naming_rc=0
+                elif [ "$naming_rc" != "0" ]; then
+                  echo "【E2E FAIL】订单 32 命名门禁未通过（退出码 $naming_rc）—— 旧前缀指标残留或规范名缺失。"
+                else
+                  echo "订单 32 命名门禁通过：/metrics 旧名 0 命中，robot_backend_* 规范名全部在位。"
+                fi
+              else
+                # 栈起了但 /metrics 探不到：这**不是**代码失败，也不是能静默放过的事。
+                # 记为「未实跑」（打横幅），30k 仍继续跑并给出落库数字。
+                echo "【E2E SKIP】订单 32 命名探针：/metrics 在 180s 内不可达（栈未就绪）"
+                skip_banner "订单 32 命名探针：/metrics 在 180s 内不可达（该门禁本轮未实跑）"
+              fi
+            else
+              echo "【E2E FAIL】订单 32 命名探针：起栈失败。"
+              echo "（订单 34 判定收紧：起栈失败**不再**当作可静默 skip 的环境问题 ——"
+              echo " 本 compose 栈此前已被 push 构建实跑证明可起，失败即代码/配置回归。）"
+              naming_rc=1
             fi
-            i=0
-            while [ $i -lt 36 ]; do
-              if curl -sf http://127.0.0.1:18000/healthz >/dev/null 2>&1; then break; fi
-              i=$((i + 1)); sleep 5
-            done
-            if ! curl -sf http://127.0.0.1:18000/metrics >/dev/null 2>&1; then
-              echo "【E2E SKIP】订单 32 命名探针：/metrics 在 180s 内不可达（栈未就绪）"
-              docker compose -f tests/e2e/docker-compose.e2e.yml down -v --remove-orphans || true
-              exit 0
-            fi
-            $PY tests/e2e/test_e2e_30k.py --metric-naming-check
-            naming_rc=$?
             docker compose -f tests/e2e/docker-compose.e2e.yml down -v --remove-orphans || true
-            if [ "$naming_rc" = "3" ]; then
-              echo "【E2E SKIP】订单 32 命名探针：脚本自判环境不具备（退出码 3），非代码失败。"
+
+            # 依赖：e2e 脚本只用标准库（subprocess/urllib），无需 pip 安装。
+            # 同样用 `|| rc=$?` 就地吞退出码：这是本 job 的主产出，绝不能被 shell 语义掐断。
+            echo "== 30k 落库主链路（本 job 的硬门槛产出）=="
+            rc=0
+            $PY tests/e2e/test_e2e_30k.py || rc=$?
+            if [ "$rc" = "3" ]; then
+              echo "【E2E SKIP】脚本自判环境不具备（退出码 3），非代码失败。"
+              skip_banner "test_e2e_30k.py 自判环境不具备（退出码 3，无 Docker/daemon 不可达）"
+              rc=0
+            fi
+            # 合并判定：命名探针红、或 30k 红，本 stage 都红（都非静默可放过）。
+            if [ "$rc" = "0" ] && [ "$naming_rc" = "0" ]; then
+              echo "e2e stage 全部通过：30k 落库断言通过 + 命名门禁在位。"
               exit 0
             fi
             if [ "$naming_rc" != "0" ]; then
               echo "【E2E FAIL】订单 32 命名门禁未通过（退出码 $naming_rc）—— 旧前缀指标残留或规范名缺失。"
-              exit "$naming_rc"
             fi
-            echo "订单 32 命名门禁通过：/metrics 旧名 0 命中，robot_backend_* 规范名全部在位。"
-
-            # 依赖：e2e 脚本只用标准库（subprocess/urllib），无需 pip 安装。
-            $PY tests/e2e/test_e2e_30k.py
-            rc=$?
-            if [ "$rc" = "3" ]; then
-              echo "【E2E SKIP】脚本自判环境不具备（退出码 3），非代码失败。"
-              exit 0
+            if [ "$rc" != "0" ]; then
+              echo "【E2E FAIL】30k 落库断言未通过（退出码 $rc）。"
             fi
-            exit "$rc"
+            exit 1
   pull_request:
     - name: test
       docker:
@@ -375,10 +447,9 @@ main:
             npm run typecheck
             npx vite build
             node scripts/report-bundle-size.mjs
-    # e2e 与 push 共用同一份 stages/env（锚点定义在 push 块，此处按文档序用别名引用）
+    # e2e 与 push 共用同一份 docker/env/stages（锚点定义在 push 块，此处按文档序用别名引用）
     - name: e2e-30k-landing
-      docker:
-        image: python:3.11-slim
+      docker: *e2e-image
       services: [docker]
       env: *e2e-env
       stages: *e2e-stages
@@ -477,6 +548,14 @@ main:
 
   "crontab: 0 3 * * *":
     - name: e2e-30k-landing
+      # 订单 34 T2 修复点：原缺失 `docker:`（`.cnb.yml:479` 只有 services/env/stages），
+      # 于是这条 pipeline 跑在缺省镜像 cnbcool/default-build-env 里 —— 该镜像没有 python3，
+      # e2e stage 直接打【E2E SKIP】并 exit 0，构建 21306ms 整体绿。
+      # 实证（同一 sha 68b7b8b 的两个构建对照）：
+      #   push   cnb-152-1k4ohjp3k-002 prepare → `docker pull python:3.11-slim`
+      #   crontab cnb-st7-1k4onp4ok-001 prepare → `docker pull cnbcool/default-build-env`
+      # 现与 push/PR 引用同一锚点，三处不可能再漂移。
+      docker: *e2e-image
       services: [docker]
       env: *e2e-env
       stages: *e2e-stages

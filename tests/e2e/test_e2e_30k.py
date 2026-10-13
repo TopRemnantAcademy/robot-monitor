@@ -411,13 +411,30 @@ LEGACY_MONITOR_METRICS = (
 )
 
 # 改后必须存在的规范名（订单 32 T2 的两个真正新增 + 消重后承接同源计数的 4 个）。
+#
+# 分两组的原因（订单 34 实测）：prometheus_client 对**带 label 的 Counter**，
+# 在某个 label 组合**尚未被观测到**时**不导出任何样本行**（连 0 值行都没有）——
+# 它的时间序列是「首次 `.labels(...).inc()` 时才诞生」的。
+# 实证：PR #111 首次 CI（构建 cnb-dr0-1k4pbtmr7-002）的命名探针在**刚 up -d 完、
+# 零遥测**的栈上跑，报 `缺少规范名 ['robot_backend_batch_flushes_total']` ——
+# 而该指标在 `backend_ingestion/app/metrics.py:77` 明明已注册（`labelnames=("reason",)`），
+# 只是那一批 `{reason=count|timeout}` 还没发生过任何一次刷批。
+# 这是**探针判据的事实错误**（把「无 series」当成「指标不存在」），不是服务缺陷。
+# 故拆两类：无 label 的必须随时在；带 label 的只在「已发生事件」后要求 ——
+# 30k 落库路径（本文件 run_e2e() 第 7 步）跑在**压测之后**，那时刷批必然已发生，
+# 因此对它的要求**不打折**；只有 CI 里那条零流量的独立 `--metric-naming-check`
+# 允许它们缺席（并由调用方显式声明 allow_unemitted=True，不许默认放宽）。
 REQUIRED_BACKEND_METRICS = (
     "robot_backend_queue_depth",
-    "robot_backend_batch_flushes_total",
     "robot_backend_telemetry_written_total",
     "robot_backend_mqtt_received_total",
     "robot_backend_ws_connections",
     "robot_backend_history_latency_seconds",
+)
+
+# 带 label 的 Counter：有事件才导出。见上段说明，不在「随时在位」之列。
+LABELED_BACKEND_METRICS = (
+    "robot_backend_batch_flushes_total",
 )
 
 
@@ -445,7 +462,7 @@ def metric_lines(metric_name_prefix: str, text: str) -> list[tuple[str, str]]:
     return out
 
 
-def assert_metric_naming(url: str, prefix: str) -> None:
+def assert_metric_naming(url: str, prefix: str, allow_unemitted: bool = False) -> None:
     """对真实服务断言：规范名在、旧名消失。
 
     取值的两种失败必须分开报：
@@ -453,6 +470,11 @@ def assert_metric_naming(url: str, prefix: str) -> None:
       - HTTP 拿到了但内容不合口径（旧名还在 / 新名缺了）→ **red**。
     后者是本探针存在的唯一理由：它是一道**反例门禁**，
     不能因为它「只是顺路加的」就在断言失败时退化成 skip。
+
+    allow_unemitted：仅用于**零流量**的独立探针调用（CI 里刚 up -d 完就跑的那种）。
+    为 True 时，带 label 的 Counter（LABELED_BACKEND_METRICS）缺席只记信息不判红 ——
+    因为它们「有事件才导出」，零流量下缺席是**正确行为**而非回归。
+    30k 落库路径（压测之后调用）必须传 False（默认），要求全量在位。
     """
     text = http_get(url)
     if text is None:
@@ -481,11 +503,20 @@ def assert_metric_naming(url: str, prefix: str) -> None:
         f"实测原始行：{[ln['raw'] for m in leaked for ln in _hits(m)][:5]}"
     )
     missing = [m for m in REQUIRED_BACKEND_METRICS if not _hits(m)]
+    # 带 label 的 Counter 只在「已发生事件」后才导出；零流量探针允许其缺席，
+    # 但必须**打印出来**（静默放过与明确记录是两回事，本单反复强调这条界线）。
+    unemitted = [m for m in LABELED_BACKEND_METRICS if not _hits(m)]
+    if unemitted and not allow_unemitted:
+        missing = missing + unemitted
+    if unemitted and allow_unemitted:
+        print(f"[e2e] 指标命名探针：带 label 指标尚未导出（本轮零流量，属预期）：{unemitted}",
+              flush=True)
     assert not missing, (
         f"真实 /metrics 缺少规范名 {missing}（订单 32 验收：新名必须在）。"
         f"该前缀下实测到 {len(names_here)} 个指标名，样本：{sorted(names_here)[:8]}"
     )
-    print(f"[e2e] 指标命名探针通过：旧名前缀 0 命中，规范名 {len(REQUIRED_BACKEND_METRICS)} 个在位",
+    total = len(REQUIRED_BACKEND_METRICS) + len(LABELED_BACKEND_METRICS) - len(unemitted)
+    print(f"[e2e] 指标命名探针通过：旧名前缀 0 命中，规范名 {total} 个在位",
           flush=True)
 
 
@@ -590,7 +621,10 @@ def main() -> int:
             print(f"{PYTEST_SKIP_MARKER}: compose 文件不存在：{COMPOSE_FILE}", flush=True)
             return 3
         try:
-            assert_metric_naming(METRICS_URL, METRICS_PREFIX)
+            # allow_unemitted=True：本开关在**零流量**栈上跑（CI 的 up -d 之后、压测之前），
+            # 带 label 的 Counter 尚未诞生属正确行为。旧名残留 / 无 label 名缺失仍判红。
+            # 30k 落库路径（run_e2e 第 7 步，压测之后）用默认 False，要求全量在位。
+            assert_metric_naming(METRICS_URL, METRICS_PREFIX, allow_unemitted=True)
         except AssertionError as exc:
             print(f"[e2e] 指标命名门禁未通过：{exc}", flush=True)
             return 1

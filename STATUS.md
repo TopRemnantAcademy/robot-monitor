@@ -136,6 +136,7 @@
 | 两服务 `/metrics` 端点 | ✅ 后端 `:8011` 与告警 `:8012` 均返回 200，`content_type=text/plain; version=0.0.4` |
 | `.gitignore` 覆盖 `.venv-ci` | ✅ `git check-ignore .venv-ci/pyvenv.cfg` → 命中 `.gitignore:14:.venv*/` |
 | 假覆盖测试文件 | ✅ 全仓扫描 **0 个**（`test_*.py` 均含真实 `test_*` 函数） |
+| **端到端 30,000 行落库**（ISSUE #60） | ✅ **CI 承证 2026-10-13**：PR #111 的 pull_request 构建 **`cnb-vro-1k4pcqp07-002`**（e2e stage **160.8s**，非 SKIP；`python:3.11-slim` + `services: [docker]`）。真 TimescaleDB **2.13.1**：`robot_telemetry` **新增 39864 行**（阈值 ≥30000）、PK 冲突组 **0**、`rows_submitted=rows_written=39864` / `rows_skipped=0` / `rejected=0`、hypertable=1、PK `(time,robot_id)`。完整日志见 `tests/e2e/README.md`「实跑记录」 |
 | 前端错误边界 + react-query（订单 26） | ✅ `.e2e/run_order26.mjs` **7/7 通过**：子组件抛错被 ErrorBoundary 兜住（不白屏+重试按钮）、`/history` 500 自动重试至成功（后端命中 3 次）、staleTime 内重复查询命中缓存不再打后端 |
 
 本机验证环境（已打通）：Python **3.13.14** 隔离 venv，
@@ -145,7 +146,6 @@
 
 | 项 | 所需条件 |
 |---|---|
-| 端到端 30,000 行落库 | **harness 已就绪**（ISSUE #60：`tests/e2e/docker-compose.e2e.yml` + `tests/e2e/test_e2e_30k.py`），但**尚未在真实 Docker 上跑过** —— 本开发环境无 docker daemon，脚本按设计 skip（退出码 3）。需在提供 docker 的机器/runner 上执行 `python -m pytest tests/e2e/test_e2e_30k.py -v -s` 才产生实测数字。CI 侧 `e2e-30k-landing`（`.cnb.yml`）已按实跑报错修正：显式钉 `docker.image: python:3.11-slim`（缺省镜像无 python3，首次实跑返回码 127）、补 `docker compose` 插件探测、并给压测加发送量下限（见 `tests/e2e/README.md`） |
 | I-2 / I-3 的**运行时**行为 | 需真实 broker；导入期已验证 |
 | 告警去重幂等 / `robot:alerts` 发布 | 同上 |
 
@@ -169,6 +169,18 @@
 
 另：`npm install` 曾把 `package-lock.json` 的 42 行 `libc`/`musl` 平台标记删掉
 （会导致 Linux CI 上 lock 不完整）—— 已恢复原始跨平台版本。
+
+### 订单 34：两条「假绿」缺陷（2026-10-13）
+
+| # | 缺陷 | 位置 | 后果 |
+|---|---|---|---|
+| 18 | **crontab e2e 漏声明 `docker.image`** | `.cnb.yml:479`（`"crontab: 0 3 * * *"` 块） | 该触发下 e2e 跑在缺省镜像 `cnbcool/default-build-env`（**无 python3**）→ 打【E2E SKIP】`exit 0` → 构建 21306ms **整体绿**，一行没落。同一 sha（68b7b8b）的 push 构建 `cnb-152-1k4ohjp3k-002` 反而真跑在 `python:3.11-slim` —— 「声明失效」的是 crontab 块,不是 push 块 |
+| 19 | **命名探针用 `curl`，在 `python:3.11-slim` 里恒不可达** | `.cnb.yml:270,273`（原实现） | `python:3.11-slim` 无 curl/wget → `/healthz`/`/metrics` 恒判「不可达」→ SKIP。订单 32 这道门禁**从挂上去起一次都没真跑过** |
+| 20 | **命名探针把「无 series」误判为「指标不存在」** | `tests/e2e/test_e2e_30k.py` 的 `REQUIRED_BACKEND_METRICS` | `robot_backend_batch_flushes_total` 带 label，零流量下 prometheus_client 不导出任何样本行；修复探针后才暴露（`cnb-dr0-1k4pbtmr7-002` 实测） |
+
+修法：`docker.image` 提成锚点 `&e2e-image`，push/PR/crontab 三处共引；`curl` 探测改 `$PY` 内联
+`urllib`；带 label 指标拆成 `LABELED_BACKEND_METRICS`，仅零流量独立探针允许其缺席（并打印记录），
+30k 路径要求全量在位；SKIP 路径统一打横幅 `【E2E SKIPPED —— 本构建未实跑 30k 落库】`。
 
 ### 第二轮细节复核（2026-10-10，本轮）
 
