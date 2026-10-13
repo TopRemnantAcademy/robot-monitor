@@ -165,6 +165,22 @@ SELECT add_continuous_aggregate_policy('robot_status_10s',
 --
 -- 键名与列名逐字对齐 robot_status_10s 的既有列，外加三个关节列；
 -- 列名即 `/history` 返回体的字段名，两侧漂移会直接让 Drawer 变空。
+--
+-- ⚠️ materialized_only 的 footgun（R-13，真库实证 2.13.1）：本视图必须**实时聚合**
+--   （`materialized_only` 置为 `false`），否则 `/history` 短跨度路径右端有 10s 空洞。
+--   TimescaleDB **2.13.1 连续聚合默认 `materialized_only` 即为 `true`** —— 源码
+--   `src/ts_catalog/continuous_agg.c:58-62`：
+--     `[ContinuousViewOptionMaterializedOnly] = { .arg_name = "materialized_only",
+--                                                .default_val = (Datum)true };`
+--   默认值是 **`true`**；建视图时只有显式把 `materialized_only` 写为 `false` 才翻转它
+--   （`WITH NO DATA` 不改变该默认）。旧注释里「2.x 默认即 false / 默认实时聚合」是**错的**，
+--   真库 `_timescaledb_catalog.continuous_agg` 实测三张 cagg（含本视图）建完即 `materialized_only = t`。
+--   默认 true 的后果：物化表只覆盖到 `now() - end_offset`，`[now-end_offset, now]` 不参与查询
+--   （`pg_get_viewdef` 是纯物化表 SELECT，无 `UNION ALL ... FROM robot_telemetry` 实时段）。
+--   ⇒ 本需求在 §5.1c 用 `ALTER MATERIALIZED VIEW ... SET (timescaledb.materialized_only = false)`
+--     改回实时聚合（幂等，re-run init.sql 安全）；**禁止**把它设成 `true`（那正是本 bug 本身）。
+--   `end_offset`（:198-202）只界定**物化边界**，右侧实时段由引擎对 `robot_telemetry` 透明回填，
+--   不改刷新策略、不改列、不改 `/history` 的 SQL。
 CREATE MATERIALIZED VIEW IF NOT EXISTS robot_history_10s
 WITH (timescaledb.continuous) AS
 SELECT
@@ -221,6 +237,18 @@ SELECT add_continuous_aggregate_policy('robot_history_10s',
 --   订单 16 已真实翻车过一次（漏列 → 曲线恒空），R-12 §6 把「不得漏列」写成硬红线。
 --   history() 两条分支复用同一 `_select` 模板，列名即响应字段名：
 --   本视图列与 10s 视图列一旦漂移，小时路径的响应体就会缺字段。
+--
+-- ⚠️ materialized_only 的 footgun（R-13，真库实证 2.13.1）：本视图必须**实时聚合**
+--   （`materialized_only` 置为 `false`），否则 `/history` 长跨度路径右端有 1h 空洞。
+--   TimescaleDB **2.13.1 连续聚合默认 `materialized_only` 即为 `true`** —— 源码
+--   `src/ts_catalog/continuous_agg.c:58-62` 的 `materialized_only.default_val = (Datum)true`；
+--   建视图时只有显式把 `materialized_only` 写为 `false` 才翻转。真库实测：本视图建完即 `materialized_only = t`，
+--   且 `end_offset=1h` + `WITH NO DATA` ⇒ `[now-1h, now]` 区间查不到（洞为真，非误判）。
+--   ⇒ 本需求在 §5.1c 显式 `SET (timescaledb.materialized_only = false)` 开实时聚合；
+--     `end_offset=1h`（:254-258）只界定物化边界，右侧 1h 实时段由引擎对 `robot_telemetry` 透明回填。
+--   **禁止**设回 `true` —— 那会让长跨度 `/history` 右端再次出现 1h 空洞（本 R-13 要修的正是它）。
+--   注意：本注释只加在 `robot_history_1h` / `robot_history_10s`（`/history` 两个数据源）；
+--   `robot_status_10s`（看板最新态）为同类 sibling 缺口，按 R-13 §3 **本轮不动**，另开需求评估。
 CREATE MATERIALIZED VIEW IF NOT EXISTS robot_history_1h
 WITH (timescaledb.continuous) AS
 SELECT
@@ -256,6 +284,28 @@ SELECT add_continuous_aggregate_policy('robot_history_1h',
     end_offset   => INTERVAL '1 hour',
     schedule_interval => INTERVAL '1 hour',
     if_not_exists => TRUE);
+
+-- 5.1c 连续聚合（R-13 修复）：把 `/history` 两个数据源改为**实时聚合**
+--
+-- 为什么必须有（真库实证，非推测）：
+--   TimescaleDB 2.13.1 连续聚合默认 `materialized_only` 即为 `true`（源码
+--   `src/ts_catalog/continuous_agg.c:58-62` 的 `default_val = (Datum)true`）。
+--   默认 true ⇒ cagg 的查询视图是**纯物化表**（`pg_get_viewdef` 无 `UNION ALL ... FROM robot_telemetry`
+--   实时段），`[now-end_offset, now]` 这段查不到 —— 即 `/history` 右端空洞（1h 视图 1h 空洞、
+--   10s 视图 10s 空洞）。下面两条 `SET (materialized_only = false)` 打开实时聚合，右侧实时段由引擎
+--   对 `robot_telemetry` 透明回填，查询 SQL 与列集**字节级不变**（R-03 §4 契约不受影响）。
+--
+-- 为什么只改这两个视图：
+--   它们正是 `/history` 的两条数据源（`history()` 按跨度路由到 10s / 1h，main.py:308-309）。
+--   `robot_status_10s`（看板最新态）是同类 sibling 缺口，按 R-13 §3 **本轮不动**，另开需求评估。
+--
+-- 幂等性（re-run `init.sql` 安全）：
+--   `ALTER MATERIALIZED VIEW ... SET (...)` 对已是该值的视图重复执行是 no-op，不报错；
+--   仍加 `IF EXISTS` 兜底，使本段在视图被改名/删除的库上重跑也不炸。
+--   ⚠️ 反向红线：**禁止**把它设回 `materialized_only` 为 `true` —— 那正是本 bug 本身
+--   （回归测试 tests/e2e/test_cagg_realtime_backfill.py 会在真库上立刻变红）。
+ALTER MATERIALIZED VIEW IF EXISTS robot_history_10s SET (timescaledb.materialized_only = false);
+ALTER MATERIALIZED VIEW IF EXISTS robot_history_1h  SET (timescaledb.materialized_only = false);
 
 -- 5.2 物化表索引说明（**不需要手工建**）
 -- 连续聚合会自动为每个分组列建 `(<分组列>, <分区列> DESC)` 索引

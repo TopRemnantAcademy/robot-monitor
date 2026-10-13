@@ -114,6 +114,10 @@ METRICS_PREFIX = os.environ.get("E2E_METRICS_PREFIX", "robot_")
 
 PYTEST_SKIP_MARKER = "E2E-SKIP"
 
+# R-13：cagg 实时回填断言用的机器人 ID 与灌数行数（灌 [now-30min, now]，10Hz）。
+ROBOT_ID = os.environ.get("E2E_CAGG_ROBOT_ID", "humanoid-001")
+BACKFILL_ROWS = int(os.environ.get("E2E_CAGG_ROWS", "1800"))
+
 # 每个子进程都要有上限，禁止无限等待（ISSUE #60 §3「复用 test_integration.sh 的超时守卫思路」）。
 # 下载/构建镜像可能慢，故 up 给得宽；其余步骤都是本地操作，几十秒足够。
 UP_TIMEOUT_S = UP_TIMEOUT
@@ -306,6 +310,19 @@ def run_e2e() -> dict:
     #    放在落库取证之后：先保证主链路可用，再验命名 ——
     #    否则「服务根本没起来」会被误报成「命名有问题」。
     assert_metric_naming(METRICS_URL, METRICS_PREFIX)
+
+    # 8) R-13：`/history` 两个 cagg 的实时聚合回填（栈还活着，复用真 TimescaleDB）。
+    #    为什么并入这里而不是另起一套栈：CI 的 e2e stage 只跑本文件，栈起一次成本已付；
+    #    另起一套只为跑一条 count 断言是浪费（R-13 文档 §7 明确允许「并入现有 e2e」）。
+    #    断言主体在 test_cagg_realtime_backfill.py，本文件把**自己的** psql 传进去，
+    #    与 30k 落库共用同一容器连接（同一 `-U postgres -d robot_monitor`）。
+    #    一旦有人把 init.sql 的两条 `SET (materialized_only = false)` 删掉/改回 true，
+    #    这里立即红 —— 这就是 R-13 要挂的回归警报。
+    from test_cagg_realtime_backfill import assert_cagg_realtime_backfill  # noqa: PLC0415
+
+    evidence["cagg_realtime_backfill"] = assert_cagg_realtime_backfill(
+        psql_fn=psql, robot_id=ROBOT_ID, rows=BACKFILL_ROWS)
+    print(f"[e2e] R-13 cagg 实时回填：{evidence['cagg_realtime_backfill']}", flush=True)
 
     return evidence
 
