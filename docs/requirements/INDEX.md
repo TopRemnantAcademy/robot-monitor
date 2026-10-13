@@ -4,6 +4,9 @@
 > 每个需求一份 `R-xx-*.md`，本文件是总索引与模式约定。
 >
 > 最后更新：**2026-10-13**（模式切换：本地写需求规格 → `@//codebuddy/` 标记 → Bearer 头 push 到 CNB，由 codebuddy 读仓执行；本地**只写需求规格、不写业务修复代码**）。
+> 2026-10-13 追加：**回收 SOP 实测**——codebuddy 的 token 缺 `repo-pr:rw`（且历史上缺 `repo-code:rw`），
+> 能 `git push` 分支但**开不了 PR**；本地用本账户 Bearer 头（含 `repo-code:rw`+`repo-pr:rw`）开 PR +
+> squash 合并回收。详见第一节末「回收 SOP」。
 
 ---
 
@@ -24,6 +27,31 @@
 > 触发 codebuddy 实际执行的机制沿用 G-7 已验证路径：在对应 CNB Issue/PR 评论里
 > `@codebuddy` 并引用本目录规格（work-mode 派单已实测可产出分支 + PR）。
 
+### 1.1 回收 SOP（codebuddy 交付后的本地回收，2026-10-13 实测）
+
+codebuddy 的 CNB token **缺 `repo-pr:rw`（历史上也缺 `repo-code:rw`）**——它能把分支
+`git push` 到 `cnb` 远程（如 `auto/grafana-biz-dashboards-5fac`），但**开 PR 会 403**
+（`errcode=10023 Missing required scopes: repo-pr:rw`），导致交付滞留沙箱、无 PR。
+
+本地（本账户 Bearer 头，含 `repo-code:rw`+`repo-pr:rw`）按以下顺序回收：
+
+1. `git fetch cnb main` **先刷新本地 `cnb/main` 跟踪引用**（避免 §11.4 两点 diff 用陈旧
+   merge-base 把已合入的规格文档误显为「新增」）。
+2. `git fetch cnb auto/<branch>` + `git diff $(git merge-base cnb/main <branch>)..<branch> --name-status`
+   **白名单核验**（仅含规格 §6 允许的文件；0 删除/改名/越界改动）。
+3. 本地实证验收（如 R-11：V1 `json.load` 合法、V2 看板 `expr` 引用的指标名全部在
+   `metrics.py` grep 命中、面板 id 唯一 / `gridPos` ≤24 列）。
+4. 用 `cnb pulls post-pull`(**本账户**) 从 codebuddy 分支开 PR（触发 CNB CI 双绿），
+   或确认 codebuddy 已开 PR（如 R-11 的 #118 由 cnb-kn5 构建实际开出了）。
+5. 查 `cnb pulls list-pull-commit-statuses` 确认 `pipeline-1(test)` + `pipeline-2(e2e-30k-landing)`
+   **双绿**；e2e 真绿门槛（rows_written≥30000 且无 `【E2E SKIPPED】`）按需查 `cnb build get-build-logs --repo ... --sn <sn>`。
+6. `cnb pulls merge-pull --merge-style squash` 合并 → 刷新 `cnb/main` 确认落地 →
+   `cnb issues close --state-reason completed` 关单。
+7. 清理：删远程 codebuddy 分支（`git push cnb --delete auto/<branch>`）+ 本地 `cnb/auto/<branch>` 引用。
+
+> 残留风险（本机无 docker，无法本地验证）：V3（Grafana 自动加载进文件夹）/ V4（真实流量非 0 序列）
+> 类验收需在能跑 `infra/observability` compose 栈的机器复验，写进 PR body 与关单说明。
+
 ---
 
 ## 二、需求清单（R-01 ~ R-10）
@@ -40,8 +68,8 @@
 | R-08 | 验收测试矩阵（逐用例编号·可判定） | ✅ 订单 01–06 映射 | `R-08-acceptance-matrix.md` | 通用规则 + 7 段矩阵 |
 | R-09 | 数据库对接规格（TimescaleDB） | ✅ Issue #19 已合入 `main` | `R-09-database-integration.md` | 真 TimescaleDB 2.13.1 实测 13/13；三级写入降级链 |
 | R-10 | CNB → GitHub 单向自动同步（C4 / Issue #64） | ⏳ **流水线已落地，端到端未验证**（缺 GitHub 凭据 + `flow.237/RobotMonitor-secrets` 密钥仓库） | `R-10-cnb-github-sync.md` | `.cnb.yml:23-45` 已挂 `push` 事件；同步未跑通 |
-| R-11 | 业务 Grafana 看板固化（robot_backend_*/robot_alert_* 可视化） | ⏳ **待执行（新需求）** | `R-11-business-grafana-dashboard.md` | 9 个 EMQX 看板已存；业务指标 `grep` 0 命中（实证 §1） |
-| R-12 | `/history` 长期趋势查询（小时级下采样，跨天可见） | ⏳ **待执行（新需求/优化类·中风险）** | `R-12-history-longterm-trend.md` | `history()` 仅 10s cagg + 原始回退，`minutes` 无上限（`main.py:278`） |
+| R-11 | 业务 Grafana 看板固化（robot_backend_*/robot_alert_* 可视化） | ✅ **已回收**（PR #118 squash→`2327ec2`，#117 关；本地两点 diff 白名单 + V1/V2/CI 双绿实证） | `R-11-business-grafana-dashboard.md` | 9 个 EMQX 看板已存；业务指标 `grep` 0 命中（实证 §1）；交付仅 2 新 JSON，23 指标名全命中 |
+| R-12 | `/history` 长期趋势查询（小时级下采样，跨天可见） | ✅ **已回收**（PR #120 squash→`f2969746`，#119 关；本地两点 diff 白名单 + 红线 SHA256/变量回退/CI 双绿实证） | `R-12-history-longterm-trend.md` | `history()` 仅 10s cagg + 原始回退，`minutes` 无上限（`main.py:278`）；回收后加 `robot_history_1h` + 路由 + 上限 |
 
 > R-04/05/06 为编号空档：历史上预留给「前端构建优化 / 告警抑制 / Prometheus 指标接入」，
 > 但 C1(#62)/C2/C3 已在 `STATUS.md` 标注完成，故这三份规格**未单独成稿**。如需补建，
@@ -76,8 +104,8 @@
 
 | 编号 | 主题 | 状态 | 阻塞 |
 |---|---|---|---|
-| **R-11** | 业务 Grafana 看板（robot_backend_*/robot_alert_* 可视化） | ✅ 规格已写，待 push + codebuddy 执行 | 无（纯新增 JSON，低风险） |
-| **R-12** | `/history` 长期趋势查询（小时级下采样） | ✅ 规格已写，待 push + codebuddy 执行 | 无（改 `init.sql`+`main.py`，中风险，R-03 回归护栏为硬门槛） |
+| **R-11** | 业务 Grafana 看板（robot_backend_*/robot_alert_* 可视化） | ✅ **已回收**（PR #118→`2327ec2`，#117 关） | 无；V3/V4 需 docker 栈复验（本机无 docker） |
+| **R-12** | `/history` 长期趋势查询（小时级下采样） | ✅ **已回收**（PR #120→`f2969746`，#119 关；e2e-30k-landing 真绿） | 无（改 `init.sql`+`main.py`，中风险，R-03 回归护栏为硬门槛，已实证守住） |
 | R-10 | C4 GitHub 同步端到端验证 | ⏳ 规格在 `R-10-cnb-github-sync.md` | **需用户备 GitHub PAT（只写 `robot-monitor`）+ 建 CNB 密钥仓库 `flow.237/RobotMonitor-secrets`**；本地无法执行 |
 
 > 其余 backlog（G-1~G-7、C1~C3、A1~A3）经 `STATUS.md` 对账 + 代码实证均已收口或转为已落地规格。
