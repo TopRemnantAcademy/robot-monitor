@@ -1,0 +1,40 @@
+{
+  "probe1_import_without_key": "ImportError: cannot import name 'DEFAULT_CLIENT' from 'agentverse.llms.openai' (/tmp/agentverse_probe/agentverse/llms/openai.py)",
+  "probe2_construct": {
+    "constructed": 100,
+    "seconds": 0.002,
+    "agent_class": "ConversationAgent",
+    "llm_class": "OpenAIChat"
+  },
+  "probe3_message": {
+    "message_keys": [
+      "content",
+      "receiver",
+      "sender",
+      "sender_agent",
+      "tool_response"
+    ],
+    "telemetry_field_hit": [],
+    "has_telemetry_value": false
+  },
+  "mock_fleet_fields": [
+    "battery_pct",
+    "battery_temp",
+    "error_code",
+    "joint_positions",
+    "joint_temperatures",
+    "joint_torques",
+    "max_joint_temp",
+    "orient_w",
+    "orient_x",
+    "orient_y",
+    "orient_z",
+    "pos_x",
+    "pos_y",
+    "pos_z",
+    "robot_id",
+    "status_code",
+    "ts"
+  ],
+  "verdict": "loadable-but-not-telemetry"
+}

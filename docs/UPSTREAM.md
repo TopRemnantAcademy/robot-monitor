@@ -72,7 +72,14 @@
 | **benfred/py-spy**（sparse README） | `b870defa` | 36 KB | **压测期火焰图（需 SYS_PTRACE）** |
 | **pgbackrest/pgbackrest** | `ad72e581` | 19 MB | **备份配置契约（未接线）** |
 | **minio/minio** | `7a2a2a2c` | 40 MB | 备份目标物化存储（备选） |
-| **OpenBMB/AgentVerse** | `f90c4bd9` | 31 MB | 多机器人任务求解框架（LLM，备选） |
+| **OpenBMB/AgentVerse** | `f90c4bd9` | 31 MB | 多机器人任务求解框架（LLM，**G-7 已评估未采纳**） |
+
+> ⚠️ **AgentVerse 判定（Issue #114 / G-7）**：实测为 LLM 文本对话框架，`BaseAgent` 强制 `llm: BaseLLM`
+> （`agentverse/agents/base.py:21`），`step()` 返回自然语言 `Message`，**不产出** `mock_fleet` 的遥测数值。
+> 无 `OPENAI_API_KEY` 时连 `import agentverse` 都会因 `DEFAULT_CLIENT` 未定义而崩。
+> **不引入**：其依赖钉 `pydantic==1.10.7` / `openai==1.1.0` / `fastapi==0.95.1`，与本仓 pydantic v2 栈冲突；
+> 且 10Hz × 100 台的 LLM 往返延迟数量级不符。任务级仿真由 `simulator/task_sim.py` 承担。
+> 完整实证（原始报错 + JSON 报告）见 `docs/agentverse-verification/README.md`。 |
 
 ## 4. 明确**不**纳入
 

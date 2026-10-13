@@ -67,3 +67,27 @@ python simulator/task_sim.py --scenario fault --robots 12 --broker localhost --p
 验收证据：`--no-broker` 模式导出 60s 遥测并计算 Pearson 相关，断言至少一对机器人
 指标序列显著相关（|r| ≥ 0.3），退出码 0=通过 / 2=未达标。实测：pipeline r≈−0.54（相邻工位反相关），
 fault r≈+0.99（中枢-邻居正相关）。输出仍走 MQTT（topic/payload 与 mock_fleet 完全一致）。
+
+
+## AgentVerse 驱动能力探针（Issue #114 / G-7）
+
+G-7 曾计划用 AgentVerse 驱动本模拟器跑 100 台任务级仿真。**实测判定不可行**：
+AgentVerse 是 LLM 文本对话框架，`step()` 返回自然语言 `Message`，不产出遥测数值。
+探针脚本保留在此，供复现与后续复核：
+
+```bash
+# 前置：clone AgentVerse（物料不随本仓交付）+ 装依赖（aliyun 镜像）
+git clone --depth 1 https://github.com/OpenBMB/AgentVerse /tmp/agentverse_probe
+pip install -i https://mirrors.aliyun.com/pypi/simple/ \
+    numpy "openai==1.1.0" "httpx==0.25.0" colorama colorlog \
+    py3langid "tiktoken==0.5.1" rapidfuzz "langchain==0.0.157" scikit-learn astunparse
+
+# 三探针：import gate / 构造 100 agent / step 产物是否命中遥测契约
+python simulator/agentverse_probe/verify_agentverse.py --av-root /tmp/agentverse_probe
+
+# 对照实验：给一个可用的本地 LLM，看是否就产遥测（结论：仍不产）
+bash simulator/agentverse_probe/verify_with_local_llm.sh
+```
+
+完整实证报告见 [`../docs/agentverse-verification/README.md`](../docs/agentverse-verification/README.md)。
+任务级仿真由 `task_sim.py` 承担，其验收测试为 `tests/test_task_sim_harness.py`。
