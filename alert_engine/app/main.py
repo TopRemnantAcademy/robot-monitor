@@ -41,7 +41,7 @@ from app.rules.offline import OfflineRule
 from app.rules.base import Alert
 from app import metrics
 from app.notifiers import build_notifier
-from app.store import load_online_state, save, update_online
+from app.store import load_online_state, save, save_suppressed, update_online
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -193,6 +193,13 @@ async def emit(alert: Alert) -> None:
             record.as_log_fields() if record is not None
             else f"reason=unknown robot={alert.robot_id} target={alert.rule_id}(sev{alert.severity})",
         )
+        # 订单 35：把抑制凭证**落库**（不推 WS、不通知），使 `GET /alerts` 可查。
+        # 订单 30 的"不静默丢弃"此前只到日志与指标为止 —— 告警台看不到被压制的行，
+        # 值班员得换到日志系统才能回答"这台机器当时还报了什么"。
+        # 旁路语义：落库失败只记指标+日志（见 store.save_suppressed），不影响主链路；
+        # 与 `save()` 一样 spawn 成后台任务，不阻塞消费线。
+        if record is not None:
+            spawn(save_suppressed(alert, record))
         return
     window = DEDUP_WINDOW.get(alert.rule_id, 60)
     if await should_emit(alert, window):

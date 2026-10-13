@@ -75,6 +75,17 @@ ON CONFLICT (robot_id) DO NOTHING;
 --      ALTER TABLE robot_alert ADD COLUMN escalated BOOLEAN NOT NULL DEFAULT FALSE;
 --    本机已在纯 PG15.19 上实测该语句（见 PR「实测」章节）；ack_by/ack_at
 --    由订单 19 加过，本单**不重复 ADD COLUMN**。
+--
+--    订单 35 追加 suppressed / suppressed_by（抑制标记，全栈贯通）：
+--      ALTER TABLE robot_alert ADD COLUMN suppressed BOOLEAN NOT NULL DEFAULT FALSE;
+--      ALTER TABLE robot_alert ADD COLUMN suppressed_by TEXT;
+--    背景：订单 30 落地了抑制「判定与记录」（InhibitionRecord + WARNING 日志 +
+--    robot_alert_suppressed_total 指标），但被抑制的告警**没有写库**，
+--    于是 `GET /alerts` 永远查不到它 —— 值班员只能 grep 日志。
+--    本单把「被压制的那条」也落库并置 suppressed=TRUE，使抑制在 REST 契约里可查、
+--    前端可标「已抑制」。**不改变抑制判定语义**（订单 30 的「不静默丢弃」硬约束反而是靠
+--    这一步才真正闭环：`InhibitionRecord` 在生产路径上原本无人落库）。
+--    存量库补迁移时上面两条 ALTER 即可（DEFAULT FALSE 保证历史行语义不变）。
 CREATE TABLE IF NOT EXISTS robot_alert (
     time      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     -- alert_id 紧跟分区列 time：列序与 ORM 声明序、PK 序三者一致，便于逐列比对。
@@ -90,6 +101,15 @@ CREATE TABLE IF NOT EXISTS robot_alert (
     -- escalated：severity=3 且超时未 ack 时置 TRUE（订单 17 升级闭环）。
     -- 由 alert_engine/app/escalation.py 的 ticker 写入；前端据此显示「⚠ 已升级」。
     escalated BOOLEAN     NOT NULL DEFAULT FALSE,
+    -- suppressed：本条告警**被抑制**（订单 35）。订单 30 的 suppress_record 把它连同
+    -- 可追溯凭证一起写入，此前只写日志与指标、不落库，故 REST 契约查不到。
+    -- 语义：TRUE = 已判定被压制（不推 WS、不通知）；但**行保留**，可查可审计。
+    suppressed    BOOLEAN NOT NULL DEFAULT FALSE,
+    -- suppressed_by：压制它的**根因规则**（如 offline / motor_temp）。
+    -- 与 suppressed 成对：置 TRUE 时必非空。TEXT 而非外键 —— 规则是代码里的资产
+    -- （app/rules/*.py 的 rule_id），没有对应的规则表可引用。
+    -- 为什么不把源 severity / reason 也落列：那是 `detail` JSONB 的职责（无 schema 漂移风险）。
+    suppressed_by TEXT,
     -- 主键必须含分区列 time（TimescaleDB 硬性要求）
     PRIMARY KEY (time, alert_id)
 );
@@ -275,6 +295,11 @@ CREATE INDEX IF NOT EXISTS idx_alert_ack ON robot_alert (ack) WHERE ack = FALSE;
 -- 谓词与 escalation.py 的 WHERE 逐字对齐，否则索引不被使用（部分索引只在谓词蕴含时命中）。
 CREATE INDEX IF NOT EXISTS idx_alert_escalation ON robot_alert (time)
     WHERE ack = FALSE AND escalated = FALSE AND severity = 3;
+-- 抑制视图（订单 35）：`GET /alerts?suppressed=true|false` 的窄集索引。
+-- 与 idx_alert_ack 同理用部分索引：被抑制行是少数（只有同机存在更高 severity 时才产生），
+-- 且默认视图查 `suppressed = FALSE`，它才是热路径。
+CREATE INDEX IF NOT EXISTS idx_alert_suppressed ON robot_alert (time DESC)
+    WHERE suppressed = TRUE;
 
 
 -- 8. 认证用户表（订单 15：fastapi-users + 两级 RBAC）

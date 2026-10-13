@@ -43,21 +43,27 @@ def _normalize(row: dict[str, Any]) -> dict[str, Any]:
     return row
 
 # 显式列出列名（不用 SELECT *）：列序即响应字段序，且增列时不会悄悄改变契约。
+# 订单 35 追加 suppressed / suppressed_by（与 init.sql、models.py 列序一致）。
 _COLS = (
     "alert_id, time, robot_id, rule_id, severity, message, detail, "
-    "ack, ack_at, ack_by, escalated"
+    "ack, ack_at, ack_by, escalated, suppressed, suppressed_by"
 )
 
 
 def _build_filters(
     ack: bool | None,
     escalated: bool | None,
+    suppressed: bool | None,
     robot_id: str | None,
 ) -> tuple[str, list[Any]]:
     """构造 WHERE 子句与参数。用 $n 占位符，杜绝字符串拼接注入。
 
     参数从 $1 起连续编号，调用方在此之后追加 limit/offset 参数时
     必须用 `len(params) + 1` 续号 —— 见 `list_alerts`。
+
+    `suppressed` 是**三态**（True/False/None=全部），与 ack/escalated 同构：
+    默认视图传 `false` 把被抑制的行挡在未确认流之外；打开「显示已抑制」开关后
+    前端改传 `true` 另拉一页（见 AlertLogTable 的双查询实现）。
     """
     clauses: list[str] = []
     params: list[Any] = []
@@ -68,6 +74,9 @@ def _build_filters(
     if escalated is not None:
         params.append(escalated)
         clauses.append(f"escalated = ${len(params)}")
+    if suppressed is not None:
+        params.append(suppressed)
+        clauses.append(f"suppressed = ${len(params)}")
     if robot_id is not None:
         params.append(robot_id)
         clauses.append(f"robot_id = ${len(params)}")
@@ -80,6 +89,7 @@ async def list_alerts(
     *,
     ack: bool | None,
     escalated: bool | None,
+    suppressed: bool | None,
     robot_id: str | None,
     limit: int,
     offset: int,
@@ -91,8 +101,10 @@ async def list_alerts(
     - 同 `time` 可能有多条（一轮 tick 内多规则各报一条，见 init.sql:65 说明），
       故再按 `alert_id DESC` 兜底 —— 否则分页边界处顺序不稳定，
       「第 1 页最后一条」可能在下一页重复出现（经典的分页漂移）。
+
+    过滤条件全部由 `_build_filters` 拼装 —— 本函数只负责分页与 total 对账。
     """
-    where, params = _build_filters(ack, escalated, robot_id)
+    where, params = _build_filters(ack, escalated, suppressed, robot_id)
 
     list_sql = (
         f"SELECT {_COLS} FROM robot_alert{where} "

@@ -127,9 +127,25 @@ export interface RobotAlert {
   ack?: boolean;
   ack_at?: string | null;
   ack_by?: string | null;
+  /**
+   * 是否被抑制（订单 35）。
+   *
+   * 恒为 false/undefined 就是**对**的：抑制判定发生在 alert_engine 的 `emit()` 里，
+   * 被抑制的告警**不 PUBLISH** `robot:alerts`（那正是抑制的语义：不推给看板实时流）。
+   * 这个字段留在 WS 类型里只为对齐 `AlertApiItem` 的行模型，值永远取自 REST。
+   */
+  suppressed?: boolean;
+  /** 压制它的根因规则（订单 35）：offline / motor_temp / ... */
+  suppressed_by?: string | null;
 }
 
-/** 告警筛选（订单 17 T4）：全部 / 未确认 / 已升级。 */
+/** 告警筛选（订单 17 T4）：全部 / 未确认 / 已升级。
+ *
+ * 订单 35 说明：「已抑制」**刻意不做成第四个筛选项**。
+ * 抑制的正交维度是「显示 / 不显示」而不是「看哪一类」——做成 tab 会让
+ * 「未确认 ∪ 已抑制」这类组合无法表达。故它落在 `AlertLogTable` 的独立开关上
+ * （见该组件的 `showSuppressed`），筛选 tab 仍是三选一。
+ */
 export type AlertFilter = 'all' | 'unacked' | 'escalated';
 
 /** `GET /alerts` 单条（与后端 app/alerts/schemas.py:AlertItem 逐字段对齐）。 */
@@ -145,6 +161,16 @@ export interface AlertApiItem {
   ack_at: string | null;
   ack_by: string | null;
   escalated: boolean;
+  /**
+   * 是否被抑制（订单 35，来自 `GET /alerts?suppressed=…`）。
+   *
+   * 「已抑制」= 这条告警当时被同机更高 severity 的根因告警（或整机离线）压住，
+   * 只落库、没出流。它**不是**"已经不用管了"——根因恢复后原告警会重新报出来，
+   * 故前端只降视觉权重、不隐藏。
+   */
+  suppressed: boolean;
+  /** 压制它的根因规则；`suppressed=false` 时为 null。 */
+  suppressed_by: string | null;
 }
 
 /** `GET /alerts` 分页响应（app/alerts/schemas.py:AlertPage）。 */

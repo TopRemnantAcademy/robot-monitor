@@ -145,6 +145,74 @@ def test_ack_missing_alert_404(client, admin_token):
     assert client.post("/alerts/999999999/ack", headers=h, json={}).status_code == 404
 
 
+def test_suppressed_filter_and_field(client, admin_token):
+    """订单 35：`GET /alerts?suppressed=…` 三态过滤 + 响应带 suppressed 字段。
+
+    需要真实 PostgreSQL —— 本文件顶部已 skipif（未提供 TEST_DATABASE_URL 时不伪装通过）。
+    断言的语义：
+      - 省略 suppressed → 返回全集（契约刻意保持中立，默认值一变就会静默改变既有调用方行为）；
+      - suppressed=false → 排除被抑制行（前端默认视图的口径）；
+      - suppressed=true  → 只返回被抑制行，且 suppressed_by 指向根因规则。
+    """
+    tag = f"{RUN_TAG}-sup"
+    import asyncio
+
+    import asyncpg
+
+    async def _seed() -> None:
+        conn = await asyncpg.connect(DSN)
+        try:
+            await conn.execute(
+                """INSERT INTO robot_alert
+                       (time, robot_id, rule_id, severity, message, detail, suppressed, suppressed_by)
+                   VALUES (NOW(), 'humanoid-099', $1, 3, $2, '{}'::jsonb, TRUE, 'offline')""",
+                tag, f"{tag} 被 offline 压住",
+            )
+            await conn.execute(
+                """INSERT INTO robot_alert
+                       (time, robot_id, rule_id, severity, message, detail, suppressed, suppressed_by)
+                   VALUES (NOW(), 'humanoid-099', $1, 2, $2, '{}'::jsonb, FALSE, NULL)""",
+                tag, f"{tag} 正常告警",
+            )
+        finally:
+            await conn.close()
+
+    asyncio.run(_seed())
+    h = {"Authorization": f"Bearer {admin_token}"}
+
+    # 按本次 RUN_TAG 唯一化 rule_id 并客户端过滤：同一 robot_id 重跑会累积旧行，
+    # 直接断言 len(items)==2 会变成「跑第二次就红」的假失败（本机实测踩到过）。
+    def _mine(items: list) -> list:
+        return [i for i in items if i["rule_id"] == tag]
+
+    r = client.get(f"/alerts?robot_id=humanoid-099&limit=50", headers=h)
+    assert r.status_code == 200, r.text
+    items = _mine(r.json()["items"])
+    assert len(items) == 2, f"省略 suppressed 时应返回全集，实际 {items}"
+    # 新字段必须出现在响应里（不是只在 DB 里）
+    suppressed_row = next(i for i in items if i["suppressed"] is True)
+    normal_row = next(i for i in items if i["suppressed"] is False)
+    assert suppressed_row["suppressed_by"] == "offline"
+    assert normal_row["suppressed_by"] is None
+
+    r2 = client.get(f"/alerts?robot_id=humanoid-099&suppressed=false&limit=50", headers=h)
+    assert r2.status_code == 200, r2.text
+    assert [i["suppressed"] for i in _mine(r2.json()["items"])] == [False]
+    # total 必须随筛选条件变化（不只是 items 被截）—— 用同条件 count 交叉验证，
+    # 避免与库里其他 tag 的行相互干扰。
+    total_all = client.get("/alerts?robot_id=humanoid-099&limit=1", headers=h).json()["total"]
+    total_ok = client.get(
+        "/alerts?robot_id=humanoid-099&suppressed=false&limit=1", headers=h
+    ).json()["total"]
+    assert total_ok < total_all, "suppressed=false 的 total 必须小于全集 total"
+
+    r3 = client.get(f"/alerts?robot_id=humanoid-099&suppressed=true&limit=50", headers=h)
+    assert r3.status_code == 200, r3.text
+    mine_sup = _mine(r3.json()["items"])
+    assert [i["suppressed"] for i in mine_sup] == [True]
+    assert mine_sup[0]["suppressed_by"] == "offline"
+
+
 def test_pagination_offset_effective(client, admin_token):
     """GET /alerts?ack=false&limit=1&offset=N 的 offset 真正生效。"""
     ids: list = []

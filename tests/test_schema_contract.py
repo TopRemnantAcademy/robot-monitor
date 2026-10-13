@@ -236,6 +236,52 @@ def test_alert_ack_fields_present() -> None:
         assert col in init["cols"], f"init.sql robot_alert 缺列 {col}"
 
 
+def test_alert_suppressed_fields_present_on_both_sides() -> None:
+    """⑥ 订单 35：suppressed / suppressed_by 两侧都在，且 ORM 默认值为 FALSE。
+
+    为什么这条必须存在（不是 `test_alert_columns_match_init_sql_exactly` 的重复）：
+    后者只比**列集合**。suppressed 若在 ORM 里被写成 `default=True` 或 nullable，
+    列集合照样相等，但库里的语义就反了 —— 每一条新告警都变成"已抑制"，
+    告警流会整体静默。这里把默认值与可空性钉死。
+
+    存量库迁移同样靠 `DEFAULT FALSE`：历史行语义必须保持不变。
+    """
+    init = parse_init_table(INIT_SQL.read_text(encoding="utf-8"), "robot_alert")
+    assert init is not None
+    for col in ("suppressed", "suppressed_by"):
+        assert col in init["cols"], f"init.sql robot_alert 缺列 {col}"
+
+    # init.sql：suppressed 非空 + 显式 DEFAULT FALSE；suppressed_by 可空（未抑制时为 NULL）
+    sql = INIT_SQL.read_text(encoding="utf-8")
+    assert re.search(
+        r"suppressed\s+BOOLEAN\s+NOT NULL\s+DEFAULT FALSE", sql
+    ), "init.sql 的 suppressed 必须是 BOOLEAN NOT NULL DEFAULT FALSE（历史行语义不变）"
+    assert re.search(r"suppressed_by\s+TEXT\b", sql), "init.sql 的 suppressed_by 应为可空 TEXT"
+
+    # ORM：同一语义。SQLAlchemy 编译出的 DDL 对 `server_default` 为空的列
+    # **不会**输出 DEFAULT 子句（本机实测：`suppressed BOOLEAN NOT NULL`），
+    # 默认值由 ORM 的 Python 侧 `default=False` 提供，而 init.sql 的 DEFAULT FALSE
+    # 兜住直连 SQL 的写入。故这里只能钉「NOT NULL + 非默认 True」＋「源码里
+    # default=False」，而不是期待 DDL 出现 DEFAULT 字样。
+    ddl = compile_orm_ddl(MODELS_PY.read_text(encoding="utf-8"), "RobotAlert")
+    assert re.search(r"suppressed\s+BOOLEAN NOT NULL", ddl), (
+        f"ORM suppressed 列属性漂移：\n{ddl}"
+    )
+    assert not re.search(r"suppressed\s+BOOLEAN[^,]*DEFAULT true", ddl, re.I), (
+        f"ORM suppressed 默认值不得为 True（会让所有新告警都变'已抑制'）：\n{ddl}"
+    )
+    block = _class_block(MODELS_PY.read_text(encoding="utf-8"), "robot_alert")
+    assert block is not None
+    assert re.search(
+        r"suppressed:\s*Mapped\[bool\]\s*=\s*mapped_column\(\s*Boolean,\s*nullable=False,\s*default=False\s*\)",
+        block,
+    ), "ORM suppressed 必须显式 default=False（与 init.sql 的 DEFAULT FALSE 对齐）"
+    assert re.search(
+        r"suppressed_by:\s*Mapped\[str \| None\]\s*=\s*mapped_column\(\s*Text\s*\)",
+        block,
+    ), "ORM suppressed_by 应为可空 Text"
+
+
 def main() -> int:
     checks = [
         ("init.sql 存在", test_init_sql_exists),
@@ -246,6 +292,7 @@ def main() -> int:
         ("无 __mapper_args__ 权宜之计", test_alert_no_mapper_args_workaround),
         ("两侧列集合逐列相等", test_alert_columns_match_init_sql_exactly),
         ("ack_at / ack_by 已建字段", test_alert_ack_fields_present),
+        ("suppressed / suppressed_by 双侧一致（订单 35）", test_alert_suppressed_fields_present_on_both_sides),
     ]
     failed = 0
     for name, fn in checks:

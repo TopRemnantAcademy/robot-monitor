@@ -181,3 +181,49 @@ def test_suppressed_alert_not_saved_nor_registered(engine):
 
     assert engine.emitted == []
     assert "battery_low" not in engine.active_alerts.snapshot()["humanoid-001"]
+
+
+# ================================================================ C. 落库闭环（订单 35）
+
+def test_emit_persists_inhibition_record(engine, monkeypatch):
+    """被抑制时 `emit()` 必须调 `save_suppressed`（把凭证落库，order 35）。
+
+    订单 30 只做到"日志 + 指标"，`GET /alerts` 查不到被压制的行。
+    这条钉住 wiring：抑制分支必须 spawn 一次落库 —— 且**不是** `save()`
+    （后者会 PUBLISH，等于把抑制退化成放行）。
+    """
+    import app.main as m
+
+    persisted: list = []
+
+    async def fake_save_suppressed(alert, record):
+        persisted.append((alert, record))
+
+    monkeypatch.setattr(m, "save_suppressed", fake_save_suppressed)
+
+    engine.active_alerts.register(_alert(rule_id="motor_temp", severity=3))
+    run(engine.emit(_alert(rule_id="battery_low", severity=2)))
+
+    assert engine.emitted == [], "被抑制的告警不得走 save()/发布路径"
+    assert len(persisted) == 1, "抑制分支必须落库一次（订单 35）"
+    alert, record = persisted[0]
+    assert alert.rule_id == "battery_low"
+    assert record.source_rule == "motor_temp"
+    assert record.reason == "severity"
+
+
+def test_emit_does_not_persist_when_not_inhibited(engine, monkeypatch):
+    """反向护栏：放行的告警不应**额外**产生一条抑制记录（否则库里翻倍）。"""
+    import app.main as m
+
+    persisted: list = []
+
+    async def fake_save_suppressed(alert, record):
+        persisted.append((alert, record))
+
+    monkeypatch.setattr(m, "save_suppressed", fake_save_suppressed)
+
+    run(engine.emit(_alert(rule_id="battery_low", severity=2)))
+
+    assert [a.rule_id for a in engine.emitted] == ["battery_low"]
+    assert persisted == [], "未抑制的告警不该有抑制落库"

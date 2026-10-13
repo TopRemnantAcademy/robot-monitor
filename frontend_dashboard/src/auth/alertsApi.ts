@@ -26,6 +26,14 @@ export interface FetchAlertsParams {
   filter?: AlertFilter;
   limit?: number;
   offset?: number;
+  /**
+   * 抑制维度过滤（订单 35）：
+   *   true  → 只拉被抑制的；false → 排除被抑制的；省略 → 不传该参数（后端返回全集）。
+   *
+   * 与 `filter` 是两个正交维度（后者是"看哪一类"，前者是"要不要含被抑制的"），
+   * 故不合并进 `AlertFilter` 联合类型 —— 否则「未确认 + 已抑制」无法表达。
+   */
+  suppressed?: boolean;
 }
 
 /**
@@ -39,6 +47,7 @@ export async function fetchAlerts({
   filter = 'all',
   limit = 20,
   offset = 0,
+  suppressed,
 }: FetchAlertsParams = {}): Promise<AlertPage> {
   const q = filterQuery(filter);
   const params = new URLSearchParams();
@@ -46,6 +55,9 @@ export async function fetchAlerts({
     const [k, v] = q.split('=');
     params.set(k, v);
   }
+  // `suppressed=undefined` 时**不写这个 key**：URLSearchParams.set 会把 undefined
+  // 序列化成字面量 "undefined"，后端 `Query(default=None, ...)` 收到它 → 422。
+  if (suppressed !== undefined) params.set('suppressed', String(suppressed));
   params.set('limit', String(limit));
   params.set('offset', String(offset));
 

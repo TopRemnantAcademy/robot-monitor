@@ -159,10 +159,10 @@ async def v5_pagination(conn: asyncpg.Connection) -> None:
 
     # ack=false 应只剩 2 条
     page1, total_unacked = await repository.list_alerts(
-        ack=False, escalated=None, robot_id="humanoid-010", limit=1, offset=0
+        ack=False, escalated=None, suppressed=None, robot_id="humanoid-010", limit=1, offset=0
     )
     page2, _ = await repository.list_alerts(
-        ack=False, escalated=None, robot_id="humanoid-010", limit=1, offset=1
+        ack=False, escalated=None, suppressed=None, robot_id="humanoid-010", limit=1, offset=1
     )
     check("ack=false 的 total=2", total_unacked == 2, str(total_unacked))
     check("limit=1 只返回 1 条", len(page1) == 1, str(len(page1)))
@@ -172,7 +172,7 @@ async def v5_pagination(conn: asyncpg.Connection) -> None:
 
     # ack 全量：total 应是 5
     _, total_all = await repository.list_alerts(
-        ack=None, escalated=None, robot_id="humanoid-010", limit=50, offset=0
+        ack=None, escalated=None, suppressed=None, robot_id="humanoid-010", limit=50, offset=0
     )
     check("不带 ack 过滤时 total=5", total_all == 5, str(total_all))
 

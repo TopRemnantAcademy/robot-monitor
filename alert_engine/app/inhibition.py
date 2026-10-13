@@ -64,6 +64,25 @@ class InhibitionRecord:
             f"source={self.source_rule}(sev{self.source_severity})"
         )
 
+    def as_detail_fields(self) -> dict:
+        """转成可入 `robot_alert.detail`(JSONB) 的取证字段（订单 35）。
+
+        为什么凭证要进 detail 而不是加列：
+        `suppressed_by` 列只承载"谁压的"这一个**查询/筛选用**的标量；
+        severity 对比与 reason 是**取证信息**（人要读、不参与过滤），
+        塞进已有 JSONB 列可让 Schema 面保持最小 —— AGENTS.md §4 要求
+        Schema 改动同步 init.sql 与 ORM，少一列就少一处漂移面。
+
+        键名与 `as_log_fields()` 同构（`suppressed_*` 前缀），便于日志↔库里对照。
+        """
+        return {
+            "suppressed_reason": self.reason,
+            "suppressed_source_rule": self.source_rule,
+            "suppressed_source_severity": self.source_severity,
+            "suppressed_target_severity": self.target_severity,
+            "suppressed_ts_ms": self.ts_ms,
+        }
+
 
 class ActiveAlertRegistry:
     """进程内「每台机器人当前活跃告警」登记簿。

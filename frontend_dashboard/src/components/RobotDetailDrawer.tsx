@@ -157,6 +157,11 @@ export default function RobotDetailDrawer() {
 
   // 该机器人最近告警：REST 是权威视图（含 ack/escalated 事后状态，WS 只推增量）。
   // 后端 /alerts 暂无 robot_id 查询参数，故拉最近 200 条（_MAX_LIMIT=500 内）客户端过滤。
+  //
+  // 订单 35：这条查询**包含**被抑制项（`suppressed` 刻意不传）。
+  // 与 AlertLogTable 默认排除的做法不同，理由是本区的用途 ——
+  // 它是"排障时看这台机器到底报了些什么"，被压住的行正是最需要看见的那一批
+  //（它们解释了"为什么没弹出来"）。所以这里要全集，并在行内标「已抑制」。
   const alertsQuery = useQuery({
     queryKey: ['robot-alerts', selectedRobotId],
     queryFn: () => fetchAlerts({ limit: 200 }),
@@ -555,6 +560,22 @@ export default function RobotDetailDrawer() {
                     {a.escalated ? (
                       <span className="shrink-0" style={{ ...FONT.metric, color: COLORS.statusWarning }}>
                         已升级
+                      </span>
+                    ) : null}
+                    {a.suppressed ? (
+                      // 订单 35：与 AlertLogTable 同一措辞、同一配色 token（textSecondary，
+                      // 不是 statusFault —— 抑制不是一次新故障）。title 给根因规则，
+                      // 让"为什么没弹出来"在本区就能回答。
+                      <span
+                        className="shrink-0"
+                        style={{ ...FONT.metric, color: COLORS.textSecondary }}
+                        title={
+                          a.suppressed_by
+                            ? `被更高等级告警抑制（根因规则：${ruleLabel(a.suppressed_by)}）`
+                            : '被更高等级告警抑制'
+                        }
+                      >
+                        ⊘ 已抑制
                       </span>
                     ) : null}
                     {a.ack ? (

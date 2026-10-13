@@ -25,7 +25,13 @@ class AckRequest(BaseModel):
 
 
 class AlertItem(BaseModel):
-    """`GET /alerts` 列表项。字段与 `robot_alert` 列一一对应（含订单 17 的 escalated）。"""
+    """`GET /alerts` 列表项。字段与 `robot_alert` 列一一对应（含订单 17 的 escalated）。
+
+    订单 35 追加 `suppressed` / `suppressed_by`：被抑制的告警**也在这张表里**，
+    前端据此在行内标「已抑制」（降视觉权重而非隐藏行）。这是订单 30
+    「抑制不等于静默丢弃」在 REST 契约上的落点 —— 抑制的判定与凭证仍在
+    alert_engine，这里只把它的产物读出来。
+    """
 
     alert_id: int
     time: datetime
@@ -38,6 +44,11 @@ class AlertItem(BaseModel):
     ack_at: datetime | None = None
     ack_by: str | None = None
     escalated: bool
+    #: 本条是否被抑制（订单 35）。TRUE = 只落库不出流：没有推送、没有通知。
+    suppressed: bool
+    #: 压制它的根因规则（offline / motor_temp / ...）。与 suppressed 成对：
+    #: suppressed=TRUE 时必非空，FALSE 时为 None。
+    suppressed_by: str | None = None
 
 
 class AlertPage(BaseModel):

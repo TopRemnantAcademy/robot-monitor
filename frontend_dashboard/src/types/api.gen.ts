@@ -4,6 +4,80 @@
  */
 
 export interface paths {
+    "/alerts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Alerts
+         * @description 分页查询告警（解 H5）。
+         *
+         *     只读，viewer 起可访问 —— 与 `GET /robots` 权限一致（看板必须所有人都能看）。
+         *     典型用法：前端筛选「未确认」= `GET /alerts?ack=false&limit=50&offset=0`。
+         *
+         *     `suppressed`（订单 35）刻意是**可选**参数，省略时返回全集（含被抑制行）。
+         *     为什么不把「排除已抑制」设成默认：默认值一变，既有调用方（前端告警流、
+         *     RobotDetailDrawer 的 200 条拉取）的行为会在没人改代码的情况下静默改变。
+         *     把「默认视图要不要藏被抑制行」交给**调用方显式表达**，契约本身保持中性。
+         *
+         *     注意这与「前端默认不进未确认流」是两件事：前者是 API 的中立性，
+         *     后者是 `AlertLogTable` 的展示决策（默认 `suppressed=false` + 一个开关）。
+         */
+        get: operations["list_alerts_alerts_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/alerts/{alert_id}/ack": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ack Alert
+         * @description 确认告警。**幂等**：重复确认返回 200 + changed=false，不报错、不覆盖首次确认人。
+         *
+         *     操作人（`ack_by`）只从 JWT 取，`body` 声明为 `AckRequest`（extra=forbid）
+         *     仅为拒绝伪造字段；其内容**不被读取**。
+         */
+        post: operations["ack_alert_alerts__alert_id__ack_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/alerts/{alert_id}/unack": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Unack Alert
+         * @description 撤回确认（误确认时用）。同样幂等：对未确认的告警再 unack 返回 changed=false。
+         */
+        post: operations["unack_alert_alerts__alert_id__unack_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/jwt/login": {
         parameters: {
             query?: never;
@@ -117,6 +191,9 @@ export interface paths {
         /**
          * List Robots
          * @description 100 台最新状态。只读端点：viewer 起可访问，返回体与加鉴权前逐字段一致。
+         *
+         *     ISSUE #77：返回体新增 `is_online` / `last_seen` 两个可选字段，并**恒定返回 100 台**
+         *     （停报的机器人回落为离线占位，而不是从列表里消失）。
          */
         get: operations["list_robots_robots_get"];
         put?: never;
@@ -209,6 +286,98 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * AckRequest
+         * @description 确认/撤回的请求体：**必须为空**。
+         *
+         *     存在这个模型只有一个目的：让 FastAPI 在客户端多传字段时报 422 而不是静默忽略。
+         *     `extra="forbid"` 挡住的最重要一例就是 `ack_by` —— 前端若能传成功，
+         *     就等于审计列可伪造（派工单禁止项 2）。声明成模型并设 forbid 后，
+         *     `POST /alerts/{id}/ack {"ack_by":"x"}` 返回 422（HTTP 测试已覆盖）。
+         */
+        AckRequest: Record<string, never>;
+        /**
+         * AckResult
+         * @description 确认/撤回结果。
+         *
+         *     `changed=False` 表示**幂等命中**（目标行已是目标状态），不是错误。
+         *     派工单要求「重复 ack 幂等（不报错、不重复写）」，故用 200 + changed=false
+         *     表达，而不是 409。
+         *
+         *     `ack_at` / `ack_by` 回填**库中现值**，便于前端立即纠正本地乐观更新。
+         */
+        AckResult: {
+            /** Ack */
+            ack: boolean;
+            /** Ack At */
+            ack_at?: string | null;
+            /** Ack By */
+            ack_by?: string | null;
+            /** Alert Id */
+            alert_id: number;
+            /**
+             * Changed
+             * @description 是否真的改了状态（false = 幂等命中）
+             */
+            changed: boolean;
+        };
+        /**
+         * AlertItem
+         * @description `GET /alerts` 列表项。字段与 `robot_alert` 列一一对应（含订单 17 的 escalated）。
+         *
+         *     订单 35 追加 `suppressed` / `suppressed_by`：被抑制的告警**也在这张表里**，
+         *     前端据此在行内标「已抑制」（降视觉权重而非隐藏行）。这是订单 30
+         *     「抑制不等于静默丢弃」在 REST 契约上的落点 —— 抑制的判定与凭证仍在
+         *     alert_engine，这里只把它的产物读出来。
+         */
+        AlertItem: {
+            /** Ack */
+            ack: boolean;
+            /** Ack At */
+            ack_at?: string | null;
+            /** Ack By */
+            ack_by?: string | null;
+            /** Alert Id */
+            alert_id: number;
+            /** Detail */
+            detail?: Record<string, never> | null;
+            /** Escalated */
+            escalated: boolean;
+            /** Message */
+            message: string;
+            /** Robot Id */
+            robot_id: string;
+            /** Rule Id */
+            rule_id: string;
+            /** Severity */
+            severity: number;
+            /** Suppressed */
+            suppressed: boolean;
+            /** Suppressed By */
+            suppressed_by?: string | null;
+            /**
+             * Time
+             * Format: date-time
+             */
+            time: string;
+        };
+        /**
+         * AlertPage
+         * @description 分页响应。
+         *
+         *     `total` 是**同筛选条件下的总条数**（不受 limit/offset 影响），
+         *     前端据此算总页数；缺了它前端只能"翻到空页才知道到底了"。
+         */
+        AlertPage: {
+            /** Items */
+            items: components["schemas"]["AlertItem"][];
+            /** Limit */
+            limit: number;
+            /** Offset */
+            offset: number;
+            /** Total */
+            total: number;
+        };
         /** BearerResponse */
         BearerResponse: {
             /** Access Token */
@@ -355,6 +524,12 @@ export interface components {
              * @default 0
              */
             error_code: number;
+            /**
+             * Is Online
+             * @description 后端判定：距最后一次收到遥测是否在阈值内（ISSUE #77）
+             * @default false
+             */
+            is_online: boolean;
             /** Joint Positions */
             joint_positions: {
                 [key: string]: number;
@@ -367,6 +542,11 @@ export interface components {
             joint_torques: {
                 [key: string]: number;
             };
+            /**
+             * Last Seen
+             * @description 最后一次收到该机器人遥测的 epoch 秒；从未上报为 null
+             */
+            last_seen?: number | null;
             /** Max Joint Temp */
             max_joint_temp: number;
             /** Robot Id */
@@ -381,18 +561,6 @@ export interface components {
              * @default 0
              */
             ts: number;
-            /**
-             * Is Online
-             * @description 后端判定：距最后一次收到遥测是否在阈值内（ISSUE #77）
-             * @default false
-             */
-            is_online: boolean;
-            /**
-             * Last Seen
-             * @description 最后一次收到该机器人遥测的 epoch 秒；从未上报为 null
-             * @default null
-             */
-            last_seen: number | null;
         };
         /**
          * UserCreate
@@ -490,6 +658,116 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    list_alerts_alerts_get: {
+        parameters: {
+            query?: {
+                /** @description true/false 筛选确认状态；省略=全部 */
+                ack?: boolean | null;
+                /** @description true 只看已升级告警 */
+                escalated?: boolean | null;
+                /** @description true 只看已抑制 / false 排除已抑制；省略=全部（含已抑制） */
+                suppressed?: boolean | null;
+                /** @description 按机器人过滤 */
+                robot_id?: string | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    ack_alert_alerts__alert_id__ack_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                alert_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["AckRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AckResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    unack_alert_alerts__alert_id__unack_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                alert_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["AckRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AckResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     auth_jwt_login_auth_jwt_login_post: {
         parameters: {
             query?: never;

@@ -69,7 +69,8 @@ class RobotAlert(Base):
     - 因此**不再需要**映射级 `__mapper_args__` 权宜之计：ORM 身份与 DDL 同源，
       `metadata.create_all()` 不会与 init.sql 漂移。
     - ack_at / ack_by 由订单 19 建字段、订单 17 接 ack/unack 端点；
-      escalated 由订单 17 新增（severity=3 超时未确认的升级标记）。
+      escalated 由订单 17 新增（severity=3 超时未确认的升级标记）；
+      suppressed / suppressed_by 由订单 35 新增（抑制落库，使 REST 契约可查被压制的告警）。
     """
 
     __tablename__ = "robot_alert"
@@ -86,6 +87,12 @@ class RobotAlert(Base):
     ack_by: Mapped[str | None] = mapped_column(Text)
     # 订单 17：severity=3 且超时未 ack → TRUE。索引 idx_alert_escalation（init.sql:206）。
     escalated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # 订单 35：被抑制标记（TRUE = 已判定被压制，不推 WS 不通知，但行保留可查）。
+    # 列序、类型、默认值必须与 init.sql 的 robot_alert 逐列一致 ——
+    # tests/test_schema_contract.py 的 `init["cols"] == orm["cols"]` 会当场抓漂移。
+    suppressed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # 压制它的根因规则（offline / motor_temp / ...），与 suppressed 成对（TRUE 时必非空）。
+    suppressed_by: Mapped[str | None] = mapped_column(Text)
 
     # 显式声明 PK 列顺序 (time, alert_id)，与 init.sql 逐字一致。
     # 必要性（已实测）：SQLAlchemy 生成复合 PK 时会把 BIGSERIAL 列排到最前，

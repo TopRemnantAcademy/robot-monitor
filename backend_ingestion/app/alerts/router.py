@@ -54,6 +54,10 @@ def _subject(request: Request, user: RobotUser) -> str:
 async def list_alerts(
     ack: bool | None = Query(default=None, description="true/false 筛选确认状态；省略=全部"),
     escalated: bool | None = Query(default=None, description="true 只看已升级告警"),
+    suppressed: bool | None = Query(
+        default=None,
+        description="true 只看已抑制 / false 排除已抑制；省略=全部（含已抑制）",
+    ),
     robot_id: str | None = Query(default=None, description="按机器人过滤"),
     limit: int = Query(default=_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT),
     offset: int = Query(default=0, ge=0),
@@ -63,10 +67,19 @@ async def list_alerts(
 
     只读，viewer 起可访问 —— 与 `GET /robots` 权限一致（看板必须所有人都能看）。
     典型用法：前端筛选「未确认」= `GET /alerts?ack=false&limit=50&offset=0`。
+
+    `suppressed`（订单 35）刻意是**可选**参数，省略时返回全集（含被抑制行）。
+    为什么不把「排除已抑制」设成默认：默认值一变，既有调用方（前端告警流、
+    RobotDetailDrawer 的 200 条拉取）的行为会在没人改代码的情况下静默改变。
+    把「默认视图要不要藏被抑制行」交给**调用方显式表达**，契约本身保持中性。
+
+    注意这与「前端默认不进未确认流」是两件事：前者是 API 的中立性，
+    后者是 `AlertLogTable` 的展示决策（默认 `suppressed=false` + 一个开关）。
     """
     try:
         rows, total = await repository.list_alerts(
-            ack=ack, escalated=escalated, robot_id=robot_id, limit=limit, offset=offset
+            ack=ack, escalated=escalated, suppressed=suppressed,
+            robot_id=robot_id, limit=limit, offset=offset,
         )
     except Exception as exc:  # noqa: BLE001 —— DB 不可达时回 503 而非 500
         log.exception("list_alerts failed")

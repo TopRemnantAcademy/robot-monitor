@@ -1,6 +1,193 @@
 {
   "components": {
     "schemas": {
+      "AckRequest": {
+        "additionalProperties": false,
+        "description": "确认/撤回的请求体：**必须为空**。\n\n存在这个模型只有一个目的：让 FastAPI 在客户端多传字段时报 422 而不是静默忽略。\n`extra=\"forbid\"` 挡住的最重要一例就是 `ack_by` —— 前端若能传成功，\n就等于审计列可伪造（派工单禁止项 2）。声明成模型并设 forbid 后，\n`POST /alerts/{id}/ack {\"ack_by\":\"x\"}` 返回 422（HTTP 测试已覆盖）。",
+        "properties": {},
+        "title": "AckRequest",
+        "type": "object"
+      },
+      "AckResult": {
+        "description": "确认/撤回结果。\n\n`changed=False` 表示**幂等命中**（目标行已是目标状态），不是错误。\n派工单要求「重复 ack 幂等（不报错、不重复写）」，故用 200 + changed=false\n表达，而不是 409。\n\n`ack_at` / `ack_by` 回填**库中现值**，便于前端立即纠正本地乐观更新。",
+        "properties": {
+          "ack": {
+            "title": "Ack",
+            "type": "boolean"
+          },
+          "ack_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ack At"
+          },
+          "ack_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ack By"
+          },
+          "alert_id": {
+            "title": "Alert Id",
+            "type": "integer"
+          },
+          "changed": {
+            "description": "是否真的改了状态（false = 幂等命中）",
+            "title": "Changed",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "alert_id",
+          "ack",
+          "changed"
+        ],
+        "title": "AckResult",
+        "type": "object"
+      },
+      "AlertItem": {
+        "description": "`GET /alerts` 列表项。字段与 `robot_alert` 列一一对应（含订单 17 的 escalated）。\n\n订单 35 追加 `suppressed` / `suppressed_by`：被抑制的告警**也在这张表里**，\n前端据此在行内标「已抑制」（降视觉权重而非隐藏行）。这是订单 30\n「抑制不等于静默丢弃」在 REST 契约上的落点 —— 抑制的判定与凭证仍在\nalert_engine，这里只把它的产物读出来。",
+        "properties": {
+          "ack": {
+            "title": "Ack",
+            "type": "boolean"
+          },
+          "ack_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ack At"
+          },
+          "ack_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ack By"
+          },
+          "alert_id": {
+            "title": "Alert Id",
+            "type": "integer"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "escalated": {
+            "title": "Escalated",
+            "type": "boolean"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "robot_id": {
+            "title": "Robot Id",
+            "type": "string"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "integer"
+          },
+          "suppressed": {
+            "title": "Suppressed",
+            "type": "boolean"
+          },
+          "suppressed_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suppressed By"
+          },
+          "time": {
+            "format": "date-time",
+            "title": "Time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "alert_id",
+          "time",
+          "robot_id",
+          "rule_id",
+          "severity",
+          "message",
+          "ack",
+          "escalated",
+          "suppressed"
+        ],
+        "title": "AlertItem",
+        "type": "object"
+      },
+      "AlertPage": {
+        "description": "分页响应。\n\n`total` 是**同筛选条件下的总条数**（不受 limit/offset 影响），\n前端据此算总页数；缺了它前端只能\"翻到空页才知道到底了\"。",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AlertItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "AlertPage",
+        "type": "object"
+      },
       "BearerResponse": {
         "properties": {
           "access_token": {
@@ -293,6 +480,12 @@
             "title": "Error Code",
             "type": "integer"
           },
+          "is_online": {
+            "default": false,
+            "description": "后端判定：距最后一次收到遥测是否在阈值内（ISSUE #77）",
+            "title": "Is Online",
+            "type": "boolean"
+          },
           "joint_positions": {
             "additionalProperties": {
               "type": "number"
@@ -314,6 +507,18 @@
             "title": "Joint Torques",
             "type": "object"
           },
+          "last_seen": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "最后一次收到该机器人遥测的 epoch 秒；从未上报为 null",
+            "title": "Last Seen"
+          },
           "max_joint_temp": {
             "title": "Max Joint Temp",
             "type": "number"
@@ -331,25 +536,6 @@
             "default": 0,
             "title": "Ts",
             "type": "integer"
-          },
-          "is_online": {
-            "default": false,
-            "description": "后端判定：距最后一次收到遥测是否在阈值内（ISSUE #77）",
-            "title": "Is Online",
-            "type": "boolean"
-          },
-          "last_seen": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "description": "最后一次收到该机器人遥测的 epoch 秒；从未上报为 null",
-            "title": "Last Seen"
           }
         },
         "required": [
@@ -581,6 +767,270 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/alerts": {
+      "get": {
+        "description": "分页查询告警（解 H5）。\n\n只读，viewer 起可访问 —— 与 `GET /robots` 权限一致（看板必须所有人都能看）。\n典型用法：前端筛选「未确认」= `GET /alerts?ack=false&limit=50&offset=0`。\n\n`suppressed`（订单 35）刻意是**可选**参数，省略时返回全集（含被抑制行）。\n为什么不把「排除已抑制」设成默认：默认值一变，既有调用方（前端告警流、\nRobotDetailDrawer 的 200 条拉取）的行为会在没人改代码的情况下静默改变。\n把「默认视图要不要藏被抑制行」交给**调用方显式表达**，契约本身保持中性。\n\n注意这与「前端默认不进未确认流」是两件事：前者是 API 的中立性，\n后者是 `AlertLogTable` 的展示决策（默认 `suppressed=false` + 一个开关）。",
+        "operationId": "list_alerts_alerts_get",
+        "parameters": [
+          {
+            "description": "true/false 筛选确认状态；省略=全部",
+            "in": "query",
+            "name": "ack",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "true/false 筛选确认状态；省略=全部",
+              "title": "Ack"
+            }
+          },
+          {
+            "description": "true 只看已升级告警",
+            "in": "query",
+            "name": "escalated",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "true 只看已升级告警",
+              "title": "Escalated"
+            }
+          },
+          {
+            "description": "true 只看已抑制 / false 排除已抑制；省略=全部（含已抑制）",
+            "in": "query",
+            "name": "suppressed",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "true 只看已抑制 / false 排除已抑制；省略=全部（含已抑制）",
+              "title": "Suppressed"
+            }
+          },
+          {
+            "description": "按机器人过滤",
+            "in": "query",
+            "name": "robot_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "按机器人过滤",
+              "title": "Robot Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Alerts",
+        "tags": [
+          "alerts"
+        ]
+      }
+    },
+    "/alerts/{alert_id}/ack": {
+      "post": {
+        "description": "确认告警。**幂等**：重复确认返回 200 + changed=false，不报错、不覆盖首次确认人。\n\n操作人（`ack_by`）只从 JWT 取，`body` 声明为 `AckRequest`（extra=forbid）\n仅为拒绝伪造字段；其内容**不被读取**。",
+        "operationId": "ack_alert_alerts__alert_id__ack_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "alert_id",
+            "required": true,
+            "schema": {
+              "title": "Alert Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/AckRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AckResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Ack Alert",
+        "tags": [
+          "alerts"
+        ]
+      }
+    },
+    "/alerts/{alert_id}/unack": {
+      "post": {
+        "description": "撤回确认（误确认时用）。同样幂等：对未确认的告警再 unack 返回 changed=false。",
+        "operationId": "unack_alert_alerts__alert_id__unack_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "alert_id",
+            "required": true,
+            "schema": {
+              "title": "Alert Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/AckRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AckResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Unack Alert",
+        "tags": [
+          "alerts"
+        ]
+      }
+    },
     "/auth/jwt/login": {
       "post": {
         "operationId": "auth_jwt_login_auth_jwt_login_post",
@@ -785,7 +1235,7 @@
     },
     "/robots": {
       "get": {
-        "description": "100 台最新状态。只读端点：viewer 起可访问，返回体与加鉴权前逐字段一致。",
+        "description": "100 台最新状态。只读端点：viewer 起可访问，返回体与加鉴权前逐字段一致。\n\nISSUE #77：返回体新增 `is_online` / `last_seen` 两个可选字段，并**恒定返回 100 台**\n（停报的机器人回落为离线占位，而不是从列表里消失）。",
         "operationId": "list_robots_robots_get",
         "responses": {
           "200": {
