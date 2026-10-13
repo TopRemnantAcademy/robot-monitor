@@ -462,12 +462,15 @@ main:
   #   [llm error] HTTP 402 — {"message":"[EXCEEDING_LIMIT]AI 积分已用尽，
   #   请联系根组织管理员提升配额。/ AI credits are exhausted. ..."}
   #   [error] Agent 执行出错：402 ... exit code: 1, duration: 1.5s
-  # ✅ NPC 自主流水线已恢复（2026-10-13）：账号级 AI 积分此前耗尽（两次 crontab 在
-  # pm-call 首段秒退，402 [EXCEEDING_LIMIT]），2026-10-13 经 Issue #96 探针证实配额恢复，
-  # 按下方注释预留的恢复路径取消注释 + `cnb build build-crontab-sync` 复活。
-  # 若再次 402：error 构建每 6h 一条属预期信号，处理方式同前（注释回去 + build-crontab-sync）。
+  # ✅ NPC 自主流水线已恢复并配额治理（2026-10-13 下午）：原始 4×/day（0/6/12/18）7 段流水线
+  # 在 12:00 CST 轮再次 402 [EXCEEDING_LIMIT] AI 积分耗尽（cnb-bd0-1k4pmljt2，pm-call 秒退）；
+  # 实证配额撑不住 4 轮/日。治理：(1) 降频为 1×/day（18:00 CST）——自主巡检仅留夜间一扫，
+  # 白天配额让给人工 work-mode 派单；(2) pm-call.md 加积分保护：启动先查近 6h 是否有 402/
+  # EXCEEDING_LIMIT 构建，耗尽则打印 [QUOTA] 跳过本轮、绝不调 LLM。双保险，402 不再复发。
+  # 若仍偶发 402：属配额硬上限，处理方式=root 组织管理员提额（非注释回流水线）。
   #
-  "crontab: 0 0,6,12,18 * * *":
+
+  "crontab: 0 18 * * *":
     - stages:
         - name: pm-call
           image: docker.cnb.cool/bring/agents/agent:latest
