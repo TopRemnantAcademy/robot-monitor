@@ -89,8 +89,12 @@ def _row(bucket: _dt.datetime) -> dict:
     }
 
 
-def _run_history(monkeypatch, conn):
-    """以假池跑一次 `/history`，返回 (响应 dict, 假连接)。"""
+def _run_history(monkeypatch, conn, minutes=5, resolution="10s"):
+    """以假池跑一次 `/history`，返回 (响应 dict, 假连接)。
+
+    `minutes` / `resolution` 可覆写（R-12 需要按跨度触发小时路径），
+    默认值保持原样，故既有调用点语义不变。
+    """
     from app.db import session as session_mod
 
     async def _fake_get_pool():
@@ -98,7 +102,9 @@ def _run_history(monkeypatch, conn):
 
     monkeypatch.setattr(session_mod, "get_pool", _fake_get_pool)
     return asyncio.run(
-        main_mod.history("humanoid-001", minutes=5, resolution="10s", _user=None)
+        main_mod.history(
+            "humanoid-001", minutes=minutes, resolution=resolution, _user=None
+        )
     )
 
 
@@ -272,3 +278,186 @@ class TestRouting:
 
 def _counter(source: str) -> float:
     return main_mod.metrics.history_source.labels(source=source)._value.get()
+
+
+# ───────────────────────── R-12：小时级下采样 ─────────────────────────
+#
+# R-12 的核心断言：`minutes` 超过阈值后**换数据源**（不是换参数）。
+# 与上面 TestSqlContract 同构，这里考的是「小时路径的 SQL 指向 robot_history_1h、
+# 列集与 10s 路径一致、响应 resolution 回显 3600」，以及上限 400。
+#
+# 为什么用 fake pool 而非真实库：本环境无 TimescaleDB（同文件头注释），
+# 而「按跨度路由到哪张表」是纯控制流，可在 Python 层逐字判定。
+# 真实 SQL 的语义正确性由 e2e 30k 跑通 + PR「未验证」章节说明。
+def _capture_hourly_sql() -> dict:
+    """跑一次大跨度 /history，抓出小时路径实际用的两条 SQL（聚合 + 回退）。"""
+    conn = _FakeConn([[], []])  # 都空 → 聚合与回退各调一次
+    from app.db import session as session_mod
+
+    orig = session_mod.get_pool
+
+    async def _fake():
+        return _FakePool(conn)
+
+    session_mod.get_pool = _fake
+    try:
+        asyncio.run(
+            main_mod.history("humanoid-001", minutes=1440, resolution="10s", _user=None)
+        )
+    finally:
+        session_mod.get_pool = orig
+    assert len(conn.calls) == 2, f"预期聚合+回退各一次，实际 {len(conn.calls)} 次"
+    return {"cagg": conn.calls[0], "raw": conn.calls[1]}
+
+
+class TestHourlyRouting:
+    """R-12 T2：跨度路由 + 列完整 + resolution 回显 + 上限。"""
+
+    def test_large_span_routes_to_hourly_aggregate(self, monkeypatch):
+        """minutes=1440（24h）→ 读 robot_history_1h，不再读 10s 视图（V3）。"""
+        now = _dt.datetime(2026, 10, 11, 3, 0, tzinfo=_dt.timezone.utc)
+        conn = _FakeConn([[_row(now)]])
+        resp = _run_history(monkeypatch, conn, minutes=1440)
+
+        assert len(conn.calls) == 1, "命中小时聚合时不该再查原始表"
+        assert "robot_history_1h" in conn.calls[0]
+        assert "robot_history_10s" not in conn.calls[0], "大跨度不该再读 10s 视图"
+
+    def test_small_span_still_routes_to_10s(self, monkeypatch):
+        """阈值内（minutes=180）仍走 10s —— R-03 §4 契约硬红线，不得被小时路径挤掉。"""
+        now = _dt.datetime(2026, 10, 11, 3, 0, tzinfo=_dt.timezone.utc)
+        conn = _FakeConn([[_row(now)]])
+        _run_history(monkeypatch, conn, minutes=180)
+
+        assert "robot_history_10s" in conn.calls[0]
+        assert "robot_history_1h" not in conn.calls[0]
+
+    def test_hourly_branch_keeps_joint_positions(self, monkeypatch):
+        """V4：小时路径响应含 joint_positions（R-12 §6 硬红线，Drawer 第三折线）。"""
+        now = _dt.datetime(2026, 10, 11, 3, 0, tzinfo=_dt.timezone.utc)
+        conn = _FakeConn([[_row(now)]])
+        resp = _run_history(monkeypatch, conn, minutes=1440)
+
+        p = resp["points"][0]
+        assert p["joint_positions"] == {"left_knee_pitch": 0.5}
+        assert p["joint_temperatures"] == {"left_knee_pitch": 49.1}
+        assert p["joint_torques"] == {"left_knee_pitch": 3.4}
+
+    def test_hourly_resolution_echoed_as_3600s(self, monkeypatch):
+        """小时路径 resolution 回显 3600s（真实桶秒数），不是入参 10s。
+
+        回显入参会让前端把 1h 桶当 10s 桶画 —— 横轴间隔差 360 倍。
+        """
+        now = _dt.datetime(2026, 10, 11, 3, 0, tzinfo=_dt.timezone.utc)
+        conn = _FakeConn([[_row(now)]])
+        resp = _run_history(monkeypatch, conn, minutes=1440, resolution="30s")
+        assert resp["resolution"] == "3600s"
+
+    def test_small_span_resolution_still_echoes_input(self, monkeypatch):
+        """小路径 resolution 回显入参（逐字不变，R-03 回归）。"""
+        now = _dt.datetime(2026, 10, 11, 3, 0, tzinfo=_dt.timezone.utc)
+        conn = _FakeConn([[_row(now)]])
+        resp = _run_history(monkeypatch, conn, minutes=5, resolution="30s")
+        assert resp["resolution"] == "30s"
+
+    def test_hourly_empty_falls_back_to_raw(self, monkeypatch):
+        """T3：小时聚合空时同样回退原始表，避免冷启动空白（复用既有回退语义）。"""
+        now = _dt.datetime(2026, 10, 11, 3, 0, tzinfo=_dt.timezone.utc)
+        conn = _FakeConn([[], [_row(now)]])
+        before_raw = _counter("raw")
+        resp = _run_history(monkeypatch, conn, minutes=1440)
+
+        assert len(conn.calls) == 2, "小时聚合为空时必须回退原始表"
+        assert "robot_telemetry" in conn.calls[1]
+        assert resp["points"][0]["joint_positions"] == {"left_knee_pitch": 0.5}
+        assert _counter("raw") == before_raw + 1
+
+    def test_hourly_columns_match_10s_columns(self):
+        """小时路径与 10s 路径的 SELECT 列集**逐字一致**（bucket 表达式已中性化）。
+
+        两视图结构镜像（init.sql §5.1b），一旦漂移，小时响应就会缺列。
+        """
+        hourly = _select_body(_capture_hourly_sql()["cagg"])
+        ten_s = _select_body(_live_sqls()["cagg"])
+
+        def _neutralize(body: str) -> str:
+            return re.sub(r"^.*?\sAS bucket", "BUCKET_EXPR AS bucket", body, count=1)
+
+        assert _neutralize(hourly) == _neutralize(ten_s), (
+            "小时路径与 10s 路径列漂移：\n"
+            f"  hourly: {hourly}\n  10s   : {ten_s}"
+        )
+
+    def test_hourly_branch_keeps_all_joint_columns(self):
+        """三个 JSONB 关节列在小时路径（含回退）都必须在。"""
+        for name, sql in _capture_hourly_sql().items():
+            body = _select_body(sql)
+            for col in JOINT_COLS:
+                assert f"last({col}, time) AS {col}" in body, f"{name} 分支缺 {col}"
+
+    def test_hourly_branch_reads_materialized_bucket(self):
+        """小时路径 bucket 取物化列（不再套 time_bucket），才吃得到自动索引。"""
+        sql = _capture_hourly_sql()["cagg"]
+        assert "time_bucket" not in sql
+        assert "bucket >= now()" in sql
+
+
+class TestMinutesUpperBound:
+    """R-12 T2 / V5：minutes 上限 400。"""
+
+    def test_over_limit_is_400(self):
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(
+                main_mod.history(
+                    "humanoid-001",
+                    minutes=main_mod.MAX_HISTORY_MINUTES + 1,
+                    resolution="10s",
+                    _user=None,
+                )
+            )
+        assert ei.value.status_code == 400
+        assert ei.value.detail == "history span too large"
+
+    def test_two_hundred_thousand_minutes_is_400(self):
+        """需求 §5 V5 的口径：?minutes=20000 → 400（20000 > 10080）。"""
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(
+                main_mod.history("humanoid-001", minutes=20000, resolution="10s", _user=None)
+            )
+        assert ei.value.status_code == 400
+        assert ei.value.detail == "history span too large"
+
+    def test_at_limit_is_not_rejected_by_bound(self, monkeypatch):
+        """恰好等于上限（10080）不得 400 —— 边界必须是 >，不是 >=。"""
+        now = _dt.datetime(2026, 10, 11, 3, 0, tzinfo=_dt.timezone.utc)
+        conn = _FakeConn([[_row(now)]])
+        resp = _run_history(monkeypatch, conn, minutes=main_mod.MAX_HISTORY_MINUTES)
+        assert resp["resolution"] == "3600s"  # 10080 > 180 → 小时路径
+        assert resp["points"]
+
+    def test_bound_rejected_before_pool_acquired(self, monkeypatch):
+        """上限校验必须在取连接之前 —— 否则全表扫描已经甩给 DB 才报 400。
+
+        用一个「一旦 acquire 就断言失败」的池把顺序钉死。
+        """
+        from fastapi import HTTPException
+
+        class _NoAcquirePool:
+            def acquire(self):
+                raise AssertionError("上限校验前不该取连接")
+
+        from app.db import session as session_mod
+
+        async def _fake():
+            return _NoAcquirePool()
+
+        monkeypatch.setattr(session_mod, "get_pool", _fake)
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(
+                main_mod.history("humanoid-001", minutes=20000, resolution="10s", _user=None)
+            )
+        assert ei.value.status_code == 400

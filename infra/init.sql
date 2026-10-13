@@ -201,6 +201,62 @@ SELECT add_continuous_aggregate_policy('robot_history_10s',
     schedule_interval => INTERVAL '30 seconds',
     if_not_exists => TRUE);
 
+-- 5.1b 连续聚合（R-12）：`/history` 小时级下采样，**结构镜像 robot_history_10s**
+--
+-- 为什么需要：
+--   `/history` 的 `minutes` 无上限（main.py 原 `span_s = max(1, minutes) * 60`）。
+--   查 `?minutes=1440`（24h）时 10s 聚合会返回 8640 桶/台 × 100 台 ≈ 86 万点，
+--   Drawer 按 10s 点渲染必然卡死；运维也无从看「全天趋势」。
+--   小时桶把同一窗口压成 24 点/台 —— 既可用又可读，这是本视图存在的唯一理由。
+--
+-- 为什么是**镜像**而不是复用 robot_history_10s + 现算 time_bucket('1 hour')：
+--   连续聚合的物化表按 10s 粒度存储，在其上现算 1h 桶仍需先扫描 8640 行/台；
+--   本视图把「小时粒度」物化下来，扫描量再降一个数量级（8640 → 24）。
+--   这与订单 16 用 robot_history_10s 替代原始表的论证同构：下采样必须在**写侧**
+--   完成，读侧现算只是把代价从一次搬成每次。
+--
+-- 列集**逐字镜像** robot_history_10s（含三个 JSONB 关节列，尤其 joint_positions）。
+--   `joint_positions` 绝不能漏：它是 Drawer 第三条折线「角度(rad)」的唯一数据源
+--   （frontend_dashboard/src/components/RobotDetailDrawer.tsx:88）；
+--   订单 16 已真实翻车过一次（漏列 → 曲线恒空），R-12 §6 把「不得漏列」写成硬红线。
+--   history() 两条分支复用同一 `_select` 模板，列名即响应字段名：
+--   本视图列与 10s 视图列一旦漂移，小时路径的响应体就会缺字段。
+CREATE MATERIALIZED VIEW IF NOT EXISTS robot_history_1h
+WITH (timescaledb.continuous) AS
+SELECT
+    time_bucket('1 hour', time)    AS bucket,
+    robot_id,
+    last(status_code, time)        AS status_code,
+    last(battery_pct, time)        AS battery_pct,
+    max(max_joint_temp)            AS max_joint_temp,
+    last(error_code, time)         AS error_code,
+    last(joint_temperatures, time) AS joint_temperatures,
+    -- ↓ 必须保留：Drawer 第三条折线数据源，R-12 §6 硬红线。
+    last(joint_positions, time)    AS joint_positions,
+    last(joint_torques, time)      AS joint_torques
+FROM robot_telemetry
+GROUP BY bucket, robot_id
+WITH NO DATA;
+
+-- 刷新策略：end_offset=1h（= 一个桶宽）/ schedule=1h。
+--
+-- 为什么 end_offset 取一个桶宽而非照抄 10s 的 10 秒：
+--   桶宽即「数据何时算确定」的最小单位。end_offset < 桶宽会让策略反复刷新
+--   **仍在写入的当前桶**，同一桶先物化、后被新数据补齐，产生物化结果抖动；
+--   取整个桶宽则只刷新「已封口」的桶，语义与 10s 视图一致（10s 视图 end_offset=10s）。
+-- schedule 与桶宽同阶（1h）：单次增量刷新只扫最近一个桶宽的窗口，
+--   在 1000 行/s 下约 360 万行 —— 这是 refresh 的后台代价，不占在线查询路径。
+-- start_offset 保留 1 小时固不必说，hourly 桶的「迟到数据补写」窗口理应更大；
+--   但因原始表保留 30 天（§6.2），迟到上限受它约束，仍留充裕。
+--
+-- 与 6 节的关系：本视图**不另建**保留/压缩策略 —— R-12 §4 T1 明确「保留策略沿用既有」，
+--   其生命周期由底层 hypertable 的保留策略（30 天）决定，重复建会与 §6 的策略互相牵制。
+SELECT add_continuous_aggregate_policy('robot_history_1h',
+    start_offset => INTERVAL '3 days',
+    end_offset   => INTERVAL '1 hour',
+    schedule_interval => INTERVAL '1 hour',
+    if_not_exists => TRUE);
+
 -- 5.2 物化表索引说明（**不需要手工建**）
 -- 连续聚合会自动为每个分组列建 `(<分组列>, <分区列> DESC)` 索引
 --   （tsl/src/continuous_aggs/create.c:303-306 的注释与

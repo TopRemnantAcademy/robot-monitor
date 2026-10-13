@@ -58,6 +58,15 @@ log = logging.getLogger("main")
 
 writer = BatchWriter()
 
+# R-12：`/history` 的跨度路由与上限（history() 专用，见 infra/init.sql §5.1b）。
+# 大小阈值：> 3h 走小时桶。取 180 而非 1440（24h）是因为 3h×10s/桶 ≈ 1080 点/台时
+# 前端折线已接近可读上限；再往上必须下采样，晚切不如早切。
+HOURILY_AFTER_MINUTES = 180
+# 上限 7 天 = 10080 分钟。这是**防护栏**而非精确容量规划：`minutes` 原无上限，
+# 一次 `?minutes=525600`（一年）足以在原始表上做全表扫描把连接池拖满。
+# 7d 与 30 天原始保留（§6.2）留出余量，也覆盖「一周趋势」这一真实运维诉求。
+MAX_HISTORY_MINUTES = 7 * 24 * 60  # 10080
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -269,13 +278,38 @@ async def history(
     `last(joint_positions, time)` 在两个分支中都**必须保留** ——
     它是 Drawer 第三条折线「角度(rad)」的唯一数据源
     （RobotDetailDrawer.tsx:88），缺了它曲线恒为 null（订单 16 踩过的坑）。
+
+    跨度路由（R-12）：`minutes <= HOURILY_AFTER_MINUTES(180)` 仍走 10s 聚合，
+    行为与 ISSUE #76 逐字一致（R-03 §4 契约硬红线）；超过则改走小时级聚合
+    `robot_history_1h`（infra/init.sql §5.1b），把 24h 窗口从 8640 点/台压到 24 点/台。
+    小时路径的 `resolution` 回显 `3600s`（真实桶秒数，不是入参 `10s`）——
+    `resolution` 是「响应里每点代表多少秒」的事实标签，回显入参会让前端把 1h 桶当 10s 桶。
+    **不引入 `resolution=1h`**：`_parse_resolution` 是 R-03 §4.1 锁定的整数秒语义，
+    小时下采样由 `minutes` 阈值触发，与 `resolution` 参数正交。
     """
     try:
         res_s = _parse_resolution(resolution)
     except ValueError:
         raise HTTPException(status_code=400, detail=f"invalid resolution: {resolution}")
 
+    # 上限保护（R-12 T2）：必须在**取连接之前**拒绝，否则一次超大跨度查询已经
+    # 把全表扫描甩给了 DB 才报 400 —— 防护栏就失去了意义。
+    # 放在 `_parse_resolution` 之外：那是对 `resolution` 的校验（R-03 §4.1），
+    # 本条是对 `minutes` 的校验，两者职责不同，混在一起会动摇 R-03 的锁定面。
+    if minutes > MAX_HISTORY_MINUTES:
+        raise HTTPException(status_code=400, detail="history span too large")
+
     span_s = max(1, minutes) * 60
+    # 跨度路由（R-12）：
+    #   小跨度 → 10s 聚合（`sql_cagg`，行为与 ISSUE #76 逐字一致，R-03 回归红线）；
+    #   大跨度 → 小时聚合（`sql_cagg` 换成 robot_history_1h，其余模板不变）。
+    # 只切 `source`，bucket 表达式仍取物化列 `bucket` —— 1h 视图的物化列就叫 bucket，
+    # 与 10s 视图同构，故无需按桶宽再套一次 time_bucket（那会掩盖自动建的索引）。
+    hourly = minutes > HOURILY_AFTER_MINUTES
+    agg_source = "robot_history_1h" if hourly else "robot_history_10s"
+    # 响应 resolution 回显**实际**桶秒数：小时路径 3600，小路径沿用入参 res_s。
+    out_res_s = 3600 if hourly else res_s
+
     # 两个分支的 SELECT 列**逐字对齐**（列名即响应字段名），
     # 这样结果映射只写一份，不会出现「聚合加了列、回退漏了列」的漂移。
     # 差别只在 FROM / WHERE：聚合表按 `bucket` 过滤，原始表按 `time` 过滤。
@@ -298,7 +332,7 @@ async def history(
         ORDER BY bucket
     """
     sql_cagg = _select.format(
-        bucket="bucket", time_col="bucket", source="robot_history_10s"
+        bucket="bucket", time_col="bucket", source=agg_source
     )
     sql_raw = _select.format(
         bucket="time_bucket(($1 || ' seconds')::interval, time)",
@@ -352,7 +386,7 @@ async def history(
 
     return {
         "robot_id": robot_id,
-        "resolution": f"{res_s}s",
+        "resolution": f"{out_res_s}s",
         "points": [
             {
                 "time": r["bucket"].isoformat(),
