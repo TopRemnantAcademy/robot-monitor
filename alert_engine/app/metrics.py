@@ -85,6 +85,36 @@ store_errors = Counter(
     registry=registry,
 )
 
+#: 通知**投递成功**的条数（R-15 T1）。与 `notify_failed` 配对算失败率。
+#:
+#: 为什么成功也要计数：只有失败计数时，看到 `notify_failed_total = 37` 无法判断
+#: 严不严重 —— 是 1% 丢包还是 100% 全丢？分母（分母 = sent + failed）必须存在，
+#: `rate(notify_failed[5m]) / (rate(sent[5m]) + rate(notify_failed[5m]))` 才有意义。
+notify_sent = Counter(
+    "robot_alert_notify_sent_total",
+    "成功投递到群机器人的告警条数（与 notify_failed_total 配对算投递失败率）",
+    ["kind"],
+    registry=registry,
+)
+
+#: 通知**投递失败**的条数，按 `reason` 细分（R-15 / GAP-3 的核心交付）。
+#:
+#: 为什么必须有这颗：通知失败此前**只进日志**。webhook 配错 / 钉钉企微限流时，
+#: 告警包已落库并广播，值班却在群里收不到 —— 而 Prometheus 侧一无所知
+#: （既有 `alerts_emitted` 只统计"决定发出"，与投递成败无关）。
+#: 于是「通知静默丢失」在监控上与「通知正常」完全同形，看板永远绿。
+#:
+#: `reason` 取值是**封闭集**（见 `notifiers/webhook.py:NOTIFY_REASONS`）：
+#: `timeout` / `network`（值得重试，查网络）、`http_error` / `business_error`
+#: （多为配置错，查 token）、`config`（本地未发出）、`unknown`（兜底不掩盖）。
+#: 维度刻意收窄 —— 每个不同异常串一个标签会让 Prometheus 时间序列数失控。
+notify_failed = Counter(
+    "robot_alert_notify_failed_total",
+    "告警通知投递失败条数（按 reason 分类；>0 即「告警在库但群里没人收到」）",
+    ["reason"],
+    registry=registry,
+)
+
 
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 (stdlib 命名约定)

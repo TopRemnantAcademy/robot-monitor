@@ -13,6 +13,11 @@
 
 另有一条 **escalation 线**（订单 17 T2）：周期性扫描"severity=3 且超时未 ack"
 的告警，标记 escalated 并重发，对应 Alertmanager 的 `repeat_interval` 语义。
+
+通知（钉钉/企微/通用 webhook）是**旁路**（R-15 / GAP-3）：落库与 WS 广播先完成，
+再对通知做**有界重试**（≤3 次、总耗时 ≤5s、指数退避），全失败则计数
+`robot_alert_notify_failed_total{reason}`。通知失败**绝不**阻塞、回滚或推迟
+告警落库 —— 外部系统故障不该让本系统丢数据。
 """
 
 from __future__ import annotations
@@ -41,6 +46,7 @@ from app.rules.offline import OfflineRule
 from app.rules.base import Alert
 from app import metrics
 from app.notifiers import build_notifier
+from app.notifiers.webhook import classify_exception
 from app.store import load_online_state, save, save_suppressed, update_online
 
 logging.basicConfig(level=logging.INFO,
@@ -74,6 +80,17 @@ _tasks: set[asyncio.Task] = set()
 # 在模块级装配属刻意的 fail-fast：kind 拼错时进程起不来，
 # 好过配置写错却在运行时静默不通知。
 _notifier = build_notifier(settings)
+
+# ---- 通知重试上限（R-15 T3）------------------------------------------------
+# 值是**硬上限**而非可调参数：需求 §6 明令「禁止无限重试 / 无上限等待」，
+# 写进配置就给了"把它调成 100 次"的机会，那不是本单想要的自由度。
+#   3 次：覆盖"限流一秒后自愈"这类瞬时故障；再多对群机器人无意义。
+#   5s  ：与 `WebhookNotifier.timeout_s`（单次 HTTP 超时）同量级 —— 即最坏
+#         情况下"一次尝试"的耗时上界，整体预算 = 3 × 单次预算，可算不失控。
+# 指数退避基 0.5s → 0.5 / 1.0（仅两次间隔），总睡眠 1.5s，占预算的 30%。
+NOTIFY_MAX_ATTEMPTS = 3
+NOTIFY_TOTAL_BUDGET_S = 5.0
+NOTIFY_BACKOFF_BASE_S = 0.5
 
 
 def spawn(coro) -> None:
@@ -138,6 +155,107 @@ def is_inhibited(alert: Alert) -> bool:
     实现委托给 `inhibition_reason()`；需要凭证时直接调后者。
     """
     return inhibition_reason(alert) is not None
+
+
+# ---------------------------------------------------------------- 通知（旁路）
+
+async def _send_with_retry(notifier, alert: Alert) -> tuple[bool, str | None]:
+    """有界重试投递。返回 `(是否成功, 失败 reason)`。
+
+    上限来自模块常量（见其注释）：**最多 `NOTIFY_MAX_ATTEMPTS` 次**、
+    且**总耗时不超过 `NOTIFY_TOTAL_BUDGET_S`**。两个上限都要，
+    因为单看次数不够 —— 每次 HTTP 自带 `timeout_s`，次数 × 单次超时
+    就是最坏耗时；单看耗时不够 —— 预算用尽后要能给出"试了几次"。
+    退避用指数（`base * 2**i`），且**每次睡眠前重算剩余预算**，
+    保证 `asyncio.sleep` 不会把总耗时顶穿（"睡过头"是无限等待的温和版本，
+    同样是需求 §6 禁止的）。
+    """
+    started = time.monotonic()
+    last_reason: str | None = None
+
+    for attempt in range(1, NOTIFY_MAX_ATTEMPTS + 1):
+        try:
+            if await notifier.send(alert):
+                return True, None
+        except Exception as exc:
+            # 通知器契约是"永不外抛"（webhook.py:send 自带 try/except），
+            # 这里再兜一层是**纵深防御**：只要有一次漏出去，异常会顺着
+            # `spawn` 的任务冒到事件循环，把本单最核心的不变量
+            # 「通知失败不影响落库/广播」破坏掉。代价是一行 except。
+            log.exception("notifier raised despite contract: %s/%s",
+                          alert.robot_id, alert.rule_id)
+            last_reason = classify_notify_reason(exc)
+        else:
+            # 走 else 分支 = send() 正常返回 False（内部已吞异常），
+            # reason 由通知器旁注在 `last_reason` 上（见 webhook.py 的说明）。
+            last_reason = getattr(notifier, "last_reason", None) or "unknown"
+
+        if attempt == NOTIFY_MAX_ATTEMPTS:
+            break
+
+        backoff = NOTIFY_BACKOFF_BASE_S * (2 ** (attempt - 1))
+        remaining = NOTIFY_TOTAL_BUDGET_S - (time.monotonic() - started)
+        if remaining <= backoff:
+            # 预算不足以再等一轮退避 → 放弃重试，直接用当前 reason 计数。
+            # 这不是"提前失败"，而是"再等就超预算"，故 break 而非 sleep(0)。
+            log.warning("notify retry budget exhausted after %d attempt(s) on %s/%s",
+                        attempt, alert.robot_id, alert.rule_id)
+            break
+        await asyncio.sleep(backoff)
+
+    return False, last_reason
+
+
+def classify_notify_reason(exc: BaseException) -> str:
+    """把通知器意外抛出的异常归类。
+
+    正常路径上 `webhook.py:send()` 不会外抛，reason 由通知器自己给出；
+    本函数只服务 `_send_with_retry` 的兜底分支 —— 但**不能省略**：
+    兜底分支也必须产出合法标签，否则 `metrics.notify_failed.labels(reason=...)`
+    会被塞进异常类名之类的高基数取值。委托给通知器的同一张分类表
+    （`classify_exception`），保证"谁分类"只有一处实现。
+    """
+    return classify_exception(exc)
+
+
+async def _notify(alert: Alert) -> None:
+    """通知**旁路任务**：投递 + 计数，失败只记指标/日志，永不外抛。
+
+    为什么是 TODO 里的"后台任务"而不是在 `emit()` 里 `await`（关键决策）：
+      `emit()` 跑在 `spawn()` 出来的消费任务里，而它的**下一件事**就是回去
+      `pubsub.listen()` 取下一条消息。若在这里 await 通知（哪怕是有界重试），
+      最坏 5s 内该协程无法取消息 —— 100 台 @10Hz 的流会在 Redis 缓冲里积压，
+      而"通知慢"（外部系统）就这样变成了"告警消费慢"（本系统）。
+      本单的硬门槛是**通知失败不得阻塞告警落库/广播**；把通知整体挪出主链路，
+      是把这条门槛从"尽量"变成"结构上不可能违反"。
+      代价：一条告警的通知与它的落库不再严格同一时刻完成，可接受 ——
+      通知本就是"尽力而为"（需求 §3）。
+    """
+    # 在 await 之前取快照：重试期间 `_notifier` 可能被替换（测试会 monkeypatch），
+    # 本任务应始终对"当时的那个通知器"负责。
+    notifier = _notifier
+    if notifier is None:
+        return
+    try:
+        ok, reason = await _send_with_retry(notifier, alert)
+    except asyncio.CancelledError:
+        raise                     # 取消是控制流，不是投递失败，不得计成失败
+    except Exception as exc:      # pragma: no cover - 纵深防御，正常不可达
+        log.exception("notify task crashed: %s/%s", alert.robot_id, alert.rule_id)
+        ok, reason = False, classify_notify_reason(exc)
+
+    if ok:
+        metrics.notify_sent.labels(kind=getattr(notifier, "kind", "unknown")).inc()
+        return
+
+    # 失败：计数必须落在**封闭 reason 集合**内（`NotifyError` 已做归一，
+    # 这里再兜一次 None/空串，防止标签出现空值）。
+    metrics.notify_failed.labels(reason=reason or "unknown").inc()
+    # 失败已由通知器逐次 `log.exception` 打出，这里补一行**结论级**日志：
+    # 记明"最终放弃了、重试了几次"，否则日志里只有 3 条同样的失败栈，
+    # 读者无法区分"失败但重试成功"与"彻底失败"（指标能区分，人肉看日志不能）。
+    log.error("notify giving up after retries: reason=%s %s/%s",
+              reason or "unknown", alert.robot_id, alert.rule_id)
 
 
 async def emit(alert: Alert) -> None:
@@ -211,10 +329,15 @@ async def emit(alert: Alert) -> None:
         log.info("alert: %s %s sev=%d %s", alert.robot_id, alert.rule_id,
                  alert.severity, alert.message)
         # 推到工厂侧群机器人（钉钉/企微/通用）。
-        # 放在 save 之后：先落库保证审计，再通知；通知失败只在通知器内部记日志，
-        # 不影响主链路。被抑制的告警在上面已 return，不会走到这里。
+        # 放在 save 之后：先落库保证审计，再通知。被抑制的告警在上面已 return，
+        # 不会走到这里。
+        #
+        # R-15（GAP-3）：由 `await _notifier.send(...)` 改为 `spawn(_notify(...))`，
+        # 理由见 `_notify` 的 docstring —— 通知链路上的等待（含重试）绝不允许
+        # 占用告警消费循环。失败在 `_notify` 内终结（只计数 + 日志），
+        # 结构上不可能回滚或阻塞上面已完成的 `save()` / 广播。
         if _notifier is not None:
-            await _notifier.send(alert)
+            spawn(_notify(alert))
 
 
 # ---------------------------------------------------------------- 消费线
