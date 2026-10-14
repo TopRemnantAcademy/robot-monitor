@@ -3,7 +3,7 @@
 > 本目录是 **RobotMonitor 需求规格的唯一事实来源（single source of truth）**。
 > 每个需求一份 `R-xx-*.md`，本文件是总索引与模式约定。
 >
-> 最后更新：**2026-10-13**（模式切换：本地写需求规格 → `@//codebuddy/` 标记 → Bearer 头 push 到 CNB，由 codebuddy 读仓执行；本地**只写需求规格、不写业务修复代码**）。
+> 最后更新：**2026-10-14（R-14~R-17 全部回收完成）**：codebuddy 交付 PR #127~#130，4 个均经两点 diff 白名单 + CI 双绿 + e2e 真绿（rows_written≥39786、rows_skipped=0、hypertable=1、无实际 skip）核验；#127→`3bf9fe5`/#128→`29d239d`/#129→`0f340c3`/#130→`2f7b072` 全部 squash 合并 `cnb/main`，#123~#126 全部关 `completed`，4 个 `auto/*` 分支全部删除；远程仅 `main`、开放 PR=0、开放 Issue=0。
 > 2026-10-13 追加：**回收 SOP 实测**——codebuddy 的 token 缺 `repo-pr:rw`（且历史上缺 `repo-code:rw`），
 > 能 `git push` 分支但**开不了 PR**；本地用本账户 Bearer 头（含 `repo-code:rw`+`repo-pr:rw`）开 PR +
 > squash 合并回收。详见第一节末「回收 SOP」。
@@ -109,10 +109,10 @@ codebuddy 的 CNB token **缺 `repo-pr:rw`（历史上也缺 `repo-code:rw`）**
 | R-10 | C4 GitHub 同步端到端验证 | ⏳ 规格在 `R-10-cnb-github-sync.md` | **需用户备 GitHub PAT（只写 `robot-monitor`）+ 建 CNB 密钥仓库 `flow.237/RobotMonitor-secrets`**；本地无法执行 |
 | **R-13** | `robot_history_1h`/`robot_history_10s` 实时聚合修复（`materialized_only=false`）+ 真库回归测试（GAP-1 复核：**真 bug**，初版误判已推翻） | ✅ **已回收**（PR #122 squash→`c020fc6`，#121 关；两点 diff 白名单 + 真库测试实证 + CI 双绿） | 中风险（改 cagg 属性，非刷新策略/列/查询）；robot_status_10s sibling 留后续 |
 
-| **R-14** | 告警引擎 `consume()` Redis 断连监督（进程级韧性） | 🟡 **已写规格·待派 CNB 执行**（GAP-2，MED） | 中风险（动 `alert_engine` 协程树）；禁改 ticker/escalation/规则求值；禁弱化既有 except |
-| **R-15** | 告警通知投递失败指标 + 有界重试（可观测） | 🟡 **已写规格·待派 CNB 执行**（GAP-3，MED） | 低-中风险；**硬门槛**：通知失败不得阻塞/丢失告警落库；禁无限重试；沿用 `robot_alert_*` 前缀 |
-| **R-16** | `robot_status_10s` 实时聚合回填（看板最新态 1min 空洞，R-13 同类 sibling） | 🟡 **已写规格·待派 CNB 执行** | 中风险；**禁回退** R-13 的 `init.sql:307-308`；禁改刷新策略/列/前端 |
-| **R-17** | 后端 CORS + 可选限流（不同源部署/滥用防护） | 🟡 **已写规格·待派 CNB 执行**（GAP-4，LOW） | 低风险；**硬门槛**：限流不得破坏 `e2e-30k-landing` 真绿；CORS 禁默认 `*`；契约/鉴权不变 |
+| **R-14** | 告警引擎 `consume()` Redis 断连监督（进程级韧性） | ✅ **已回收**（PR #130 squash→`2f7b072`，#123 关，`auto/redis-reconnect-acf4` 删） | 与 #129 在 `metrics.py` 位置冲突（均新增 Counter）→ 本地 rebase 到 `cnb/main` 合并三指标(`notify_sent`/`notify_failed`/`redis_reconnect`) + force-push 触发 CI 重跑；两点 diff 白名单 + CI 双绿 + e2e 真绿(rows_written=39831,rows_skipped=0) 实证 |
+| **R-15** | 告警通知投递失败指标 + 有界重试（可观测） | ✅ **已回收**（PR #129 squash→`0f340c3`，#124 关，`auto/notify-failure-metrics-264a` 删） | 两点 diff 白名单 + CI 双绿 + e2e 真绿(rows_written=39786,rows_skipped=0) 实证；`emit()` 在 `save()` 后 `spawn(_notify)`，结构上不阻塞/不回滚落库 |
+| **R-16** | `robot_status_10s` 实时聚合回填（看板最新态 1min 空洞，R-13 同类 sibling） | ✅ **已回收**（PR #127 squash→`3bf9fe5`，#125 关，`auto/cagg-status-realtime-30d6` 删） | **仅新增** `robot_status_10s` 的 `ALTER(=false)`，`init.sql:307-308`(R-13) 完整保留未动；两点 diff 白名单 + CI 双绿 + e2e 真绿(rows_written=39831) 实证 |
+| **R-17** | 后端 CORS + 可选限流（不同源部署/滥用防护） | ✅ **已回收**（PR #128 squash→`29d239d`，#126 关，`auto/cors-ratelimit-60ea` 删） | CORS 默认关/限流默认关/豁免 `/healthz` `/metrics`，零新依赖；两点 diff 白名单 + CI 双绿 + e2e 真绿(rows_written=39900,rows_skipped=0) 实证 |
 
 > 其余 backlog（G-1~G-7、C1~C3、A1~A3）经 `STATUS.md` 对账 + 代码实证均已收口或转为已落地规格。
 >
