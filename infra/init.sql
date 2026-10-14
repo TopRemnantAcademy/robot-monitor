@@ -117,6 +117,34 @@ CREATE TABLE IF NOT EXISTS robot_alert (
 SELECT create_hypertable('robot_alert', 'time', if_not_exists => TRUE, chunk_time_interval => INTERVAL '7 days');
 
 -- 5. 连续聚合：每 10 秒一台机器人的最新快照（供看板/历史折线秒级刷新）
+--
+-- ⚠️ materialized_only 的 footgun（R-16，与 R-13 同根；真库实证 2.13.1）：
+--   本视图服务**看板最新态**（即 `/robots` 的「每台机器人当前状态/电量/温度」），
+--   必须**实时聚合**（`materialized_only` 置为 `false`），否则看板最新值有 **1min 空洞**。
+--
+--   ① 默认值是 `true`，不是 `false`：TimescaleDB 2.13.1 源码
+--      `src/ts_catalog/continuous_agg.c:58-62`
+--        `[ContinuousViewOptionMaterializedOnly] = { .arg_name = "materialized_only",
+--                                                   .default_val = (Datum)true };`
+--      ⇒ 本视图**建完即 `materialized_only = true`**（真库
+--      `_timescaledb_catalog.continuous_agg` 实测三张 cagg 皆 `t`）；
+--      `WITH NO DATA` 不改变该默认，只有显式写 `materialized_only = false` 才翻转。
+--   ② 默认 true 的后果：查询视图是**纯物化表**（`pg_get_viewdef` 无
+--      `UNION ALL ... FROM robot_telemetry` 实时段），物化只覆盖到 `now() - end_offset`，
+--      `[now-end_offset, now]` 这段**查不到**。本视图 `end_offset = 1 minute`
+--      （见下方 add_continuous_aggregate_policy），故看板最新态缺最近 1 分钟
+--      （叠加 `schedule_interval = 1 minute` 落后更多）—— 与 R-13 修掉的 `/history`
+--      右端空洞**同根同源**，只是消费方与 `end_offset` 不同。
+--   ③ 修复：本需求在 §5.1d 用
+--      `ALTER MATERIALIZED VIEW IF EXISTS robot_status_10s SET (timescaledb.materialized_only = false);`
+--      打开实时聚合（幂等，re-run `init.sql` 安全：对已是该值的视图重复执行是 no-op）。
+--      **禁止**把它设回 `true` —— 那正是本 bug 本身；回归测试
+--      `tests/e2e/test_cagg_realtime_backfill.py` 会在真库上立即变红。
+--   ④ `end_offset = 1 minute` 只界定**物化边界**，不改：右侧实时段由引擎对
+--      `robot_telemetry` 透明回填，查询 SQL 与列集**字节级不变**。
+--      本需求不动刷新策略（下列 policy 三个参数保持原值）、不动列集
+--      （status_code/battery_pct/max_joint_temp/error_code）、不动前端。
+--
 -- 已核实：TimescaleDB 2.7+ 的连续聚合支持 first()/last()（官方文档明确示例），
 -- 本库锁定 2.13.1，故 last(...) 可用，无需改写为 max()。
 CREATE MATERIALIZED VIEW IF NOT EXISTS robot_status_10s
@@ -132,6 +160,7 @@ FROM robot_telemetry
 GROUP BY bucket, robot_id
 WITH NO DATA;
 
+-- 刷新策略（R-16 **不得改动**：三个参数均为原值）：end_offset=1min / schedule=1min。
 SELECT add_continuous_aggregate_policy('robot_status_10s',
     start_offset => INTERVAL '1 hour',
     end_offset   => INTERVAL '1 minute',
@@ -306,6 +335,28 @@ SELECT add_continuous_aggregate_policy('robot_history_1h',
 --   （回归测试 tests/e2e/test_cagg_realtime_backfill.py 会在真库上立刻变红）。
 ALTER MATERIALIZED VIEW IF EXISTS robot_history_10s SET (timescaledb.materialized_only = false);
 ALTER MATERIALIZED VIEW IF EXISTS robot_history_1h  SET (timescaledb.materialized_only = false);
+
+-- 5.1d 连续聚合（R-16 修复）：把 `robot_status_10s`（看板最新态）改为**实时聚合**
+--
+-- 为什么必须有（与 §5.1c 的 R-13 同根，只是消费方不同）：
+--   TimescaleDB 2.13.1 连续聚合默认 `materialized_only = true`（源码
+--   `src/ts_catalog/continuous_agg.c:58-62` 的 `default_val = (Datum)true`）。
+--   R-13 只翻转了 `/history` 的两个 cagg（上面两条，**本需求不得改动/删除**）；
+--   `robot_status_10s` 当时按 R-13 §3 **明确留下未修**。它服务「看板最新态」，
+--   `end_offset = 1 minute` + `materialized_only = true` ⇒ 看板每台机器人的
+--   当前状态/电量/温度**缺最近 1 分钟**。这一条把它补齐。
+--
+-- 幂等性（re-run `init.sql` 安全）：
+--   `ALTER MATERIALIZED VIEW ... SET (...)` 对已是该值的视图重复执行是 no-op，不报错；
+--   `IF EXISTS` 兜底，使本段在视图被改名/删除的库上重跑也不炸（与 §5.1c 同一写法）。
+--   ⚠️ 反向红线：**禁止**把它设回 `materialized_only = true` —— 那正是本 bug 本身
+--   （回归测试 tests/e2e/test_cagg_realtime_backfill.py 会在真库上立刻变红）。
+--
+-- 本需求**不动**：刷新策略（上面 `add_continuous_aggregate_policy('robot_status_10s')`
+-- 的 start_offset/end_offset=1min/schedule_interval=1min 全为原值）、列集
+-- （status_code/battery_pct/max_joint_temp/error_code）、前端、`backend_ingestion` 查询。
+-- `end_offset` 只界定物化边界，右侧实时段由引擎对 `robot_telemetry` 透明回填。
+ALTER MATERIALIZED VIEW IF EXISTS robot_status_10s SET (timescaledb.materialized_only = false);
 
 -- 5.2 物化表索引说明（**不需要手工建**）
 -- 连续聚合会自动为每个分组列建 `(<分组列>, <分区列> DESC)` 索引
