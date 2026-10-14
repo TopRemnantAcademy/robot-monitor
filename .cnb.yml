@@ -159,29 +159,28 @@ main:
             npm run typecheck
             npx vite build
             node scripts/report-bundle-size.mjs
-    # ⏸️ sync-to-github 暂停（2026-10-11）：imports 引用的 flow.237/RobotMonitor-secrets
-    # 仓不存在（API 404 实证）→ 本 pipeline 每次 prepare 即 error，把本已全绿的
-    # push 构建整体拖成 error，掩盖真实回归。恢复条件：建 secrets 仓并注入
-    # github-sync.yml（GIT_USERNAME / GIT_ACCESS_TOKEN）后，取消下面注释即可。
-    #   - name: sync-to-github
-    #     # 单向同步 CNB main -> github.com/TopRemnantAcademy/robot-monitor（Issue #64 / C4）
-    #     # 凭据只从密钥仓库 imports 注入（GIT_USERNAME / GIT_ACCESS_TOKEN），禁止明文写入本文件。
-    #     imports:
-    #       - https://cnb.cool/flow.237/RobotMonitor-secrets/-/blob/main/github-sync.yml
-    #     stages:
-    #       - name: push main to github origin
-    #         if: '[ "$CNB_PIPELINE_KEY" != "pipeline-0" ]'
-    #         image: tencentcom/git-sync
-    #         settings:
-    #           target_url: https://github.com/TopRemnantAcademy/robot-monitor.git
-    #           auth_type: https
-    #           username: ${GIT_USERNAME}
-    #           password: ${GIT_ACCESS_TOKEN}
-    #           branch: main
-    #           force: false
-    #           push_tags: false
-    #           git_user: RobotMonitor Sync
-    #           git_email: robot-monitor@users.noreply.github.com
+    - name: sync-to-github
+      # 单向同步 CNB main -> github.com/TopRemnantAcademy/robot-monitor（Issue #64 / C4 / R-10）
+      # 凭据从【仓库级 CI 变量】注入（GIT_USERNAME / GIT_ACCESS_TOKEN），本文件只出现 ${VAR} 占位符，
+      # 绝不写明文 token（本仓为 PUBLIC，明文 PAT 会泄露；对照 R-10 规格 §7「明确不做」）。
+      # 设置位置：CNB 控制台 flow.237/RobotMonitor → 设置 → CI/CD → 变量，新增两项：
+      #   GIT_USERNAME   = x-access-token（GitHub 约定用户名，固定值）
+      #   GIT_ACCESS_TOKEN = Fine-grained PAT，仅授予 TopRemnantAcademy/robot-monitor 的 Contents: Read and write
+      # 变量就绪后本 stage 自动生效；未设时靠 if 跳过，流水线保持全绿（不做 §2.2 的「显式报红」式噪声）。
+      # 注：原设计用独立密钥仓库 + imports（flow.237/RobotMonitor-secrets），但本账户 CNB token
+      # 缺 group-resource:rw，无法建仓；仓库级 CI 变量是等价且更简的注入方式（2026-10-14 改）。
+      if: '[ "$CNB_PIPELINE_KEY" != "pipeline-0" ] && [ -n "$GIT_ACCESS_TOKEN" ]'
+      image: tencentcom/git-sync
+      settings:
+        target_url: https://github.com/TopRemnantAcademy/robot-monitor.git
+        auth_type: https
+        username: ${GIT_USERNAME}
+        password: ${GIT_ACCESS_TOKEN}
+        branch: main
+        force: false
+        push_tags: false
+        git_user: RobotMonitor Sync
+        git_email: robot-monitor@users.noreply.github.com
     # ============================================================
     # e2e：端到端 30,000 行落库验证（ISSUE #60）—— 锚点定义处（&e2e-image / &e2e-env / &e2e-stages）
     #
