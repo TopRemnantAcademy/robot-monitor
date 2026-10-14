@@ -79,6 +79,22 @@ class Settings(BaseSettings):
     # 两者语义不同，不要为了"看着一致"把它们并成一个值。
     robot_offline_threshold_s: float = 30.0
 
+    # ---- CORS（R-17）----
+    # 允许的来源，逗号分隔。**默认空 = 不启用 CORS 中间件**（同源部署即够），
+    # 绝不默认 `*`：`*` 与 allow_credentials=True 组合会让任意站点都能带着
+    # 用户凭据打后端（CSRF/信息泄露面），R-17 §6 明确列为禁止项。
+    # 只有**显式**写 `*` 才放行所有来源（代码里单独分支 + 告警日志）。
+    # 例：CORS_ALLOW_ORIGINS=http://localhost:5173,https://board.example.com
+    cors_allow_origins: str = ""
+
+    # ---- 限流（R-17，可选，默认关闭）----
+    # 总开关。默认 false = 不加任何限流逻辑，既有 e2e/探针/监控的请求节奏逐字不变
+    # （R-17 §6 硬门槛：限流不得破坏 e2e-30k-landing 真绿）。
+    rate_limit_enabled: bool = False
+    # 每客户端 IP 每分钟的请求上限（固定窗口）。仅在 rate_limit_enabled=true 时生效。
+    # /healthz、/metrics、/ws/robots 与 /internal/* 恒免限流（见 security_middleware）。
+    rate_limit_per_minute: int = 120
+
     # ---- HTTP ----
     ws_host: str = "0.0.0.0"
     ws_port: int = 8000

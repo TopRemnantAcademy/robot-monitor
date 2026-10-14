@@ -43,6 +43,7 @@ from app.schemas.api import (
     RobotHistoryResponse,
     RobotListResponse,
 )
+from app.security_middleware import install_cors, install_rate_limit
 from app.services import liveness, mqtt_subscriber, state_cache
 from app.services.batch_writer import BatchWriter
 from app.services.metadata_writer import metadata_writer
@@ -133,6 +134,20 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="RobotMonitor Ingestion", lifespan=lifespan)
+
+# R-17：CORS + 可选限流（中间件挂载，**不改任何路由处理函数/契约/鉴权**）。
+# 必须在第一个请求到达前挂载 —— Starlette 的 add_middleware 只在应用启动前有效。
+# 两者都默认"关闭/最小暴露"，未配置 env 时行为与改动前**逐字一致**：
+#   - CORS_ALLOW_ORIGINS 为空   → 不挂 CORS 中间件（同源部署够用）
+#   - RATE_LIMIT_ENABLED=false  → 不挂限流中间件
+# 挂载顺序无相互依赖（一个管响应头、一个管请求计数），但都在 include_router 之前，
+# 保证对**全部**路由（含 /auth/* 登录端点）生效。
+install_cors(app, settings.cors_allow_origins)
+install_rate_limit(
+    app,
+    enabled=settings.rate_limit_enabled,
+    per_minute=settings.rate_limit_per_minute,
+)
 
 # 认证路由（/auth/register、/auth/jwt/login、/auth/jwt/logout、/users/me）。
 # 它们**不加**任何鉴权依赖 —— 登录端点自己再要求 token 就成了死循环。
