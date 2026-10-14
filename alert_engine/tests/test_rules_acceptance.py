@@ -503,7 +503,15 @@ def test_consume_line_feeds_window_and_emits(engine, monkeypatch):
     monkeypatch.setattr(m, "save", fake_save)
     monkeypatch.setattr(m, "should_emit", fake_should_emit)
 
-    # 直接调用消费线的“单条处理”逻辑：把 pubsub.listen() 换成有限序列
+    # 直接喂消费线的"单条处理"逻辑：把 pubsub.listen() 换成固定序列。
+    #
+    # ⚠️ R-14 后本替身必须**忠于真实驱动**：真 redis-py 的 `listen()` 永不自然结束
+    # （只在断连时抛异常）。R-14 前 consume() 是一句裸的 `async for`，替身"吐完就
+    # 返回"会让 consume() 顺势返回 —— 本用例当时靠这个副作用收尾。
+    # 现在 consume() 外层是 `while True`（断连自愈的必要代价），替身再"自然结束"
+    # 就等价于让 consume() 每轮重新 subscribe，本用例会永久跑下去（实测 30s 超时）。
+    # 故此处改为：吐完 3 条消息后挂起，由 drive() 主动 cancel 收尾 ——
+    # 断言对象（窗口内容 + 触发到的规则）与改动前**完全一致**。
     class _PubSub:
         def __init__(self):
             self._msgs = [
@@ -522,6 +530,8 @@ def test_consume_line_feeds_window_and_emits(engine, monkeypatch):
         async def listen(self):
             for msg in self._msgs:
                 yield msg
+            # 消息吐完 → 永不返回（真驱动的性质：连接仍在，只是暂时没消息）
+            await __import__("asyncio").Event().wait()
 
     class _R:
         def pubsub(self):
@@ -533,7 +543,17 @@ def test_consume_line_feeds_window_and_emits(engine, monkeypatch):
     monkeypatch.setattr(m, "get_redis", fake_get_redis)
 
     async def drive():
-        await m.consume()
+        # 等 3 条消息都进窗口（消费线是协程，不能 await 到它自己结束）
+        task = __import__("asyncio").ensure_future(m.consume())
+        for _ in range(200):
+            await __import__("asyncio").sleep(0)
+            if "humanoid-001" in m.windows and len(m.windows["humanoid-001"]) == 3:
+                break
+        task.cancel()
+        try:
+            await task
+        except __import__("asyncio").CancelledError:
+            pass
         # consume() 内部用 spawn() 把 emit 扔进后台任务，等它们跑完再收尾
         if m._tasks:
             await __import__("asyncio").gather(*list(m._tasks),

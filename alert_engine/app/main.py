@@ -28,6 +28,8 @@ import logging
 import time
 from collections import deque
 
+from redis.exceptions import RedisError
+
 from app.config import settings
 from app.db import close_all, get_redis
 from app.deduplicator import should_emit
@@ -342,38 +344,98 @@ async def emit(alert: Alert) -> None:
 
 # ---------------------------------------------------------------- 消费线
 
+# `pubsub.listen()` 的**断连类**异常元组（R-14）。
+#
+# ⚠️ 这里必须同时列 `RedisError` 与内建 `ConnectionError/OSError/TimeoutError`，
+# 二者**不构成继承关系**：本机实测（redis 5.0.3）
+#     >>> issubclass(redis.exceptions.ConnectionError, ConnectionError)  # 内建
+#     False
+#     >>> issubclass(redis.exceptions.TimeoutError, TimeoutError)        # 内建
+#     False
+# redis-py 自己的 `exceptions.ConnectionError` / `TimeoutError` 都只继承
+# `RedisError -> Exception`，是**与内建同名但无关**的类。只捕内建 `ConnectionError`
+# 会漏掉 redis 驱动实际抛出的那个，等于没修；只捕 `RedisError` 又会漏掉
+# 底层 socket 直抛的 `OSError`（hiredis 路径）。故两组都列。
+# 用元组而非在 `consume()` 内 `except` 叠加：只捕一次，避免"哪个 except 先命中"
+# 的隐式顺序依赖。
+REDIS_DISCONNECT_ERRORS = (RedisError, ConnectionError, OSError, TimeoutError)
+
+# 重连退避参数（秒）：1s 起步、逐次翻倍、30s 封顶。
+# 为什么不无限翻倍：100 台 × 10Hz 的下游是**有界**负载，退避只需躲开
+# "Redis 正在重启"的抖动窗口；封顶 30s 保证 Redis 恢复后最坏 30s 内自愈，
+# 不会因为退避涨到几小时而变成"事实上的永久停订阅"（那与不修无差别）。
+RECONNECT_BACKOFF_INITIAL_S = 1.0
+RECONNECT_BACKOFF_MAX_S = 30.0
+
+
 async def consume() -> None:
-    r = await get_redis()
-    pubsub = r.pubsub()
-    await pubsub.subscribe(settings.chan_stream_all)
-    log.info("alert_engine consuming %s", settings.chan_stream_all)
-    async for msg in pubsub.listen():
-        if msg.get("type") != "message":
-            continue
+    """消费 `robot:stream:all`，Redis 断连时**协程内**退避重连（R-14）。
+
+    R-14 之前的结构是 `subscribe` 后直接 `async for msg in pubsub.listen()`，
+    `listen()` 抛出的断连异常会逃出本协程 → 经 `amain()` 的 `asyncio.gather`
+    向上传播 → 整条协程树失败、进程退出；即便容器有 restart，`ticker()`
+    与 `escalation_loop()` 这两个**本身没坏**的兄弟协程也被同一 gather 连带取消。
+
+    现在改为「自重启」结构：外层 `while True` 永不因断连而退出，内层只负责
+    跑一轮监听。断连时吞掉异常、按指数退避、**重建 pubsub 并重新 subscribe**
+    （订阅状态不跨连接保留，漏了这步就是静默不消费），然后 `continue` 下一轮。
+
+    铁律：异常**不得**逃出本协程（§6），也**不得**把重连失败再 `raise`（那等于没修）。
+    """
+    backoff = RECONNECT_BACKOFF_INITIAL_S
+    while True:
         try:
-            data = json.loads(msg["data"])
-        except json.JSONDecodeError:
-            continue
-        rid = data.get("robot_id")
-        if not rid:
-            continue
+            r = await get_redis()
+            pubsub = r.pubsub()
+            await pubsub.subscribe(settings.chan_stream_all)
+            log.info("alert_engine consuming %s", settings.chan_stream_all)
+            async for msg in pubsub.listen():
+                if msg.get("type") != "message":
+                    continue
+                # 退避复位点：**收到真实消息**这一刻是"这条链路真的在通"的唯一硬证据，
+                # 故复位必须挂这里，且只能挂这里：
+                #   - 若挂在 `subscribe()` 返回后：Redis 正在重启时 subscribe 能成、
+                #     随即断，退避会永远停在 1s → "指数退避"名存实亡，退化成每秒一次的
+                #     忙重试风暴（本机实测：连续 6 次断连的退避序列全是初始值）。
+                #   - 若挂在 `async for` 正常结束之后：以断连收场的那些轮根本走不到
+                #     那一行，而"投递过消息后断连"恰是最该复位的情形。
+                backoff = RECONNECT_BACKOFF_INITIAL_S
+                try:
+                    data = json.loads(msg["data"])
+                except json.JSONDecodeError:
+                    continue
+                rid = data.get("robot_id")
+                if not rid:
+                    continue
 
-        w = windows.setdefault(rid, deque(maxlen=settings.window_maxlen))
-        w.append(data)
-        last_seen[rid] = time.time()
+                w = windows.setdefault(rid, deque(maxlen=settings.window_maxlen))
+                w.append(data)
+                last_seen[rid] = time.time()
 
-        for rule in STREAM_RULES:
-            try:
-                alert = rule.evaluate(data, w)
-            except Exception:
-                log.exception("rule %s failed on %s", rule.rule_id, rid)
-                continue
-            if alert is not None:
-                spawn(emit(alert))
-            else:
-                # 本轮该规则未命中 = 已恢复 → 清登记，否则它会永远当"根因"
-                # 压制同机的其它告警（订单 30 关键点：不及时清除 = 永久误抑制）。
-                active_alerts.clear(rid, rule.rule_id)
+                for rule in STREAM_RULES:
+                    try:
+                        alert = rule.evaluate(data, w)
+                    except Exception:
+                        log.exception("rule %s failed on %s", rule.rule_id, rid)
+                        continue
+                    if alert is not None:
+                        spawn(emit(alert))
+                    else:
+                        # 本轮该规则未命中 = 已恢复 → 清登记，否则它会永远当"根因"
+                        # 压制同机的其它告警（订单 30 关键点：不及时清除 = 永久误抑制）。
+                        active_alerts.clear(rid, rule.rule_id)
+        except REDIS_DISCONNECT_ERRORS as exc:
+            # 只吞断连类异常；其余异常（真 bug）照旧逃出，不被这里掩盖成"假活"。
+            # 注意 except 挂在 `while True` 内、包住**整轮监听**（含 listen() 与消息处理），
+            # 而不是嵌在消息处理里 —— 否则 listen() 自身抛的断连就没兜底（这正是 R-14 的洞）。
+            metrics.redis_reconnect.inc()
+            log.warning(
+                "consume(): Redis 断连（%s: %s），%.1fs 后重连并重新 subscribe %s",
+                type(exc).__name__, exc, backoff, settings.chan_stream_all,
+            )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, RECONNECT_BACKOFF_MAX_S)
+            continue
 
 
 # ---------------------------------------------------------------- ticker 线
@@ -428,11 +490,45 @@ async def ticker() -> None:
         metrics.robots_online.set(sum(1 for v in online_state.values() if v))
 
 
+def _isolate(name: str, coro):
+    """把一条驱动线包成"崩溃只记日志、不掀翻兄弟"的协程（R-14 / T3）。
+
+    为什么需要它：`asyncio.gather(consume(), ticker(), escalation_loop())` 的默认
+    语义是**任一子协程抛异常 → gather 立即上抛、其余子协程被取消**。于是
+    `consume()` 一次 Redis 闪断就能连带杀死 `ticker()`（离线检测）与
+    `escalation_loop()`（升级扫描）—— 这两个本身没坏。R-14 已在 `consume()` 内部
+    兜住断连类异常，本函数是针对**其它非断连的意外崩溃**的第二道隔离。
+
+    取舍（必须写明，否则这就是把故障藏起来）：`gather` 默认的"快速失败+取消兄弟"
+    在这里**语义上是错的** —— 三条线是**互相独立的驱动线**，一条挂掉不构成
+    另两条该停的理由；容器 restart 才是"整体重启"的正确层级。代价是进程可能
+    "假活"（某条线死了但进程还在）。因此这里**必须**保证崩溃可见：
+    `log.critical` + `traceback`，让 `AlertEngineDown` 之外的日志告警能兜住它。
+    只捕 `Exception` 不捕 `BaseException`：`CancelledError` 必须照旧上抛，
+    否则 `amain()` 的 `finally` 取消 `_tasks` 时会被这里吞掉、关不干净。
+    """
+    async def _wrapped():
+        try:
+            return await coro
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.critical("驱动线 %s 意外崩溃（其兄弟协程不受影响）", name,
+                         exc_info=True)
+            return None
+    return _wrapped()
+
+
 async def amain() -> None:
     try:
         # escalation_loop 与另两条驱动线并发：它不对应"输入流"，而是周期性
         # 扫描"已发出、severity=3、超时仍未 ack"的告警，重发升级（订单 17 T2）。
-        await asyncio.gather(consume(), ticker(), escalation_loop())
+        # 三条线各自隔离（R-14 / T3）：一条崩溃不再连带取消另外两条。
+        await asyncio.gather(
+            _isolate("consume", consume()),
+            _isolate("ticker", ticker()),
+            _isolate("escalation_loop", escalation_loop()),
+        )
     finally:
         for t in list(_tasks):
             t.cancel()

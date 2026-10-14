@@ -115,6 +115,27 @@ notify_failed = Counter(
     registry=registry,
 )
 
+#: Redis pubsub **断连重连**次数（R-14）。
+#:
+#: 为什么必须有这颗（而不是只打日志）：`consume()` 的 `pubsub.listen()` 在 Redis
+#: 闪断时会抛 `redis.exceptions.ConnectionError`。R-14 之前这类异常直接逃出协程、
+#: 经 `asyncio.gather` 拖垮整条进程；修复后它被**吞在协程内**并走退避重连 ——
+#: 代价是「引擎在反复闪断」从"进程崩掉"（容器 restart 可见）降级成
+#: **完全静默的内部状态**：`/metrics` 照常 200、`up=1`、看板全绿，但此刻
+#: 流式告警消费正处于退避等待中，是**真的不在消费**。
+#: 有这颗 counter，`increase(robot_alert_redis_reconnect_total[5m]) > 0`
+#: 就能把这类"假活"暴露出来（与 R-15 的 store_errors 同一思路：
+#: 只统计"决定做什么"而不统计"实际做成了吗"，看板绿是假的）。
+#:
+#: 只计**重连尝试发起**的次数（含本次重连后恢复成功的），不做
+#: 成功/失败拆分：失败会立刻再进下一轮退避，故"次数持续上涨"本身就
+#: 是失败未终止的证据，无需第二个指标。
+redis_reconnect = Counter(
+    "robot_alert_redis_reconnect_total",
+    "consume() 因 Redis 断连而发起重连（退避后重建 pubsub 并重新 subscribe）的次数",
+    registry=registry,
+)
+
 
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 (stdlib 命名约定)
