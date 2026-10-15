@@ -7,7 +7,8 @@
 > 「CNB → GitHub 推送模式」示例逐字一致（`stages: → image: tencentcom/git-sync → settings`）。
 > 另修复 `6ac9e7f` 误删 `stages:` 包裹致 pipeline 空转的缺陷（`557c664`）；实测 stage 以
 > `skipped` 正常跳过（变量未设时流水线保持全绿）。GitHub 侧现状：main 停在 `4208f8c`
-> （落后 CNB 46 提交，可 ff），最后推送 `2026-10-12T00:19Z`；因 `4208f8c` 处 `.cnb.yml` 的
+> （CNB main 的**祖先、可 ff**；落后 46+ 提交，随 CNB 推进增大——46 为本次整理时点数），
+> 最后推送 `2026-10-12T00:19Z`；因 `4208f8c` 处 `.cnb.yml` 的
 > sync 块为注释态、且 §5 记「端到端未验证」，该内容的来源**未能证实为 git-sync 产物**
 > （不排除早期手工推送）。
 > 事实源：Issue #64（`CNB main 自动同步 GitHub origin (C4)`）。
