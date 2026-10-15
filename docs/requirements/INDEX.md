@@ -4,6 +4,13 @@
 > 每个需求一份 `R-xx-*.md`，本文件是总索引与模式约定。
 >
 > 最后更新：**2026-10-14（R-14~R-17 全部回收完成）**：codebuddy 交付 PR #127~#130，4 个均经两点 diff 白名单 + CI 双绿 + e2e 真绿（rows_written≥39786、rows_skipped=0、hypertable=1、无实际 skip）核验；#127→`3bf9fe5`/#128→`29d239d`/#129→`0f340c3`/#130→`2f7b072` 全部 squash 合并 `cnb/main`，#123~#126 全部关 `completed`，4 个 `auto/*` 分支全部删除；远程仅 `main`、开放 PR=0、开放 Issue=0。
+>
+> 2026-10-16 更新：**R-10 接入方式变更 + 结构缺陷修复**——① 因本账户 CNB token 缺 `group-resource:rw`
+> （建密钥仓 `flow.237/RobotMonitor-secrets` 实测 403 errcode 10023）+ 本仓为 PUBLIC（明文 PAT 不可接受），
+> 凭据注入改为**仓库级 CI 变量**（`GIT_USERNAME`/`GIT_ACCESS_TOKEN`，与 git-sync 官方示例完全一致）；
+> ② 修复 `6ac9e7f` 误删 `stages:` 包裹导致 sync pipeline 空转的缺陷（`557c664`，对齐官方
+> `stages: → image/settings` 结构）。历史事实：同步曾于 2026-10-11 23:05Z 前正常工作
+> （GitHub main 停在 `4208f8c`），此后中断（落后 46 个提交，可 ff）。剩余唯一用户动作：控制台设 2 个 CI 变量。
 > 2026-10-13 追加：**回收 SOP 实测**——codebuddy 的 token 缺 `repo-pr:rw`（且历史上缺 `repo-code:rw`），
 > 能 `git push` 分支但**开不了 PR**；本地用本账户 Bearer 头（含 `repo-code:rw`+`repo-pr:rw`）开 PR +
 > squash 合并回收。详见第一节末「回收 SOP」。
@@ -67,7 +74,7 @@ codebuddy 的 CNB token **缺 `repo-pr:rw`（历史上也缺 `repo-code:rw`）**
 | R-07 | 端到端联调与压测规格 | ✅ 订单 06 收口单（判据本身） | `R-07-integration-and-stress.md` | `test_integration.sh` 可重复；30,000 行实跑（CI 承证 #111） |
 | R-08 | 验收测试矩阵（逐用例编号·可判定） | ✅ 订单 01–06 映射 | `R-08-acceptance-matrix.md` | 通用规则 + 7 段矩阵 |
 | R-09 | 数据库对接规格（TimescaleDB） | ✅ Issue #19 已合入 `main` | `R-09-database-integration.md` | 真 TimescaleDB 2.13.1 实测 13/13；三级写入降级链 |
-| R-10 | CNB → GitHub 单向自动同步（C4 / Issue #64） | ⏳ **流水线已落地，端到端未验证**（缺 GitHub 凭据 + `flow.237/RobotMonitor-secrets` 密钥仓库） | `R-10-cnb-github-sync.md` | `.cnb.yml:23-45` 已挂 `push` 事件；同步未跑通 |
+| R-10 | CNB → GitHub 单向自动同步（C4 / Issue #64） | 🟡 **配置已修复+激活，待用户设 2 个 CI 变量后生效**（凭据改用仓库级 CI 变量，弃用密钥仓方案） | `R-10-cnb-github-sync.md` | `.cnb.yml` `sync-to-github`（pipeline→stages→git-sync 官方结构）；`557c664` 修复空转；GitHub 侧 `TopRemnantAcademy/robot-monitor`(PRIVATE) 存在、可 ff（落后 46 commit） |
 | R-11 | 业务 Grafana 看板固化（robot_backend_*/robot_alert_* 可视化） | ✅ **已回收**（PR #118 squash→`2327ec2`，#117 关；本地两点 diff 白名单 + V1/V2/CI 双绿实证） | `R-11-business-grafana-dashboard.md` | 9 个 EMQX 看板已存；业务指标 `grep` 0 命中（实证 §1）；交付仅 2 新 JSON，23 指标名全命中 |
 | R-12 | `/history` 长期趋势查询（小时级下采样，跨天可见） | ✅ **已回收**（PR #120 squash→`f2969746`，#119 关；本地两点 diff 白名单 + 红线 SHA256/变量回退/CI 双绿实证） | `R-12-history-longterm-trend.md` | `history()` 仅 10s cagg + 原始回退，`minutes` 无上限（`main.py:278`）；回收后加 `robot_history_1h` + 路由 + 上限 |
 
@@ -106,7 +113,7 @@ codebuddy 的 CNB token **缺 `repo-pr:rw`（历史上也缺 `repo-code:rw`）**
 |---|---|---|---|
 | **R-11** | 业务 Grafana 看板（robot_backend_*/robot_alert_* 可视化） | ✅ **已回收**（PR #118→`2327ec2`，#117 关） | 无；V3/V4 需 docker 栈复验（本机无 docker） |
 | **R-12** | `/history` 长期趋势查询（小时级下采样） | ✅ **已回收**（PR #120→`f2969746`，#119 关；e2e-30k-landing 真绿） | 无（改 `init.sql`+`main.py`，中风险，R-03 回归护栏为硬门槛，已实证守住） |
-| R-10 | C4 GitHub 同步端到端验证 | ⏳ 规格在 `R-10-cnb-github-sync.md` | **需用户备 GitHub PAT（只写 `robot-monitor`）+ 建 CNB 密钥仓库 `flow.237/RobotMonitor-secrets`**；本地无法执行 |
+| R-10 | C4 GitHub 同步端到端验证 | 🟡 配置已修复（记 `557c664`），待端到端验证 | **仅余用户在 CNB 控制台设 `GIT_USERNAME`=x-access-token 与 `GIT_ACCESS_TOKEN`=GitHub PAT**（仓库级 CI 变量；本账户 token 无 `group-resource:rw` 建不了密钥仓 + 仓库 PUBLIC 故不采密钥仓）；`gh` 已登录 TopRemnantAcademy（repo 权限）可自验 |
 | **R-13** | `robot_history_1h`/`robot_history_10s` 实时聚合修复（`materialized_only=false`）+ 真库回归测试（GAP-1 复核：**真 bug**，初版误判已推翻） | ✅ **已回收**（PR #122 squash→`c020fc6`，#121 关；两点 diff 白名单 + 真库测试实证 + CI 双绿） | 中风险（改 cagg 属性，非刷新策略/列/查询）；robot_status_10s sibling 留后续 |
 
 | **R-14** | 告警引擎 `consume()` Redis 断连监督（进程级韧性） | ✅ **已回收**（PR #130 squash→`2f7b072`，#123 关，`auto/redis-reconnect-acf4` 删） | 与 #129 在 `metrics.py` 位置冲突（均新增 Counter）→ 本地 rebase 到 `cnb/main` 合并三指标(`notify_sent`/`notify_failed`/`redis_reconnect`) + force-push 触发 CI 重跑；两点 diff 白名单 + CI 双绿 + e2e 真绿(rows_written=39831,rows_skipped=0) 实证 |
@@ -122,7 +129,8 @@ codebuddy 的 CNB token **缺 `repo-pr:rw`（历史上也缺 `repo-code:rw`）**
 > 包裹实现幂等，`:326-332` 注释亦说明「改用 `timescaledb_information.jobs` 存在性判断做幂等，重跑安全」。
 > 原 GAP-5 描述的「重跑会报错」**不成立**，故不重复造需求（幻觉）。
 >
-> **R-10（CNB→GitHub 同步）仍阻塞**：需用户备 GitHub PAT（仅写 `robot-monitor`）+ 建 CNB 密钥仓库
-> `flow.237/RobotMonitor-secrets`，本地无法执行、不可派单。
+> **R-10（CNB→GitHub 同步）**：不再依赖密钥仓（本账户 token 缺 `group-resource:rw`，建仓 403）。
+> 已改用仓库级 CI 变量注入并修复结构缺陷（`557c664`）；仅余用户在控制台设 2 个变量，本地无法代设
+> （CLI 无 CI 变量 API + 仓库 PUBLIC 不可明文）。
 >
 > 下一轮需求派单继续在本目录新增 `R-18-*.md` 起，并遵循第一节模式约定。

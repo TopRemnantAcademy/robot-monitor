@@ -1,6 +1,13 @@
 # R-10 CNB → GitHub 单向自动同步（C4 / Issue #64）
 
-> 状态：**流水线已落地，端到端未验证**（缺 GitHub 凭据与目标仓库）。
+> 状态（2026-10-16）：**配置已修复 + 激活，待用户在 CNB 控制台设 2 个仓库级 CI 变量后生效**。
+> ⚠️ 接入方式已变更：**弃用** §2.2 的「密钥仓 + `imports`」方案（本账户 CNB token 缺
+> `group-resource:rw`，建仓实测 403 errcode 10023；且本仓为 PUBLIC，明文 PAT 不可接受），
+> 改用**仓库级 CI 变量** `GIT_USERNAME` / `GIT_ACCESS_TOKEN` —— 与 git-sync 官方 README 的
+> 「CNB → GitHub 推送模式」示例逐字一致（`stages: → image: tencentcom/git-sync → settings`）。
+> 另修复 `6ac9e7f` 误删 `stages:` 包裹致 pipeline 空转的缺陷（`557c664`）；实测 stage 以
+> `skipped` 正常跳过（变量未设时流水线保持全绿）。历史：同步曾于 2026-10-11 23:05Z 前正常
+> 工作（GitHub main 停在 `4208f8c`），此后中断（落后 46 提交，可 ff）。
 > 事实源：Issue #64（`CNB main 自动同步 GitHub origin (C4)`）。
 
 ---
