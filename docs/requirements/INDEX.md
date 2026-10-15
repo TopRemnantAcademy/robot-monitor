@@ -9,8 +9,9 @@
 > （建密钥仓 `flow.237/RobotMonitor-secrets` 实测 403 errcode 10023）+ 本仓为 PUBLIC（明文 PAT 不可接受），
 > 凭据注入改为**仓库级 CI 变量**（`GIT_USERNAME`/`GIT_ACCESS_TOKEN`，与 git-sync 官方示例完全一致）；
 > ② 修复 `6ac9e7f` 误删 `stages:` 包裹导致 sync pipeline 空转的缺陷（`557c664`，对齐官方
-> `stages: → image/settings` 结构）。历史事实：同步曾于 2026-10-11 23:05Z 前正常工作
-> （GitHub main 停在 `4208f8c`），此后中断（落后 46 个提交，可 ff）。剩余唯一用户动作：控制台设 2 个 CI 变量。
+> `stages: → image/settings` 结构）。GitHub 侧现状：main 停在 `4208f8c`（落后 CNB **46 提交**，可 ff），
+> 最后推送 `2026-10-12T00:19Z`；该内容**来源未能证实为 git-sync 产物**（彼时 `4208f8c:cnb.yml`
+> 的 sync 块为注释态，R-10 §1/§5 亦记「端到端未验证」，不排除早期手工推送）。剩余唯一用户动作：控制台设 2 个 CI 变量。
 > 2026-10-13 追加：**回收 SOP 实测**——codebuddy 的 token 缺 `repo-pr:rw`（且历史上缺 `repo-code:rw`），
 > 能 `git push` 分支但**开不了 PR**；本地用本账户 Bearer 头（含 `repo-code:rw`+`repo-pr:rw`）开 PR +
 > squash 合并回收。详见第一节末「回收 SOP」。
