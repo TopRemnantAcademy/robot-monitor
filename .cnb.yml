@@ -1,7 +1,8 @@
 # RobotMonitor CNB NPC 配置
 # 两种触发：
 #  A) Issue/PR 评论 @mention（NPC 模式）：在 Issue 评论里写 @flow.237/RobotMonitor(开发工程师) 派工
-#  B) crontab 自主流水线（常规模式）：每天 0/6/12/18 点跑 7 段，读 spec/ci/*-call.md 执行
+#  B) crontab 自主流水线 —— **2026-10-20 已删除**（按用户指令移除所有自动触发的 NPC 设置；
+#     原 7 段 agent 巡检因 402 配额长期不可用，详见文件末尾 tombstone）
 include:
   - https://cnb.cool/Bring/Agents/Agent/-/blob/main/npc.yml
 
@@ -455,106 +456,13 @@ main:
       env: *e2e-env
       stages: *e2e-stages
 
-  # ⏸️ NPC 自主流水线暂停（2026-10-12）：账号级 AI 积分耗尽，非代码缺陷。
-  # 实证（两次 successive crontab 均在首段 pm-call 秒退）：
-  #   cnb-uhp-1k4lr2qtk（2026-10-11T16:00Z）error
-  #   cnb-pt8-1k4mfls3u（2026-10-11T22:00Z）error
-  # runner 日志原文（matter of record）：
-  #   [llm error] HTTP 402 — {"message":"[EXCEEDING_LIMIT]AI 积分已用尽，
-  #   请联系根组织管理员提升配额。/ AI credits are exhausted. ..."}
-  #   [error] Agent 执行出错：402 ... exit code: 1, duration: 1.5s
-  # ✅ NPC 自主流水线已恢复并配额治理（2026-10-13 下午）：原始 4×/day（0/6/12/18）7 段流水线
-  # 在 12:00 CST 轮再次 402 [EXCEEDING_LIMIT] AI 积分耗尽（cnb-bd0-1k4pmljt2，pm-call 秒退）；
-  # 实证配额撑不住 4 轮/日。治理：(1) 降频为 1×/day（18:00 CST）——自主巡检仅留夜间一扫，
-  # 白天配额让给人工 work-mode 派单；(2) pm-call.md 加积分保护（启动先查近 6h 是否有 402 构建）。
-  # ⚠️ 2026-10-14 复核：原写的「双保险，402 不再复发」**与实证不符，已推翻**——
-  #   · 降频后 18:00 轮仍 402：cnb-c7q-1k4qb8q4r(10-13)、cnb-419-1k4vg2hcl(10-15)，
-  #     均 pm-call 首条 LLM 调用即 402（配额在该轮开始前已耗尽，非本轮耗尽）。
-  #   · pm-call.md:6 守卫**结构性失效**：指示用 get-build-logs（仅构建列表元数据）判「runner
-  #     日志含 402」，而 402/EXCEEDING_LIMIT 串只在 build-runner-download-log 的 .bin 里 →
-  #     守卫恒判「无耗尽」→ 照常调 LLM；且 6h 窗口使 12:00 那次 402 恰在边界；其余 6 个
-  #     *-call.md 无守卫。（修复需把守卫改为下载 runner 日志 grep + 铺全 7 段，属行为变更。）
-  # 结论：402 = 账号级配额硬上限信号，处理方式=root 组织管理员提额（非注释回流水线）。
-  #
-
-  "crontab: 0 18 * * *":
-    - stages:
-        - name: pm-call
-          image: docker.cnb.cool/bring/agents/agent:latest
-          settings:
-            max_turns: 30
-            workspace_preflight: on
-            system_prompt: |
-              你是本仓库 RobotMonitor 的产品经理。严格遵守 AGENTS.md 全局纪律。
-              你的身份与职责见 .cnb/settings.yml 中「产品经理」角色定义。
-            user_prompt: |
-              定时巡检。先用 bash 读取 ./spec/ci/pm-call.md，严格按其程序、禁止事项、产出格式执行，不要自创流程。
-
-        - name: architect-call
-          image: docker.cnb.cool/bring/agents/agent:latest
-          settings:
-            max_turns: 40
-            workspace_preflight: on
-            system_prompt: |
-              你是本仓库 RobotMonitor 的架构师。严格遵守 AGENTS.md 全局纪律。
-              你的身份与职责见 .cnb/settings.yml 中「架构师」角色定义。
-            user_prompt: |
-              定时巡检。先用 bash 读取 ./spec/ci/architect-call.md，严格按其程序执行，不要自创流程。
-
-        - name: dev-call
-          image: docker.cnb.cool/bring/agents/agent:latest
-          settings:
-            max_turns: 120
-            workspace_preflight: on
-            system_prompt: |
-              你是本仓库 RobotMonitor 的开发工程师。严格遵守 AGENTS.md 全局纪律（无幻觉/完整可运行/性能护栏/数据契约）。
-              你的身份与职责见 .cnb/settings.yml 中「开发工程师」角色定义。
-            user_prompt: |
-              定时巡检。先用 bash 读取 ./spec/ci/dev-call.md，严格按其程序执行，不要自创流程。
-
-        - name: review-call
-          image: docker.cnb.cool/bring/agents/agent:latest
-          settings:
-            max_turns: 60
-            workspace_preflight: on
-            system_prompt: |
-              你是本仓库 RobotMonitor 的代码审查工程师。严格遵守 AGENTS.md 全局纪律。
-              你的身份与职责见 .cnb/settings.yml 中「代码审查」角色定义。
-            user_prompt: |
-              定时巡检。先用 bash 读取 ./spec/ci/review-call.md，严格按其程序执行，不要自创流程。
-
-        - name: test-call
-          image: docker.cnb.cool/bring/agents/agent:latest
-          settings:
-            max_turns: 60
-            workspace_preflight: on
-            system_prompt: |
-              你是本仓库 RobotMonitor 的测试工程师。严格遵守 AGENTS.md 全局纪律。
-              你的身份与职责见 .cnb/settings.yml 中「测试工程师」角色定义。
-            user_prompt: |
-              定时巡检。先用 bash 读取 ./spec/ci/test-call.md，严格按其程序执行，不要自创流程。
-
-        - name: compliance-call
-          image: docker.cnb.cool/bring/agents/agent:latest
-          settings:
-            max_turns: 30
-            workspace_preflight: on
-            system_prompt: |
-              你是本仓库 RobotMonitor 的合规门禁。严格遵守 AGENTS.md 全局纪律。
-              你的身份与职责见 .cnb/settings.yml 中「合规」角色定义。
-            user_prompt: |
-              定时巡检。先用 bash 读取 ./spec/ci/compliance-call.md，严格按其程序执行，不要自创流程。
-
-        - name: integration-call
-          image: docker.cnb.cool/bring/agents/agent:latest
-          settings:
-            max_turns: 60
-            workspace_preflight: on
-            system_prompt: |
-              你是本仓库 RobotMonitor 的测试/集成工程师。严格遵守 AGENTS.md 全局纪律。
-              负责端到端联调：docker-compose 起栈 + 后端 + 告警引擎 + 模拟器压测 30s + 校验写入与告警。
-            user_prompt: |
-              定时巡检。先用 bash 读取 ./spec/ci/integration-call.md，严格按其程序执行，不要自创流程。
+  # ⛔ NPC 自主流水线已删除（2026-10-20，按用户指令「删除所有自动触发的 NPC 设置」）。
+  # 原 `"crontab: 0 18 * * *"` 的 7 段 agent 自主流水线（pm/architect/dev/review/test/
+  # compliance/integration-call）因账号级 AI 配额（402 [EXCEEDING_LIMIT]）长期无法运行，
+  # 且 pm-call.md:6 的配额守卫结构性失效（历史证据见 git 记录）。删除后不再有自动触发的
+  # NPC 自主巡检。保留：① `$:` 下 issue/pull_request `comment@npc`（@mention 手动派单，
+  # 非自动触发，是派单入口）；② `"crontab: 0 3 * * *"` 每日 e2e 回归（非 NPC）。
+  # 恢复方式：root 组织提额后按 git 历史恢复本块，并执行 `cnb build build-crontab-sync`。
 
   "crontab: 0 3 * * *":
     - name: e2e-30k-landing
