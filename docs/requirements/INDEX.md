@@ -16,10 +16,20 @@
 > 2026-10-13 追加：**回收 SOP 实测**——codebuddy 的 token 缺 `repo-pr:rw`（且历史上缺 `repo-code:rw`），
 > 能 `git push` 分支但**开不了 PR**；本地用本账户 Bearer 头（含 `repo-code:rw`+`repo-pr:rw`）开 PR +
 > squash 合并回收。详见第一节末「回收 SOP」。
+>
+> 2026-11-09 模式变更（**本地优先，CNB 自动化废弃**）：按用户指令「CNB에서 하지 말고 로컬에서 모든것을 완성해」——
+> ① **R-10 实質完成**：CNB CI 同步（`sync-to-github`）因本仓 PUBLIC + CNB token 缺 `group-resource:rw` 从未真正生效；
+>   改为**本地直接 `git push origin main`** 刷新 GitHub 镜像（`TopRemnantAcademy/robot-monitor`，PRIVATE），SHA 已对齐 `3072f7c`。
+> ② `.cnb.yml` 移除 `sync-to-github` 流水线（CNB 仅余被动 git 远程）。③ `issue_bodies/` 55 个中间草稿（3 跟踪 + 52 未跟踪）全删（见 §三）。
+>   ④ NPC `crontab 0 18` 已于 2026-10-20 删除；`crontab 0 3` e2e 作为非 NPC 自动化保留（本地可用 `pytest tests/e2e/test_e2e_30k.py` 替代）。
 
 ---
 
 ## 一、模式约定（2026-10-13 生效）
+
+> ⚠️ **2026-11-09 废止**：本节「CNB 派单 / codebuddy 远程执行 / 本地只写需求不写代码」模式已弃用。
+> 按用户最新指令（「CNB에서 하지 말고 로컬에서 모든것을 완성해」），所有实现与修复**本地直接完成**，
+> CNB 仅作被动 git 远程（push 用 Bearer 头）。历史 SOP 保留作审计参考，不要再据此派单。
 
 原流程依赖 CNB 平台 `workbuddy` NPC 在 issue/PR `@mention` 后执行；实测该 NPC
 **4h+ 对派单无响应**，故弃用，改为：
@@ -76,7 +86,7 @@ codebuddy 的 CNB token **缺 `repo-pr:rw`（历史上也缺 `repo-code:rw`）**
 | R-07 | 端到端联调与压测规格 | ✅ 订单 06 收口单（判据本身） | `R-07-integration-and-stress.md` | `test_integration.sh` 可重复；30,000 行实跑（CI 承证 #111） |
 | R-08 | 验收测试矩阵（逐用例编号·可判定） | ✅ 订单 01–06 映射 | `R-08-acceptance-matrix.md` | 通用规则 + 7 段矩阵 |
 | R-09 | 数据库对接规格（TimescaleDB） | ✅ Issue #19 已合入 `main` | `R-09-database-integration.md` | 真 TimescaleDB 2.13.1 实测 13/13；三级写入降级链 |
-| R-10 | CNB → GitHub 单向自动同步（C4 / Issue #64） | 🟡 **配置已修复+激活，待用户设 2 个 CI 变量后生效**（凭据改用仓库级 CI 变量，弃用密钥仓方案） | `R-10-cnb-github-sync.md` | `.cnb.yml` `sync-to-github`（pipeline→stages→git-sync 官方结构）；`557c664` 修复空转；GitHub 侧 `TopRemnantAcademy/robot-monitor`(PRIVATE) 存在、可 ff（落后 46 commit） |
+| R-10 | CNB → GitHub 单向自动同步（C4 / Issue #64） | ✅ **本地优先完成**（2026-11-09）：CNB CI 同步路径废弃，改为本地 `git push origin main` 直推 GitHub 镜像，SHA 对齐 `3072f7c`；`.cnb.yml` `sync-to-github` 流水线已移除 | `R-10-cnb-github-sync.md` | GitHub `TopRemnantAcademy/robot-monitor`(PRIVATE) 现为 `main` 完整镜像；CNB 仅被动 git 远程 |
 | R-11 | 业务 Grafana 看板固化（robot_backend_*/robot_alert_* 可视化） | ✅ **已回收**（PR #118 squash→`2327ec2`，#117 关；本地两点 diff 白名单 + V1/V2/CI 双绿实证） | `R-11-business-grafana-dashboard.md` | 9 个 EMQX 看板已存；业务指标 `grep` 0 命中（实证 §1）；交付仅 2 新 JSON，23 指标名全命中 |
 | R-12 | `/history` 长期趋势查询（小时级下采样，跨天可见） | ✅ **已回收**（PR #120 squash→`f2969746`，#119 关；本地两点 diff 白名单 + 红线 SHA256/变量回退/CI 双绿实证） | `R-12-history-longterm-trend.md` | `history()` 仅 10s cagg + 原始回退，`minutes` 无上限（`main.py:278`）；回收后加 `robot_history_1h` + 路由 + 上限 |
 
@@ -86,11 +96,12 @@ codebuddy 的 CNB token **缺 `repo-pr:rw`（历史上也缺 `repo-code:rw`）**
 
 ---
 
-## 三、关联草稿（issue_bodies/，已落地，待清理）
+## 三、关联草稿（issue_bodies/，已落地，2026-11-09 全删）
 
-`issue_bodies/01-*.md` ~ `08-*.md` 是**派工前的中间草稿**，核验后发现其描述的问题
-**已全部在 `main` 上实现**（对应 Issue #71–#78）。这些草稿已无执行价值，列此备查，
-**不应**再正式化为 R-* 需求：
+`issue_bodies/01-*.md` ~ `08-*.md` 及 `_clarify`/`_decide`/`close_*`/`pr_*`/`trigger36`/`order37-*`/`g7-watch.*`
+等是**派工前的中间草稿**，核验后发现其描述的问题**已全部在 `main` 上实现**（对应 Issue #71–#78）。
+这些草稿已无执行价值。**2026-11-09 全部删除**：共 55 个文件（3 个受跟踪 `g7-watch.sh`/`order37-cadence.md`/`trigger36.md`
++ 52 个未跟踪），目录 `issue_bodies/` 本身已移除。**不应**再正式化为 R-* 需求：
 
 | 草稿 | 主题 | 已于 `main` 落地（实证） | 对应 Issue |
 |---|---|---|---|
@@ -115,7 +126,7 @@ codebuddy 的 CNB token **缺 `repo-pr:rw`（历史上也缺 `repo-code:rw`）**
 |---|---|---|---|
 | **R-11** | 业务 Grafana 看板（robot_backend_*/robot_alert_* 可视化） | ✅ **已回收**（PR #118→`2327ec2`，#117 关） | 无；V3/V4 需 docker 栈复验（本机无 docker） |
 | **R-12** | `/history` 长期趋势查询（小时级下采样） | ✅ **已回收**（PR #120→`f2969746`，#119 关；e2e-30k-landing 真绿） | 无（改 `init.sql`+`main.py`，中风险，R-03 回归护栏为硬门槛，已实证守住） |
-| R-10 | C4 GitHub 同步端到端验证 | 🟡 配置已修复（记 `557c664`），待端到端验证 | **仅余用户在 CNB 控制台设 `GIT_USERNAME`=x-access-token 与 `GIT_ACCESS_TOKEN`=GitHub PAT**（仓库级 CI 变量；本账户 token 无 `group-resource:rw` 建不了密钥仓 + 仓库 PUBLIC 故不采密钥仓）；`gh` 已登录 TopRemnantAcademy（repo 权限）可自验 |
+| R-10 | C4 GitHub 同步端到端验证 | ✅ **已完成（本地优先，2026-11-09）**：废弃 CNB CI 同步，本地 `git push origin main` 直推 GitHub，SHA 对齐 `3072f7c`；CNB `sync-to-github` 流水线已移除 | 无阻塞（GitHub 镜像与本地 `main` 一致）；如需恢复 CNB 自动同步需另建密钥仓+提额，暂不采 |
 | **R-13** | `robot_history_1h`/`robot_history_10s` 实时聚合修复（`materialized_only=false`）+ 真库回归测试（GAP-1 复核：**真 bug**，初版误判已推翻） | ✅ **已回收**（PR #122 squash→`c020fc6`，#121 关；两点 diff 白名单 + 真库测试实证 + CI 双绿） | 中风险（改 cagg 属性，非刷新策略/列/查询）；robot_status_10s sibling 留后续 |
 
 | **R-14** | 告警引擎 `consume()` Redis 断连监督（进程级韧性） | ✅ **已回收**（PR #130 squash→`2f7b072`，#123 关，`auto/redis-reconnect-acf4` 删） | 与 #129 在 `metrics.py` 位置冲突（均新增 Counter）→ 本地 rebase 到 `cnb/main` 合并三指标(`notify_sent`/`notify_failed`/`redis_reconnect`) + force-push 触发 CI 重跑；两点 diff 白名单 + CI 双绿 + e2e 真绿(rows_written=39831,rows_skipped=0) 实证 |
@@ -131,8 +142,8 @@ codebuddy 的 CNB token **缺 `repo-pr:rw`（历史上也缺 `repo-code:rw`）**
 > 包裹实现幂等，`:326-332` 注释亦说明「改用 `timescaledb_information.jobs` 存在性判断做幂等，重跑安全」。
 > 原 GAP-5 描述的「重跑会报错」**不成立**，故不重复造需求（幻觉）。
 >
-> **R-10（CNB→GitHub 同步）**：不再依赖密钥仓（本账户 token 缺 `group-resource:rw`，建仓 403）。
-> 已改用仓库级 CI 变量注入并修复结构缺陷（`557c664`）；仅余用户在控制台设 2 个变量，本地无法代设
-> （CLI 无 CI 变量 API + 仓库 PUBLIC 不可明文）。
+> **R-10（CNB→GitHub 同步）**：2026-11-09 改为**本地直推**完成——`git push origin main` 把本地 `main` 镜像到
+> `TopRemnantAcademy/robot-monitor`(PRIVATE)，SHA `3072f7c` 对齐；CNB 侧 `sync-to-github` 流水线已移除，
+> CNB 仅作被动 git 远程。原「密钥仓/CI 变量」方案因本仓 PUBLIC + token 缺 `group-resource:rw` 判定为死路，彻底弃用。
 >
 > 下一轮需求派单继续在本目录新增 `R-18-*.md` 起，并遵循第一节模式约定。

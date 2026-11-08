@@ -160,30 +160,12 @@ main:
             npm run typecheck
             npx vite build
             node scripts/report-bundle-size.mjs
-    - name: sync-to-github
-      # 单向同步 CNB main -> github.com/TopRemnantAcademy/robot-monitor（Issue #64 / C4 / R-10）
-      # 凭据从【仓库级 CI 变量】注入（GIT_USERNAME / GIT_ACCESS_TOKEN），本文件只出现 ${VAR} 占位符，
-      # 绝不写明文 token（本仓为 PUBLIC，明文 PAT 会泄露；对照 R-10 规格 §7「明确不做」）。
-      # 设置位置：CNB 控制台 flow.237/RobotMonitor → 设置 → CI/CD → 变量，新增两项：
-      #   GIT_USERNAME   = x-access-token（GitHub 约定用户名，固定值）
-      #   GIT_ACCESS_TOKEN = Fine-grained PAT，仅授予 TopRemnantAcademy/robot-monitor 的 Contents: Read and write
-      # 变量就绪后本 stage 自动生效；未设时靠 if 跳过，流水线保持全绿（不做 §2.2 的「显式报红」式噪声）。
-      # 注：原设计用独立密钥仓库 + imports（flow.237/RobotMonitor-secrets），但本账户 CNB token
-      # 缺 group-resource:rw，无法建仓；仓库级 CI 变量是等价且更简的注入方式（2026-10-14 改）。
-      stages:
-        - name: push main to github origin
-          if: '[ "$CNB_PIPELINE_KEY" != "pipeline-0" ] && [ -n "$GIT_ACCESS_TOKEN" ]'
-          image: tencentcom/git-sync
-          settings:
-            target_url: https://github.com/TopRemnantAcademy/robot-monitor.git
-            auth_type: https
-            username: ${GIT_USERNAME}
-            password: ${GIT_ACCESS_TOKEN}
-            branch: main
-            force: false
-            push_tags: false
-            git_user: RobotMonitor Sync
-            git_email: robot-monitor@users.noreply.github.com
+    # ============================================================
+    # ⛔ sync-to-github 已移除（2026-11-09，按用户指令「CNB에서 하지 말고」本地优先）：
+    # 原 CNB CI 单向同步（tencentcom/git-sync）因本仓 PUBLIC + 本账户 CNB token 缺
+    # group-resource:rw（建密钥仓 403）从未真正生效——GitHub main 长期落后 CNB main 46+ 提交。
+    # 现改为【本地直接 push】：`git push origin main`（GitHub 远程 = TopRemnantAcademy/robot-monitor，
+    # PRIVATE），SHA 已对齐（3072f7c）。CNB 仅作被动 git 远程，不再承载任何同步/自动化。
     # ============================================================
     # e2e：端到端 30,000 行落库验证（ISSUE #60）—— 锚点定义处（&e2e-image / &e2e-env / &e2e-stages）
     #

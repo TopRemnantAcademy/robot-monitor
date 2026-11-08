@@ -1,16 +1,9 @@
 # R-10 CNB → GitHub 单向自动同步（C4 / Issue #64）
 
-> 状态（2026-10-16）：**配置已修复 + 激活，待用户在 CNB 控制台设 2 个仓库级 CI 变量后生效**。
-> ⚠️ 接入方式已变更：**弃用** §2.2 的「密钥仓 + `imports`」方案（本账户 CNB token 缺
-> `group-resource:rw`，建仓实测 403 errcode 10023；且本仓为 PUBLIC，明文 PAT 不可接受），
-> 改用**仓库级 CI 变量** `GIT_USERNAME` / `GIT_ACCESS_TOKEN` —— 与 git-sync 官方 README 的
-> 「CNB → GitHub 推送模式」示例逐字一致（`stages: → image: tencentcom/git-sync → settings`）。
-> 另修复 `6ac9e7f` 误删 `stages:` 包裹致 pipeline 空转的缺陷（`557c664`）；实测 stage 以
-> `skipped` 正常跳过（变量未设时流水线保持全绿）。GitHub 侧现状：main 停在 `4208f8c`
-> （CNB main 的**祖先、可 ff**；落后 46+ 提交，随 CNB 推进增大——46 为本次整理时点数），
-> 最后推送 `2026-10-12T00:19Z`；因 `4208f8c` 处 `.cnb.yml` 的
-> sync 块为注释态、且 §5 记「端到端未验证」，该内容的来源**未能证实为 git-sync 产物**
-> （不排除早期手工推送）。
+> 状态（2026-11-09）：**✅ 本地优先完成**。CNB CI 同步路径（密钥仓 / 仓库级 CI 变量 / `sync-to-github`
+> 流水线）因本仓 PUBLIC + CNB token 缺 `group-resource:rw` 判定为死路，已于本日彻底废弃——
+> `.cnb.yml` 的 `sync-to-github` 流水线已移除。改用**本地直接 `git push origin main`** 把本地 `main`
+> 镜像到 `TopRemnantAcademy/robot-monitor`(PRIVATE)，SHA 已对齐 `3072f7c`。CNB 仅作被动 git 远程。
 > 事实源：Issue #64（`CNB main 自动同步 GitHub origin (C4)`）。
 
 ---
