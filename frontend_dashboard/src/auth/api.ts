@@ -5,6 +5,7 @@
 
 import { authHeaders, clearToken, getToken, setToken } from './session';
 import type { CurrentUser, LoginResult } from './types';
+import type { SupportedRobotsResponse } from '../types/robot';
 
 /** REST 基址：Vite 只暴露 VITE_ 前缀（orders/05 禁止项）。 */
 export const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
@@ -87,4 +88,18 @@ export async function logout(): Promise<void> {
 /** 供业务调用点判断"是否已登录"，避免每次直接摸 sessionStorage。 */
 export function hasToken(): boolean {
   return getToken() !== null;
+}
+
+/**
+ * 取「平台支持的机型」目录 + 在册机群构成（GET /supported-robots）。
+ * viewer 起可读；用于 UI 与 admin UI 的「支持的机型」展示。
+ */
+export async function fetchSupportedRobots(): Promise<SupportedRobotsResponse> {
+  const res = await fetch(`${API_BASE}/supported-robots`, { headers: authHeaders() });
+  if (res.status === 401) {
+    notifyUnauthorized();
+    throw new Error('登录已过期，请重新登录');
+  }
+  if (!res.ok) throw new Error(`获取支持的机型失败（HTTP ${res.status}）`);
+  return (await res.json()) as SupportedRobotsResponse;
 }

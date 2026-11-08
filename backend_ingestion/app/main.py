@@ -42,7 +42,9 @@ from app.schemas.api import (
     HealthResponse,
     RobotHistoryResponse,
     RobotListResponse,
+    SupportedRobotsResponse,
 )
+from app.catalog import lookup
 from app.security_middleware import install_cors, install_rate_limit
 from app.services import liveness, mqtt_subscriber, state_cache
 from app.services.batch_writer import BatchWriter
@@ -262,6 +264,62 @@ async def list_robots(_user: RobotUser = Depends(current_active_user)):
     （停报的机器人回落为离线占位，而不是从列表里消失）。
     """
     return {"robots": await state_cache.snapshot(settings.robot_ids)}
+
+
+@app.get("/supported-robots", response_model=SupportedRobotsResponse)
+async def supported_robots(_user: RobotUser = Depends(current_active_user)):
+    """平台支持的机型目录 + 在册机群构成。
+
+    「平台支持哪些机型」的**事实来源**是 `robot_metadata.model_type` 的去重值（DB 驱动，
+    零幻觉）；展示元数据（名称/描述/自由度/形态）由 `app.catalog.lookup()` 补充，
+    未登记的机型回退占位、绝不编造。viewer 起可读（这是「平台能力」的公开说明，
+    不含任何写操作）。
+
+    返回体同时给出每个机型的在册总数 / 在线数 / 固件版本 / 工位分布 ——
+    UI 用它渲染「支持的机型」卡片，admin UI 额外展示机群管理明细。
+    """
+    from app.db.session import get_pool
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT model_type,
+                   COUNT(*)                                                   AS total,
+                   COUNT(*) FILTER (WHERE is_online)                        AS online,
+                   array_remove(
+                       array_agg(DISTINCT firmware_version)
+                       FILTER (WHERE firmware_version IS NOT NULL), NULL
+                   )                                                         AS firmwares,
+                   COUNT(DISTINCT assigned_station)
+                       FILTER (WHERE assigned_station IS NOT NULL)           AS stations
+            FROM robot_metadata
+            GROUP BY model_type
+            ORDER BY total DESC, model_type
+            """
+        )
+
+    models = []
+    total_robots = 0
+    for r in rows:
+        meta = lookup(r["model_type"])
+        total_robots += r["total"]
+        models.append(
+            SupportedRobotOut(
+                model_type=r["model_type"],
+                display_name=meta.display_name,
+                form_factor=meta.form_factor,
+                dof=meta.dof,
+                vendor=meta.vendor,
+                description=meta.description,
+                generic=meta.generic,
+                total=r["total"],
+                online=r["online"],
+                firmware_versions=list(r["firmwares"] or []),
+                stations=r["stations"],
+            )
+        )
+    return {"models": models, "total_robots": total_robots}
 
 
 @app.get("/robots/{robot_id}/history", response_model=RobotHistoryResponse)

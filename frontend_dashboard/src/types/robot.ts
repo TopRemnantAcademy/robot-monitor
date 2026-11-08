@@ -103,6 +103,42 @@ export type RobotHistoryResponse = Schemas['RobotHistoryResponse'];
 /** GET /healthz 响应（生成自 `HealthResponse`）。 */
 export type HealthResponse = Schemas['HealthResponse'];
 
+// --------------------------------------------------------------- /supported-robots
+//
+// ⚠️ 手写（非 openapi 生成）：该端点是 2026-11-09 新增，`docs/contracts/openapi.snapshot.json`
+// 尚未重新生成。字段与后端 `app/schemas/api.py:SupportedRobotOut` / `SupportedRobotsResponse`
+// 逐字对齐。**下次跑 `scripts/export-openapi.py` + `frontend_dashboard/scripts/gen-types.mjs`
+// 后，应改为从 `api.gen.ts` 的 `components['schemas']['SupportedRobotOut']` 生成**。
+
+/** GET /supported-robots 单机型（镜像后端 `SupportedRobotOut`）。 */
+export interface SupportedRobot {
+  model_type: string;
+  display_name: string;
+  form_factor: string;
+  dof: number;
+  vendor: string;
+  description: string;
+  /** true = 目录元数据未登记，由后端回退占位（不编造展示信息） */
+  generic: boolean;
+  /** 该机型在册机器人总数 */
+  total: number;
+  /** 其中当前在线数（is_online） */
+  online: number;
+  /** 在册固件版本去重列表 */
+  firmware_versions: string[];
+  /** 分配到的工位去重计数 */
+  stations: number;
+}
+
+/** GET /supported-robots 响应（镜像后端 `SupportedRobotsResponse`）。 */
+export interface SupportedRobotsResponse {
+  models: SupportedRobot[];
+  total_robots: number;
+}
+
+/** react-query key（与 SupportedRobotsPanel 共用）。 */
+export const supportedRobotsKey = ['supported-robots'] as const;
+
 // --------------------------------------------------------------- WS 专属类型（手写）
 //
 // OpenAPI 管不到 WS，故以下四类保持手写；其结构与

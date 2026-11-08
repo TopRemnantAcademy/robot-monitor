@@ -95,6 +95,45 @@ class RobotHistoryResponse(BaseModel):
     points: list[HistoryPointOut]
 
 
+# --------------------------------------------------------------- /supported-robots
+
+class SupportedRobotOut(BaseModel):
+    """单个「平台支持并实际在册」的机型 + 其在册机群构成。
+
+    字段来源：`model_type` / `total` / `online` / `firmware_versions` / `stations`
+    来自 `robot_metadata` 聚合查询；`display_name` / `form_factor` / `dof` / `vendor` /
+    `description` / `generic` 来自 `app.catalog.lookup()` 的展示元数据（未登记机型回退占位）。
+    """
+
+    model_type: str = Field(description="机型标识（robot_metadata.model_type 去重值）")
+    display_name: str = Field(description="展示名称（目录元数据，未登记时回退为 model_type）")
+    form_factor: str = Field(description="形态（如 双足人形 / —）")
+    dof: int = Field(description="自由度（关节数）；未知机型为 0")
+    vendor: str = Field(description="厂商 / 来源")
+    description: str = Field(description="机型说明")
+    generic: bool = Field(
+        default=False,
+        description="true = 目录元数据未登记，由 lookup() 回退占位（不编造展示信息）",
+    )
+    total: int = Field(description="该机型在册机器人总数")
+    online: int = Field(description="其中当前在线数（is_online）")
+    firmware_versions: list[str] = Field(
+        default_factory=list, description="在册固件版本去重列表"
+    )
+    stations: int = Field(default=0, description="分配到的工位去重计数")
+
+
+class SupportedRobotsResponse(BaseModel):
+    """`GET /supported-robots` —— 平台支持并实际在册的机型目录 + 机群构成。
+
+    「平台支持哪些机型」的事实来源是 robot_metadata.model_type 去重值（DB 驱动）；
+    viewer 起可读（这是「平台能力」的公开说明，不含任何写操作）。
+    """
+
+    models: list[SupportedRobotOut]
+    total_robots: int = Field(description="全部在册机器人总数")
+
+
 # --------------------------------------------------------------- /healthz
 
 class HealthResponse(BaseModel):

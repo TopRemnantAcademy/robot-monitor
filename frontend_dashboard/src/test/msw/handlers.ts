@@ -32,7 +32,28 @@ export const SAMPLE_HISTORY = {
   ],
 };
 
-/** 默认 handler 集：history 返回上面这份样例数据。 */
+/** 平台支持的机型目录样例（与后端 GET /supported-robots 字段逐字对齐）。 */
+export const SAMPLE_SUPPORTED_ROBOTS = {
+  models: [
+    {
+      model_type: 'HUMANOID-24DOF',
+      display_name: 'Humanoid 24-DOF',
+      form_factor: '双足人形',
+      dof: 24,
+      vendor: 'RobotMonitor Platform',
+      description: '平台主力机型：24 自由度高拟人双足机器人。',
+      generic: false,
+      total: 100,
+      online: 97,
+      firmware_versions: ['1.0.0'],
+      stations: 10,
+    },
+  ],
+  total_robots: 100,
+};
+
+/** 默认 handler 集：history 返回上面这份样例数据；supported-robots 返回机型目录。 */
 export const handlers = [
   http.get(`${API_BASE}/robots/:robotId/history`, () => HttpResponse.json(SAMPLE_HISTORY)),
+  http.get(`${API_BASE}/supported-robots`, () => HttpResponse.json(SAMPLE_SUPPORTED_ROBOTS)),
 ];
