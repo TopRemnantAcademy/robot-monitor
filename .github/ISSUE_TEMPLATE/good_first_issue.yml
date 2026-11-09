@@ -17,7 +17,7 @@ body:
       description: Point to the file(s)/function(s) and any relevant spec or test.
       placeholder: |
         - Source: frontend_dashboard/src/components/...
-        - 代码契约：backend_ingestion/app/schemas/ 与 frontend_dashboard/src/ 下的实现
+        - Code contract: implementations under backend_ingestion/app/schemas/ and frontend_dashboard/src/
         - Related test: frontend_dashboard/src/components/__tests__/...
   - type: textarea
     id: done
