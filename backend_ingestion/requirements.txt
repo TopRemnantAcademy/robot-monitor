@@ -37,7 +37,7 @@ bcrypt==4.0.1
 # `0.43b0` 是与 SDK `1.22.0` 配对的版本（instrumentation 包的元数据会钉住 SDK
 # 的 lower-bound；本机实测 4 个包同时安装、import 通过，见 PR「实测」章节）。
 # 走 OTLP/HTTP 而非 gRPC：4318 端口在多数内网放行，且不需要 grpcio 这棵依赖树。
-opentelemetry-sdk==1.22.0
+opentelemetry-sdk==1.45.2
 opentelemetry-exporter-otlp-proto-http==1.22.0
 opentelemetry-instrumentation-fastapi==0.43b0
 opentelemetry-instrumentation-asyncpg==0.43b0
