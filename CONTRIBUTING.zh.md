@@ -54,6 +54,14 @@ VITE_API_BASE=http://localhost:8787 VITE_WS_HOST=localhost VITE_WS_PORT=8787 npm
 - **Feature request** — 操作员痛点与期望行为。
 - **Good first issue** — 面向新人的小而明确任务。
 
+## 提出想法 & 早期讨论
+
+对于早期或开放式的想法，优先使用 **GitHub Discussions** 而非正式 Issue：
+- 💡 **Ideas** 分类 — 勾勒功能、收集反馈，在写代码前打磨范围。
+- 👋 **Welcome** 讨论 (#16) — 打个招呼，询问从哪里开始。
+
+推荐流程：在 **Ideas** 发帖 → 获得维护者/社区反馈 → 范围清晰后，开一个 **Feature request** Issue（模板在 `.github/ISSUE_TEMPLATE/` 下）并回链到该讨论。这样能让 Issue 列表聚焦在可落地、范围明确的任务上。
+
 ## 安全
 
 发现漏洞？**请勿公开提 Issue。** 遵循 [SECURITY.md](./SECURITY.md) 私下进行报告。

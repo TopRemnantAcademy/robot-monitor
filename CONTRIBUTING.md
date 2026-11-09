@@ -53,6 +53,14 @@ Please use the issue templates under [`.github/ISSUE_TEMPLATE/`](./.github/ISSUE
 - **Feature request** — the operator pain point and proposed behavior.
 - **Good first issue** — small, well-scoped tasks for newcomers.
 
+## Proposing ideas & early discussion
+
+For early-stage or open-ended ideas, prefer **GitHub Discussions** over a formal issue:
+- 💡 **Ideas** category — sketch a feature, gather feedback, and refine scope before writing code.
+- 👋 **Welcome** discussion (#16) — say hello and ask where to start.
+
+A good flow: post in **Ideas** → get maintainer/community feedback → once the scope is clear, open a **Feature request** issue (template under `.github/ISSUE_TEMPLATE/`) and link back to the discussion. This keeps the issue tracker focused on actionable, well-scoped work.
+
 ## Security
 
 Found a vulnerability? **Do not open a public issue.** Follow [SECURITY.md](./SECURITY.md) and report privately.
