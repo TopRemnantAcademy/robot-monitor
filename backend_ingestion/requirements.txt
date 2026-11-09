@@ -23,7 +23,7 @@ fastapi-users[sqlalchemy]==12.1.3
 # `import pkg_resources` 可用（仅 DeprecationWarning），`import fastapi_users` 返回 12.1.3。
 # 注意 python:3.11-slim 镜像虽自带 setuptools，但重建时会拉到最新版，故必须在此钉死。
 # 长期正解是移除 passlib（升级 fastapi-users>=13 走 pwdlib），见 orders/20-dispatch.md T4。
-setuptools<81
+setuptools<85
 # ⚠️ bcrypt 必须钉在 4.x：passlib 1.7.4（fastapi-users 的密码哈希后端）会读取
 # `bcrypt.__about__.__version__` 做后端探测，而 **bcrypt 5.0.0 删掉了 `__about__`**，
 # 于是 passlib 回退到 `detect_wrap_bug()` 探针，在探针里用 72+ 字节口令调 hashpw，
