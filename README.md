@@ -9,7 +9,7 @@ High-frequency telemetry (100 robots × 10 Hz = 1000 msg/s) flows over MQTT → 
 > - 🇰🇷 [한국어](./README.ko.md)
 > - 🇨🇳 [中文](./README.zh.md)
 >
-> The dashboard UI itself supports **English / 한국어 / 中文** with a live language switcher (default: English). See [docs/README.md](./docs/README.md).
+> The dashboard UI itself supports **English / 한국어 / 中文 / 日本語** with a live language switcher (default: English). See [docs/README.md](./docs/README.md).
 
 ---
 
@@ -87,9 +87,9 @@ The mock backend is the recommended path for **frontend contributors** and CI-lo
 
 ## Internationalization (i18n)
 
-The dashboard ships with English (default), Korean, and Chinese. UI chrome strings live in [`frontend_dashboard/src/i18n/locales.ts`](./frontend_dashboard/src/i18n/locales.ts) and are resolved through the `useI18n()` hook; a language switcher lives in the top header. **Server-supplied data** (alert messages, robot names) is intentionally *not* translated.
+The dashboard ships with English (default), Korean, Chinese, and Japanese. UI chrome strings live in [`frontend_dashboard/src/i18n/locales.ts`](./frontend_dashboard/src/i18n/locales.ts) and are resolved through the `useI18n()` hook; a language switcher lives in the top header. **Server-supplied data** (alert messages, robot names) is intentionally *not* translated.
 
-To add a language: add a `Locale` entry in `locales.ts` and a `<select>` option in `LanguageSwitcher.tsx`.
+To add a language: add a `Locale` entry and its string dictionary in `locales.ts`; the switcher in the top header picks it up automatically from the `LOCALES` array.
 
 ---
 

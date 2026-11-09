@@ -2,19 +2,20 @@
 //
 // Language policy (open-source):
 //   - English is the default and the lingua franca for contributors.
-//   - Korean (ko) and Chinese (zh) are provided for the on-floor operators
-//     (Korean humanoid factory) and the Chinese-diaspora ops community.
+//   - Korean (ko), Chinese (zh), and Japanese (ja) are provided for the
+//     on-floor operators and the broader APAC ops community.
 //   - Display strings are looked up by key; `translate` falls back to English.
 //
 // NOTE: alert `message` fields come from the backend (server data) and are NOT
 // localized here — only UI chrome strings are.
 
-export type Locale = 'en' | 'ko' | 'zh';
+export type Locale = 'en' | 'ko' | 'zh' | 'ja';
 
 export const LOCALES: { code: Locale; label: string }[] = [
   { code: 'en', label: 'English' },
   { code: 'ko', label: '한국어' },
   { code: 'zh', label: '中文' },
+  { code: 'ja', label: '日本語' },
 ];
 
 export const DEFAULT_LOCALE: Locale = 'en';
@@ -129,7 +130,7 @@ const en: Dict = {
   'info.statusCode': 'Status code',
   'info.errorCode': 'Error code',
   'info.frameAge': 'Data frame age',
-  'joint.arrayTitle': 'Joint temperature array (24 joints, spec/00 §5.5)',
+  'joint.arrayTitle': 'Joint temperature array (24 joints, telemetry schema)',
   'torque.title': 'Joint torque load (live, click to switch joint)',
   'torque.ariaNoData': 'Torque {joint} no data',
   'torque.aria': 'Torque {joint} {val}N·m',
@@ -250,7 +251,7 @@ const ko: Dict = {
   'info.statusCode': '상태 코드',
   'info.errorCode': '오류 코드',
   'info.frameAge': '데이터 프레임 경과',
-  'joint.arrayTitle': '관절 온도 배열(24 관절, spec/00 §5.5)',
+  'joint.arrayTitle': '관절 온도 배열(24 관절, telemetry schema)',
   'torque.title': '관절 토크 부하(실시간, 관절 클릭 전환)',
   'torque.ariaNoData': '토크 {joint} 데이터 없음',
   'torque.aria': '토크 {joint} {val}N·m',
@@ -370,7 +371,7 @@ const zh: Dict = {
   'info.statusCode': '状态码',
   'info.errorCode': '错误码',
   'info.frameAge': '数据帧龄',
-  'joint.arrayTitle': '关节温度阵列（24 关节，spec/00 §5.5）',
+  'joint.arrayTitle': '关节温度阵列（24 关节，telemetry schema）',
   'torque.title': '关节扭矩负载（实时，点击切换选中关节）',
   'torque.ariaNoData': '扭矩 {joint} 无数据',
   'torque.aria': '扭矩 {joint} {val}N·m',
@@ -399,7 +400,137 @@ const zh: Dict = {
   'frameAge.hour': '{n} 小时前',
 };
 
-export const translations: Record<Locale, Dict> = { en, ko, zh };
+const ja: Dict = {
+  // Status / display state (robot status_code and derived display state)
+  'status.offline': 'オフライン',
+  'status.normal': '正常',
+  'status.warning': '警告',
+  'status.fault': '故障',
+  'display.online': 'オンライン',
+  'display.warning': '警告',
+  'display.fault': '故障',
+  'display.stale': '切断',
+  'display.offline': 'オフライン',
+  'display.noData': 'データなし',
+
+  // Error boundary fallback
+  'error.title': 'ダッシュボードの描画エラー',
+  'error.desc':
+    'コンポーネントでキャッチされない例外が発生し、エラー境界によって処理されました。要約は以下の通りです。再試行またはページの再読み込みをお試しください。',
+  'error.retry': '再試行',
+  'error.reload': 'ページを再読み込み',
+
+  // Top header (HealthSummaryHeader)
+  'header.subtitle': '人型ロボット工場 · 100台のライブ監視',
+  'kpi.onlineRate': 'オンライン率',
+  'kpi.alerts': 'アクティブなアラート',
+  'kpi.avgBattery': '平均バッテリー',
+  'ws.connected': '接続済み',
+  'ws.connecting': '接続中',
+  'ws.reconnecting': '再接続中',
+  'unit.lost': ' · 切断 {n}',
+
+  // Fleet health analytics strip
+  'panel.statusDist': 'ステータス分布（台）',
+  'panel.batteryDist': 'バッテリー分布（%、報告済）',
+  'panel.tempDist': '関節温度分布（°C、オンライン）',
+  'panel.trend': 'オンライン率 / アクティブアラート推移（3分）',
+  'trend.accumulating': '推移を蓄積中…（{n}秒ごとにサンプリング）',
+  'legend.onlineRate': 'オンライン率 %',
+  'legend.activeAlerts': 'アクティブアラート',
+
+  // Joint heatmap
+  'joint.noData': 'データなし',
+
+  // Alert rules
+  'rule.motor_temp': 'モーター過熱',
+  'rule.battery_low': 'バッテリー低下',
+  'rule.battery': 'バッテリー低下',
+  'rule.offline': 'オフライン',
+  'rule.joint_stuck': '関節固着',
+
+  // Alert log table
+  'alert.escalated': 'エスカレーション済み',
+  'alert.acked': '確認済み',
+  'alert.suppressed': '抑制済み',
+  'alert.ack': '確認',
+  'alert.unack': '確認解除',
+  'alert.header': 'ライブアラートストリーム',
+  'filter.all': 'すべて',
+  'filter.unacked': '未確認',
+  'filter.escalated': 'エスカレーション',
+  'filter.showSuppressed': '抑制済みを表示',
+  'filter.showSuppressedOn': '✓ 抑制済みを表示',
+  'pager.total': '{total} 件 · {page}/{pages} ページ',
+  'pager.prev': '前へ',
+  'pager.next': '次へ',
+  'empty.loading': '読み込み中…',
+  'empty.noAlerts': 'アラートなし',
+  'suppressed.header': '抑制されたアラート（記録のみ、配信・通知なし）· {n} 件',
+  'suppressed.empty': '抑制されたアラートはありません',
+  'error.load': '読み込み失敗',
+  'error.op': '操作失敗',
+  'ack.titleNoId': 'アラートに ID がないため確認できません',
+  'ack.titleAck': 'アラートを確認',
+  'ack.titleUnack': '確認を解除',
+  'suppressed.title': 'より重大度の高いアラートに抑制されました（根本原因: {rule}）',
+  'suppressed.titleSimple': 'より重大度の高いアラートに抑制されました',
+
+  // Supported robots panel
+  'sr.header': '対応機種',
+  'sr.headerRight': '{n} 機種 · 登録 {m} 台',
+  'sr.adminView': '管理者ビュー',
+  'sr.loadFail': '機種カタログの読み込みに失敗',
+  'sr.loading': '読み込み中…',
+  'sr.unregistered': '未登録',
+  'sr.formFactorUndefined': '形状未定義',
+  'sr.dofUndefined': '自由度未定義',
+  'sr.dof': '{n} 自由度',
+  'sr.registered': '登録済み',
+  'sr.online': 'オンライン',
+  'sr.vendor': 'メーカー: {v}',
+  'sr.firmware': 'ファームウェア: {f}',
+  'sr.stations': 'ステーション: {n}',
+
+  // Robot detail drawer
+  'drawer.close': '閉じる',
+  'info.title': '基本情報',
+  'info.battery': 'バッテリー',
+  'info.maxJointTemp': '最大関節温度',
+  'info.lastUpdate': '最終更新',
+  'info.statusCode': 'ステータスコード',
+  'info.errorCode': 'エラーコード',
+  'info.frameAge': 'データフレーム経過時間',
+  'joint.arrayTitle': '関節温度配列（24 関節、telemetry schema）',
+  'torque.title': '関節トルク負荷（ライブ、関節をクリックで切替）',
+  'torque.ariaNoData': 'トルク {joint} データなし',
+  'torque.aria': 'トルク {joint} {val}N·m',
+  'history.title': '{joint} · 直近 {m} 分（{res} 解像度）',
+  'history.loading': '履歴を読み込み中…',
+  'history.unavailable': '履歴は利用できません（{error}）· {api}/robots/{id}/history',
+  'history.noPoints': '直近 {m} 分の履歴ポイントなし',
+  'battery.title': 'バッテリー推移 · 直近 {m} 分',
+  'alerts.title': 'このロボットの最近のアラート',
+  'alerts.loading': 'アラートを読み込み中…',
+  'alerts.loadFail': 'アラートの読み込みに失敗',
+  'alerts.empty': 'アラート記録なし',
+  'alerts.escalated': 'エスカレーション済み',
+  'alerts.acked': '確認済み',
+  'alerts.suppressed': '抑制済み',
+  'alerts.ack': '確認',
+  'alerts.unack': '確認解除',
+  'ack.error': 'アラートの確認に失敗',
+  'chart.temp': '温度(°C)',
+  'chart.torque': 'トルク(N·m)',
+  'chart.angle': '角度(rad)',
+  'chart.maxTemp': '最大関節温度(°C)',
+  'chart.battery': 'バッテリー(%)',
+  'frameAge.sec': '{n}秒前',
+  'frameAge.min': '{n}分前',
+  'frameAge.hour': '{n}時間前',
+};
+
+export const translations: Record<Locale, Dict> = { en, ko, zh, ja };
 
 export function translate(locale: Locale, key: string, vars?: Record<string, string | number>): string {
   const dict = translations[locale] ?? en;

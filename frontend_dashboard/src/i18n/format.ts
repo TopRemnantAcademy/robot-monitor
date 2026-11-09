@@ -7,6 +7,7 @@ const INTL_LOCALE: Record<Locale, string> = {
   en: 'en-GB',
   ko: 'ko-KR',
   zh: 'zh-CN',
+  ja: 'ja-JP',
 };
 
 export function formatClock(ms: number, locale: Locale): string {
