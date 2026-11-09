@@ -28,6 +28,11 @@ updates:
       - "dependencies"
     ignore:
       - update-types: ["version-update:semver-major"]
+      # 钉死：bcrypt 5.x 删掉 __about__，passlib 探测失败 -> fastapi-users 登录 500；
+      # setuptools>=81 移除 pkg_resources，passlib import 失败 -> uvicorn 起不来。
+      # 二者升级必须先迁移 fastapi-users 到 pwdlib（见 requirements.txt 注释）。
+      - dependency-name: "bcrypt"
+      - dependency-name: "setuptools"
     groups:
       # OpenTelemetry 是协调发布：API/SDK(exporter/instrumentation) 必须同版本。
       # 分开升必冲突（ResolutionImpossible），故归为一组，一次 PR 全升。
