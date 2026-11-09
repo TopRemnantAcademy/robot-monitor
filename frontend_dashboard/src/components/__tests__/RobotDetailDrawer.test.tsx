@@ -161,8 +161,8 @@ describe('RobotDetailDrawer', () => {
     expect(within(aside).getByText('humanoid-042')).toBeInTheDocument();
     expect(within(aside).getByText('18.4%')).toBeInTheDocument();      // battery_pct
     expect(within(aside).getByText('66.2°C')).toBeInTheDocument();     // max_joint_temp
-    // status_code=2 → 预警（见 theme/tokens 的 STATUS_LABEL）
-    expect(within(aside).getByText('预警')).toBeInTheDocument();
+    // status_code=2 → Warning（见 theme/tokens 的 DISPLAY_COLOR 映射，i18n 走 display.warning）
+    expect(within(aside).getByText('Warning')).toBeInTheDocument();
   });
 
   it('拉取 history 后把 24 关节与包络拆成 四条 series 交给 ECharts', async () => {
@@ -172,7 +172,7 @@ describe('RobotDetailDrawer', () => {
     await waitFor(async () => {
       const parsed = await readChartOption();
       expect(parsed.series.map((s) => s.name)).toEqual([
-        '温度(°C)', '扭矩(N·m)', '角度(rad)', '全关节最高温(°C)',
+        'Temp (°C)', 'Torque (N·m)', 'Angle (rad)', 'Max joint temp (°C)',
       ]);
       // 默认选中第 0 个关节（JOINT_NAMES[0]），样例数据里该关节无值 → null
       expect(parsed.series[0].data).toEqual([null, null]);
@@ -208,7 +208,7 @@ describe('RobotDetailDrawer', () => {
     openDrawer();
     render(<RobotDetailDrawer />);
 
-    expect(await screen.findByText(/无历史点/)).toBeInTheDocument();
+    expect(await screen.findByText(/No history points/)).toBeInTheDocument();
     // 关节图与电量趋势图共用同一份历史——空即两块都不得挂载
     expect(screen.queryAllByTestId('echarts-option')).toHaveLength(0);
   });
@@ -223,7 +223,7 @@ describe('RobotDetailDrawer', () => {
     // 默认 findByText 只有 1s，会在重试途中判失败。这里显式放宽到 6s（留足余量），
     // 断言内容不变 —— 仍要求错误文案带 HTTP 状态码。
     expect(
-      await screen.findByText(/历史数据不可用/, undefined, { timeout: 6000 }),
+      await screen.findByText(/History unavailable/, undefined, { timeout: 6000 }),
     ).toBeInTheDocument();
     expect(screen.getByText(/HTTP 500/)).toBeInTheDocument();
   }, 10_000);
@@ -233,7 +233,7 @@ describe('RobotDetailDrawer', () => {
     openDrawer();
     render(<RobotDetailDrawer />);
 
-    await user.click(screen.getByRole('button', { name: '关闭' }));
+    await user.click(screen.getByRole('button', { name: 'Close' }));
     expect(useRobotStore.getState().selectedRobotId).toBeNull();
   });
 
@@ -264,10 +264,10 @@ describe('RobotDetailDrawer', () => {
 
     const aside = screen.getByRole('complementary');
     // humanoid-042 的 motor_temp 告警渲染（ruleLabel 复用 AlertLogTable 的映射）
-    expect(await within(aside).findByText('电机过热')).toBeInTheDocument();
-    expect(within(aside).getByText('已升级')).toBeInTheDocument();
+    expect(await within(aside).findByText('Motor overheat')).toBeInTheDocument();
+    expect(within(aside).getByText('Escalated')).toBeInTheDocument();
     // humanoid-007 的低电量告警不得串台（规则标签与 message 两个出现点都验）
-    expect(within(aside).queryByText('低电量')).not.toBeInTheDocument();
+    expect(within(aside).queryByText('Low battery')).not.toBeInTheDocument();
     expect(within(aside).queryByText('电量低')).not.toBeInTheDocument();
   });
 
@@ -281,7 +281,7 @@ describe('RobotDetailDrawer', () => {
     // aria-label 刻意以「扭矩 」开头：热力图关节块的 aria-label 以关节名开头
     //（/^left_elbow_pitch/ 用例），两者在可访问性树上必须互不混淆。
     // 实时帧 telemetry().joint_torques.left_elbow_pitch = 1.7 → toFixed(2) = "1.70"
-    const bar = await screen.findByRole('button', { name: '扭矩 left_elbow_pitch 1.70N·m' });
+    const bar = await screen.findByRole('button', { name: 'Torque left_elbow_pitch 1.70N·m' });
     await user.click(bar);
 
     // 点击后选中关节切换 → 折线的扭矩 series 取 left_elbow_pitch 的历史两点
@@ -307,8 +307,8 @@ describe('RobotDetailDrawer', () => {
     // 请求里其他参数不回退（resolution 恒为 10s）
     expect(urls.some((u) => u.includes('minutes=30') && u.includes('resolution=10s'))).toBe(true);
     // 关节图头与电量趋势头都必须反映新窗口（全串精确匹配，避免子串命中多个元素）
-    expect(screen.getByText('left_shoulder_pitch · 最近 30 分钟（10s 分辨率）')).toBeInTheDocument();
-    expect(screen.getByText('电量趋势 · 最近 30 分钟')).toBeInTheDocument();
+    expect(screen.getByText('left_shoulder_pitch · Last 30 min (10s resolution)')).toBeInTheDocument();
+    expect(screen.getByText('Battery trend · Last 30 min')).toBeInTheDocument();
   });
 
   // 置于 describe 末尾：本用例会把 authStore 提为 admin，结束前还原，避免污染其他用例。
@@ -337,14 +337,14 @@ describe('RobotDetailDrawer', () => {
 
     const aside = screen.getByRole('complementary');
     // 非 admin（默认 role=null）：确认按钮不渲染——"不让用户看见点不动的东西"
-    await within(aside).findByText('电机过热');
-    expect(within(aside).queryByRole('button', { name: '确认' })).not.toBeInTheDocument();
+    await within(aside).findByText('Motor overheat');
+    expect(within(aside).queryByRole('button', { name: 'Acknowledge' })).not.toBeInTheDocument();
 
     // 提为 admin → 按钮出现 → 点击 → POST /alerts/11/ack → invalidate 重拉 → 已确认
     useAuthStore.setState({ status: 'authenticated', email: 'a@b.c', role: 'admin' });
-    await user.click(await within(aside).findByRole('button', { name: '确认' }));
+    await user.click(await within(aside).findByRole('button', { name: 'Acknowledge' }));
     await waitFor(() => expect(acked).toBe(true));
-    expect(await within(aside).findByText('已确认')).toBeInTheDocument();
+    expect(await within(aside).findByText('Acknowledged')).toBeInTheDocument();
 
     // 还原全局 auth 状态（本用例必须保持在 describe 末尾的原因）
     useAuthStore.setState({ status: 'unknown', email: null, role: null });

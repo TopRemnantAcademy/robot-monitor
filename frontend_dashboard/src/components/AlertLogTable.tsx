@@ -20,6 +20,7 @@ import { useRobotStore } from '../store/robotStore';
 import { useIsAdmin } from '../auth/authStore';
 import { ackAlert, fetchAlerts, unackAlert } from '../auth/alertsApi';
 import type { AlertApiItem, AlertFilter, RobotAlert } from '../types/robot';
+import { useI18n } from '../i18n/I18nProvider';
 
 /** 每页条数。20 是"一屏可见 + 翻页不频繁"的折中（200px 高度可见约 6 行）。 */
 export const ALERT_PAGE_SIZE = 20;
@@ -30,19 +31,14 @@ function formatTime(ts: number): string {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-/** rule_id → 展示标签（后端规则：motor_temp / battery_low / offline / joint_stuck） */
-const RULE_LABEL: Record<string, string> = {
-  motor_temp: '电机过热',
-  battery_low: '低电量',
-  battery: '低电量',
-  offline: '离线',
-  joint_stuck: '关节卡死',
+/** rule_id → i18n key (backend rules: motor_temp / battery_low / battery / offline / joint_stuck). */
+export const RULE_KEY: Record<string, string> = {
+  motor_temp: 'rule.motor_temp',
+  battery_low: 'rule.battery_low',
+  battery: 'rule.battery',
+  offline: 'rule.offline',
+  joint_stuck: 'rule.joint_stuck',
 };
-
-/** 导出给 RobotDetailDrawer 的单机告警区复用（单一事实来源，禁止两处各抄一份映射）。 */
-export function ruleLabel(ruleId: string): string {
-  return RULE_LABEL[ruleId] ?? ruleId;
-}
 
 /** 统一行模型：WS 实时条目与 REST 条目都归一到这里再渲染。 */
 interface Row {
@@ -104,6 +100,7 @@ interface AlertRowProps {
 }
 
 const AlertRow = memo(function AlertRow({ row, canAck, busy, onOpen, onToggleAck }: AlertRowProps) {
+  const { t } = useI18n();
   // 已确认 / 已抑制：降噪（灰度 + opacity），但**不隐藏** ——
   // 派工单禁止项 5（订单 17）与订单 35 的「行不得消失」，都是可追溯要求。
   // 两者共用一个 dimmed 表达：视觉上「不用现在处理」，语义由行内文字标签区分。
@@ -123,7 +120,7 @@ const AlertRow = memo(function AlertRow({ row, canAck, busy, onOpen, onToggleAck
         type="button"
         onClick={() => onOpen(row.robotId)}
         className="flex-1 min-w-0 flex items-center gap-3 text-left cursor-pointer"
-        title={`${row.robotId} · ${ruleLabel(row.ruleId)} · ${row.message}`}
+        title={`${row.robotId} · ${t(RULE_KEY[row.ruleId] ?? row.ruleId)} · ${row.message}`}
       >
         <span className="tabular-nums shrink-0" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
           {formatTime(row.ts)}
@@ -143,7 +140,7 @@ const AlertRow = memo(function AlertRow({ row, canAck, busy, onOpen, onToggleAck
             backgroundColor: severityColor(row.severity),
           }}
         >
-          {ruleLabel(row.ruleId)} · S{row.severity}
+          {t(RULE_KEY[row.ruleId] ?? row.ruleId)} · S{row.severity}
         </span>
         {row.escalated && (
           <span
@@ -155,12 +152,12 @@ const AlertRow = memo(function AlertRow({ row, canAck, busy, onOpen, onToggleAck
               backgroundColor: COLORS.statusWarning,
             }}
           >
-            ⚠ 已升级
+            ⚠ {t('alert.escalated')}
           </span>
         )}
         {row.ack && (
           <span className="shrink-0" style={{ ...FONT.metric, color: COLORS.statusNormal }}>
-            ✓ 已确认
+            ✓ {t('alert.acked')}
           </span>
         )}
         {row.suppressed && (
@@ -173,11 +170,11 @@ const AlertRow = memo(function AlertRow({ row, canAck, busy, onOpen, onToggleAck
             style={{ ...FONT.metric, color: COLORS.textSecondary }}
             title={
               row.suppressedBy
-                ? `被更高等级告警抑制（根因规则：${ruleLabel(row.suppressedBy)}）`
-                : '被更高等级告警抑制'
+                ? t('suppressed.title', { rule: t(RULE_KEY[row.suppressedBy] ?? row.suppressedBy) })
+                : t('suppressed.titleSimple')
             }
           >
-            ⊘ 已抑制
+            ⊘ {t('alert.suppressed')}
           </span>
         )}
         <span className="truncate" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
@@ -199,22 +196,29 @@ const AlertRow = memo(function AlertRow({ row, canAck, busy, onOpen, onToggleAck
             border: `1px solid ${COLORS.border}`,
             opacity: row.alertId === null ? 0.4 : 1,
           }}
-          title={row.alertId === null ? '该告警无 ID，无法确认' : row.ack ? '撤回确认' : '确认告警'}
+          title={
+            row.alertId === null
+              ? t('ack.titleNoId')
+              : row.ack
+                ? t('ack.titleUnack')
+                : t('ack.titleAck')
+          }
         >
-          {row.ack ? '撤回' : '确认'}
+          {row.ack ? t('alert.unack') : t('alert.ack')}
         </button>
       )}
     </div>
   );
 });
 
-const FILTERS: { key: AlertFilter; label: string }[] = [
-  { key: 'all', label: '全部' },
-  { key: 'unacked', label: '未确认' },
-  { key: 'escalated', label: '已升级' },
+const FILTERS: { key: AlertFilter; labelKey: string }[] = [
+  { key: 'all', labelKey: 'filter.all' },
+  { key: 'unacked', labelKey: 'filter.unacked' },
+  { key: 'escalated', labelKey: 'filter.escalated' },
 ];
 
 export default function AlertLogTable() {
+  const { t } = useI18n();
   const wsAlerts = useRobotStore((s) => s.alerts);
   const selectRobot = useRobotStore((s) => s.selectRobot);
   const applyAlertAck = useRobotStore((s) => s.applyAlertAck);
@@ -257,12 +261,12 @@ export default function AlertLogTable() {
         setPageRows(res.items.map(fromApiItem));
         setTotal(res.total);
       } catch (e) {
-        setError(e instanceof Error ? e.message : '加载失败');
+        setError(e instanceof Error ? e.message : t('error.load'));
       } finally {
         setLoading(false);
       }
     },
-    [],
+    [t],
   );
 
   // 被抑制行单独一页：只在开关打开时拉（关着就不打这次 DB —— 默认视图零额外开销）。
@@ -279,11 +283,11 @@ export default function AlertLogTable() {
       setSuppressedRows(res.items.map(fromApiItem));
       setSuppressedTotal(res.total);
     } catch (e) {
-      setError(e instanceof Error ? e.message : '加载失败');
+      setError(e instanceof Error ? e.message : t('error.load'));
     } finally {
       setSuppressedLoading(false);
     }
-  }, []);
+  }, [t]);
 
   // 首屏 + 筛选/翻页变化时重拉。WS 新告警不触发重拉（否则每来一条都打 DB）。
   useEffect(() => {
@@ -325,12 +329,12 @@ export default function AlertLogTable() {
         applyAlertAck(id, { ack: res.ack, ack_at: res.ack_at, ack_by: res.ack_by });
         // 幂等命中（changed=false）时不报错：状态已是目标值，UI 无忧。
       } catch (e) {
-        setError(e instanceof Error ? e.message : '操作失败');
+        setError(e instanceof Error ? e.message : t('error.op'));
       } finally {
         setBusyId(null);
       }
     },
-    [applyAlertAck],
+    [applyAlertAck, t],
   );
 
   const totalPages = Math.max(1, Math.ceil(total / ALERT_PAGE_SIZE));
@@ -346,7 +350,7 @@ export default function AlertLogTable() {
         style={{ borderBottom: `1px solid ${COLORS.border}` }}
       >
         <div className="flex items-center gap-3">
-          <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>实时告警流</span>
+          <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>{t('alert.header')}</span>
           <div className="flex items-center gap-1">
             {FILTERS.map((f) => (
               <button
@@ -365,7 +369,7 @@ export default function AlertLogTable() {
                   border: `1px solid ${filter === f.key ? COLORS.accent : COLORS.border}`,
                 }}
               >
-                {f.label}
+                {t(f.labelKey)}
               </button>
             ))}
           </div>
@@ -392,10 +396,10 @@ export default function AlertLogTable() {
               border: `1px solid ${showSuppressed ? COLORS.accent : COLORS.border}`,
             }}
           >
-            {showSuppressed ? '✓ 显示已抑制' : '显示已抑制'}
+            {showSuppressed ? t('filter.showSuppressedOn') : t('filter.showSuppressed')}
           </button>
           <span className="tabular-nums" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
-            共 {total} 条 · 第 {page + 1}/{totalPages} 页
+            {t('pager.total', { total, page: page + 1, pages: totalPages })}
           </span>
           <div className="flex items-center gap-1">
             <button
@@ -405,7 +409,7 @@ export default function AlertLogTable() {
               className="px-2 py-0.5 rounded cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
               style={{ fontSize: '10px', color: COLORS.textPrimary, border: `1px solid ${COLORS.border}` }}
             >
-              上一页
+              {t('pager.prev')}
             </button>
             <button
               type="button"
@@ -414,7 +418,7 @@ export default function AlertLogTable() {
               className="px-2 py-0.5 rounded cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
               style={{ fontSize: '10px', color: COLORS.textPrimary, border: `1px solid ${COLORS.border}` }}
             >
-              下一页
+              {t('pager.next')}
             </button>
           </div>
         </div>
@@ -426,7 +430,7 @@ export default function AlertLogTable() {
             className="h-full flex items-center justify-center"
             style={{ ...FONT.metric, color: COLORS.textSecondary }}
           >
-            {loading ? '加载中…' : '暂无告警'}
+            {loading ? t('empty.loading') : t('empty.noAlerts')}
           </div>
         ) : (
           <>
@@ -455,7 +459,7 @@ export default function AlertLogTable() {
                     borderBottom: `1px solid ${COLORS.border}`,
                   }}
                 >
-                  <span>已抑制告警（仅落库，未推流/未通知）· {suppressedTotal} 条</span>
+                  <span>{t('suppressed.header', { n: suppressedTotal })}</span>
                   <span className="tabular-nums">
                     <button
                       type="button"
@@ -464,7 +468,7 @@ export default function AlertLogTable() {
                       className="px-2 rounded cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
                       style={{ fontSize: '10px', color: COLORS.textPrimary, border: `1px solid ${COLORS.border}` }}
                     >
-                      上一页
+                      {t('pager.prev')}
                     </button>{' '}
                     <span>
                       {suppressedPage + 1}/{suppressedTotalPages}
@@ -476,13 +480,13 @@ export default function AlertLogTable() {
                       className="px-2 rounded cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
                       style={{ fontSize: '10px', color: COLORS.textPrimary, border: `1px solid ${COLORS.border}` }}
                     >
-                      下一页
+                      {t('pager.next')}
                     </button>
                   </span>
                 </div>
                 {suppressedRows.length === 0 ? (
                   <div className="px-3 py-1" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
-                    {suppressedLoading ? '加载中…' : '无被抑制告警'}
+                    {suppressedLoading ? t('empty.loading') : t('suppressed.empty')}
                   </div>
                 ) : (
                   suppressedRows.map((row) => (

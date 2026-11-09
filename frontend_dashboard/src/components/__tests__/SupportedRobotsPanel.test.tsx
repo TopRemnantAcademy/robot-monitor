@@ -18,7 +18,7 @@ test('viewer：渲染支持的机型卡片（名称 + 机型标识 + 在册/在�
   render(<SupportedRobotsPanel />);
 
   // 标题恒渲染
-  expect(screen.getByText('平台支持的机型')).toBeInTheDocument();
+  expect(screen.getByText('Supported models')).toBeInTheDocument();
 
   // msw 下发的样例数据应渲染出机型名称与标识
   await waitFor(() => {
@@ -27,8 +27,8 @@ test('viewer：渲染支持的机型卡片（名称 + 机型标识 + 在册/在�
   expect(screen.getByText('HUMANOID-24DOF')).toBeInTheDocument();
 
   // viewer 不应看到管理视图标记与机群管理明细
-  expect(screen.queryByText('管理视图')).not.toBeInTheDocument();
-  expect(screen.queryByText(/工位：/)).not.toBeInTheDocument();
+  expect(screen.queryByText('Admin view')).not.toBeInTheDocument();
+  expect(screen.queryByText(/Stations:/)).not.toBeInTheDocument();
 });
 
 test('admin：额外展示机群管理明细（管理视图标记 + 厂商/固件/工位）', async () => {
@@ -39,7 +39,7 @@ test('admin：额外展示机群管理明细（管理视图标记 + 厂商/固�
     expect(screen.getByText('Humanoid 24-DOF')).toBeInTheDocument();
   });
 
-  expect(screen.getByText('管理视图')).toBeInTheDocument();
-  expect(screen.getByText(/工位：10 个/)).toBeInTheDocument();
-  expect(screen.getByText(/固件：1.0.0/)).toBeInTheDocument();
+  expect(screen.getByText('Admin view')).toBeInTheDocument();
+  expect(screen.getByText(/Stations: 10/)).toBeInTheDocument();
+  expect(screen.getByText(/Firmware: 1.0.0/)).toBeInTheDocument();
 });

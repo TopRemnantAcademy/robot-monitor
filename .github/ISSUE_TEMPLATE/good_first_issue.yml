@@ -1,0 +1,26 @@
+name: Good first issue
+description: Small, well-scoped task for newcomers
+title: "[good first issue] "
+labels: ["good first issue"]
+body:
+  - type: textarea
+    id: task
+    attributes:
+      label: The task
+      description: A precise, small task a first-time contributor can complete.
+    validations:
+      required: true
+  - type: textarea
+    id: where
+    attributes:
+      label: Where to look
+      description: Point to the file(s)/function(s) and any relevant spec or test.
+      placeholder: |
+        - Source: frontend_dashboard/src/components/...
+        - Spec: spec/03 §x.x
+        - Related test: frontend_dashboard/src/components/__tests__/...
+  - type: textarea
+    id: done
+    attributes:
+      label: Definition of done
+      description: How do we know it is complete? (test passes, typecheck clean, etc.)

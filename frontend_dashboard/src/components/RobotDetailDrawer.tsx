@@ -15,7 +15,6 @@ import JointHeatmap from './JointHeatmap';
 import {
   COLORS,
   DISPLAY_COLOR,
-  DISPLAY_LABEL,
   FONT,
   hasEverReported,
   robotDisplayState,
@@ -24,9 +23,11 @@ import {
 import { useRobotStore } from '../store/robotStore';
 import { JOINT_NAMES } from '../types/robot';
 import type { AlertApiItem, HistoryPoint } from '../types/robot';
-import { ruleLabel } from './AlertLogTable';
+import { RULE_KEY } from './AlertLogTable';
 import { ackAlert, fetchAlerts, unackAlert } from '../auth/alertsApi';
 import { useIsAdmin } from '../auth/authStore';
+import { useI18n } from '../i18n/I18nProvider';
+import { formatClock } from '../i18n/format';
 import {
   HISTORY_MINUTES,
   HISTORY_RESOLUTION,
@@ -51,13 +52,13 @@ function lastSeenMs(robot: { last_seen?: number | null; ts: number } | undefined
 }
 
 /** 「数据帧龄」：last_seen 距现在的时长（失联诊断用——「3 小时前」比一个时刻数字直观）。 */
-function frameAge(ms: number | null): string {
+function frameAge(ms: number | null, t: (k: string, v?: Record<string, string | number>) => string): string {
   if (ms === null) return '--';
   const sec = Math.max(0, Math.round((Date.now() - ms) / 1000));
-  if (sec < 60) return `${sec} 秒前`;
+  if (sec < 60) return t('frameAge.sec', { n: sec });
   const min = Math.floor(sec / 60);
-  if (min < 60) return `${min} 分钟前`;
-  return `${Math.floor(min / 60)} 小时前`;
+  if (min < 60) return t('frameAge.min', { n: min });
+  return t('frameAge.hour', { n: Math.floor(min / 60) });
 }
 
 interface ChartSeries {
@@ -76,6 +77,7 @@ interface ChartModel {
 const SERIES_COLORS = [COLORS.statusFault, COLORS.accent, COLORS.statusNormal, COLORS.statusWarning];
 
 export default function RobotDetailDrawer() {
+  const { t, locale } = useI18n();
   const selectedRobotId = useRobotStore((s) => s.selectedRobotId);
   const selectRobot = useRobotStore((s) => s.selectRobot);
   // ISSUE #75 结构性共享：Drawer 只订阅**它显示的那一格**
@@ -113,7 +115,7 @@ export default function RobotDetailDrawer() {
   const error = historyQuery.isError
     ? historyQuery.error instanceof Error
       ? historyQuery.error.message
-      : 'history 请求失败'
+      : t('error.load')
     : null;
 
   // ECharts 折线模型：温度/扭矩/角度 三条 series，x 轴为 10s 桶时间
@@ -146,14 +148,14 @@ export default function RobotDetailDrawer() {
     return {
       xAxis,
       series: [
-        { name: '温度(°C)', data: temp },
-        { name: '扭矩(N·m)', data: torque },
-        { name: '角度(rad)', data: position },
-        { name: '全关节最高温(°C)', data: maxTemp },
+        { name: t('chart.temp'), data: temp },
+        { name: t('chart.torque'), data: torque },
+        { name: t('chart.angle'), data: position },
+        { name: t('chart.maxTemp'), data: maxTemp },
       ],
       battery,
     };
-  }, [history, selectedJoint]);
+  }, [history, selectedJoint, t]);
 
   // 该机器人最近告警：REST 是权威视图（含 ack/escalated 事后状态，WS 只推增量）。
   // 后端 /alerts 暂无 robot_id 查询参数，故拉最近 200 条（_MAX_LIMIT=500 内）客户端过滤。
@@ -207,13 +209,13 @@ export default function RobotDetailDrawer() {
       } catch (e) {
         // 刻意不透传含 "HTTP 5xx" 的原始文案：500 用例里 getByText(/HTTP 500/)
         // 必须唯一命中历史图错误（测试契约），且 5xx 对值班员无操作价值。
-        const msg = e instanceof Error ? e.message : '操作失败';
-        setAckError(msg.includes('HTTP 5') ? '告警确认操作失败' : msg);
+        const msg = e instanceof Error ? e.message : t('error.op');
+        setAckError(msg.includes('HTTP 5') ? t('ack.error') : msg);
       } finally {
         setAckBusyId(null);
       }
     },
-    [queryClient, selectedRobotId],
+    [queryClient, selectedRobotId, t],
   );
 
   if (!selectedRobotId) return null;
@@ -275,7 +277,7 @@ export default function RobotDetailDrawer() {
     },
     series: [
       {
-        name: '电量(%)',
+        name: t('chart.battery'),
         type: 'line' as const,
         smooth: true,
         showSymbol: chart.xAxis.length <= 2,
@@ -297,7 +299,7 @@ export default function RobotDetailDrawer() {
     ? robotDisplayState(robot.is_online === true, robot.status_code, hasEverReported(robot))
     : 'offline';
   const statusColor = robot ? DISPLAY_COLOR[displayState] : COLORS.statusOffline;
-  const statusText = robot ? DISPLAY_LABEL[displayState] : '无数据';
+  const statusText = robot ? t(`display.${displayState}`) : t('display.noData');
 
   return (
     <>
@@ -330,23 +332,23 @@ export default function RobotDetailDrawer() {
             className="px-2 py-1 cursor-pointer"
             style={{ ...FONT.metric, color: COLORS.textSecondary, border: `1px solid ${COLORS.border}` }}
           >
-            关闭
+            {t('drawer.close')}
           </button>
         </div>
 
         <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 flex flex-col gap-4">
           {/* 基本信息 */}
           <section>
-            <h3 style={{ ...FONT.metric, color: COLORS.textSecondary }}>基本信息</h3>
+            <h3 style={{ ...FONT.metric, color: COLORS.textSecondary }}>{t('info.title')}</h3>
             <div className="grid grid-cols-3 gap-2 mt-1">
               <div className="flex flex-col">
-                <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>电量</span>
+                <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>{t('info.battery')}</span>
                 <span className="tabular-nums" style={{ color: COLORS.textPrimary, fontWeight: 600 }}>
                   {robot ? `${robot.battery_pct.toFixed(1)}%` : '--'}
                 </span>
               </div>
               <div className="flex flex-col">
-                <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>最高关节温度</span>
+                <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>{t('info.maxJointTemp')}</span>
                 <span className="tabular-nums" style={{ color: COLORS.textPrimary, fontWeight: 600 }}>
                   {robot && robot.is_online === true ? `${robot.max_joint_temp.toFixed(1)}°C` : '--'}
                 </span>
@@ -358,21 +360,21 @@ export default function RobotDetailDrawer() {
                   也可能是它自己算出来的），前者是坐在服务端这边的物证（ISSUE #77）。
                   两者都有时优先 last_seen；老后端只给 ts 时回落，不显示空白。
                 */}
-                <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>最后更新</span>
+                <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>{t('info.lastUpdate')}</span>
                 <span className="tabular-nums" style={{ color: COLORS.textPrimary, fontWeight: 600 }}>
                   {lastSeenMs(robot) !== null
-                    ? new Date(lastSeenMs(robot) as number).toLocaleTimeString('zh-CN', { hour12: false })
+                    ? formatClock(lastSeenMs(robot) as number, locale)
                     : '--'}
                 </span>
               </div>
               <div className="flex flex-col">
-                <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>状态码</span>
+                <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>{t('info.statusCode')}</span>
                 <span className="tabular-nums" style={{ color: COLORS.textPrimary, fontWeight: 600 }}>
                   {robot ? robot.status_code : '--'}
                 </span>
               </div>
               <div className="flex flex-col">
-                <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>错误码</span>
+                <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>{t('info.errorCode')}</span>
                 <span
                   className="tabular-nums"
                   style={{
@@ -385,9 +387,9 @@ export default function RobotDetailDrawer() {
                 </span>
               </div>
               <div className="flex flex-col">
-                <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>数据帧龄</span>
+                <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>{t('info.frameAge')}</span>
                 <span className="tabular-nums" style={{ color: COLORS.textPrimary, fontWeight: 600 }}>
-                  {frameAge(lastSeenMs(robot))}
+                  {frameAge(lastSeenMs(robot), t)}
                 </span>
               </div>
             </div>
@@ -396,7 +398,7 @@ export default function RobotDetailDrawer() {
           {/* 关节温度热力阵列（24 关节） */}
           <section>
             <h3 className="mb-1" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
-              关节温度阵列（24 关节，spec/00 §5.5）
+              {t('joint.arrayTitle')}
             </h3>
             <JointHeatmap
               temperatures={robot?.joint_temperatures ?? {}}
@@ -410,14 +412,14 @@ export default function RobotDetailDrawer() {
               与热力图关节块的 aria-label（以关节名开头）在可访问性树上互不混淆）。 */}
           <section>
             <h3 className="mb-1" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
-              关节扭矩负载（实时，点击切换选中关节）
+              {t('torque.title')}
             </h3>
             <div className="grid grid-cols-2 gap-x-3 gap-y-1 mt-1">
               {torqueRows.map(({ joint, value, pct }) => (
                 <button
                   key={joint}
                   type="button"
-                  aria-label={value === null ? `扭矩 ${joint} 无数据` : `扭矩 ${joint} ${value.toFixed(2)}N·m`}
+                  aria-label={value === null ? t('torque.ariaNoData', { joint }) : t('torque.aria', { joint, val: value.toFixed(2) })}
                   onClick={() => setSelectedJoint(joint)}
                   className="flex items-center gap-1.5 min-w-0 cursor-pointer"
                   style={{
@@ -457,7 +459,7 @@ export default function RobotDetailDrawer() {
           <section>
             <div className="flex items-center justify-between gap-2 mb-1">
               <h3 style={{ ...FONT.metric, color: COLORS.textSecondary }}>
-                {selectedJoint} · 最近 {historyMinutes} 分钟（{HISTORY_RESOLUTION} 分辨率）
+                {t('history.title', { joint: selectedJoint, m: historyMinutes, res: HISTORY_RESOLUTION })}
               </h3>
               <div className="flex items-center gap-1 shrink-0">
                 {HISTORY_WINDOW_OPTIONS.map((m) => (
@@ -481,15 +483,15 @@ export default function RobotDetailDrawer() {
             </div>
             {loading ? (
               <div className="h-56 flex items-center justify-center" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
-                历史数据加载中…
+                {t('history.loading')}
               </div>
             ) : error ? (
               <div className="h-56 flex items-center justify-center text-center px-4" style={{ ...FONT.metric, color: COLORS.statusFault }}>
-                历史数据不可用（{error}）· {API_BASE}/robots/{selectedRobotId}/history
+                {t('history.unavailable', { error, api: API_BASE, id: selectedRobotId })}
               </div>
             ) : chart.xAxis.length === 0 ? (
               <div className="h-56 flex items-center justify-center" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
-                最近 {historyMinutes} 分钟无历史点
+                {t('history.noPoints', { m: historyMinutes })}
               </div>
             ) : (
               <ReactEChartsCore
@@ -507,7 +509,7 @@ export default function RobotDetailDrawer() {
           {!loading && !error && chart.xAxis.length > 0 ? (
             <section>
               <h3 className="mb-1" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
-                电量趋势 · 最近 {historyMinutes} 分钟
+                {t('battery.title', { m: historyMinutes })}
               </h3>
               <ReactEChartsCore
                 echarts={echarts}
@@ -523,7 +525,7 @@ export default function RobotDetailDrawer() {
               订单 27 T2：admin 可就地确认/撤回，成功后 invalidate 重拉对账） */}
           <section>
             <h3 className="mb-1" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
-              该机器人最近告警
+              {t('alerts.title')}
             </h3>
             {ackError ? (
               <div className="mb-1" style={{ ...FONT.metric, color: COLORS.statusFault }}>
@@ -531,12 +533,12 @@ export default function RobotDetailDrawer() {
               </div>
             ) : null}
             {alertsQuery.isPending && alertsQuery.fetchStatus !== 'idle' ? (
-              <div style={{ ...FONT.metric, color: COLORS.textSecondary }}>告警加载中…</div>
+              <div style={{ ...FONT.metric, color: COLORS.textSecondary }}>{t('alerts.loading')}</div>
             ) : alertsQuery.isError ? (
               // 刻意不带 HTTP 码：500 用例里 getByText(/HTTP 500/) 必须唯一命中历史图错误
-              <div style={{ ...FONT.metric, color: COLORS.statusFault }}>告警加载失败</div>
+              <div style={{ ...FONT.metric, color: COLORS.statusFault }}>{t('alerts.loadFail')}</div>
             ) : robotAlerts.length === 0 ? (
-              <div style={{ ...FONT.metric, color: COLORS.textSecondary }}>暂无告警记录</div>
+              <div style={{ ...FONT.metric, color: COLORS.textSecondary }}>{t('alerts.empty')}</div>
             ) : (
               <ul className="flex flex-col gap-1.5">
                 {robotAlerts.map((a) => (
@@ -549,17 +551,17 @@ export default function RobotDetailDrawer() {
                       className="tabular-nums shrink-0"
                       style={{ ...FONT.metric, color: COLORS.textSecondary }}
                     >
-                      {new Date(a.time).toLocaleTimeString('zh-CN', { hour12: false })}
+                      {formatClock(new Date(a.time).getTime(), locale)}
                     </span>
                     <span className="shrink-0" style={{ ...FONT.metric, color: severityColor(a.severity) }}>
-                      {ruleLabel(a.rule_id)}
+                      {t(RULE_KEY[a.rule_id] ?? a.rule_id)}
                     </span>
                     <span className="truncate" style={{ ...FONT.metric, color: COLORS.textPrimary }} title={a.message}>
                       {a.message}
                     </span>
                     {a.escalated ? (
                       <span className="shrink-0" style={{ ...FONT.metric, color: COLORS.statusWarning }}>
-                        已升级
+                        {t('alerts.escalated')}
                       </span>
                     ) : null}
                     {a.suppressed ? (
@@ -571,16 +573,16 @@ export default function RobotDetailDrawer() {
                         style={{ ...FONT.metric, color: COLORS.textSecondary }}
                         title={
                           a.suppressed_by
-                            ? `被更高等级告警抑制（根因规则：${ruleLabel(a.suppressed_by)}）`
-                            : '被更高等级告警抑制'
+                            ? t('suppressed.title', { rule: t(RULE_KEY[a.suppressed_by] ?? a.suppressed_by) })
+                            : t('suppressed.titleSimple')
                         }
                       >
-                        ⊘ 已抑制
+                        ⊘ {t('alerts.suppressed')}
                       </span>
                     ) : null}
                     {a.ack ? (
                       <span className="shrink-0" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
-                        已确认
+                        {t('alerts.acked')}
                       </span>
                     ) : null}
                     {canAck ? (
@@ -596,9 +598,9 @@ export default function RobotDetailDrawer() {
                           backgroundColor: COLORS.surface,
                           border: `1px solid ${COLORS.border}`,
                         }}
-                        title={a.ack ? '撤回确认' : '确认告警'}
+                        title={a.ack ? t('ack.titleUnack') : t('ack.titleAck')}
                       >
-                        {a.ack ? '撤回' : '确认'}
+                        {a.ack ? t('alerts.unack') : t('alerts.ack')}
                       </button>
                     ) : null}
                   </li>

@@ -1,0 +1,29 @@
+name: Feature request
+description: Propose a new capability or improvement
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Operator pain point
+      description: What real monitoring/operations problem does this solve? Who is affected (on-floor operator, SRE, fleet manager)?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the desired behavior and any UI/API surface. For UI changes, note i18n (en/ko/zh) strings.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you considered and why they were rejected.
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope & risks
+      description: Which modules are touched (frontend/backend/alert/simulator/infra)? Any performance or security considerations?

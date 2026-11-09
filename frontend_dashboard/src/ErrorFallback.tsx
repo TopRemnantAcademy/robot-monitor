@@ -8,8 +8,10 @@
 
 import type { FallbackProps } from 'react-error-boundary';
 import { COLORS, FONT } from './theme/tokens';
+import { useI18n } from './i18n/I18nProvider';
 
 export default function ErrorFallback({ error, resetErrorBoundary }: FallbackProps) {
+  const { t } = useI18n();
   const message = error instanceof Error ? error.message : String(error);
 
   return (
@@ -18,9 +20,9 @@ export default function ErrorFallback({ error, resetErrorBoundary }: FallbackPro
       style={{ backgroundColor: COLORS.bgBase, color: COLORS.textPrimary }}
       role="alert"
     >
-      <h1 style={{ ...FONT.title, color: COLORS.statusFault }}>看板渲染出错</h1>
+      <h1 style={{ ...FONT.title, color: COLORS.statusFault }}>{t('error.title')}</h1>
       <p style={{ ...FONT.metric, color: COLORS.textSecondary, maxWidth: 640 }}>
-        界面组件抛出未捕获异常，已由错误边界接管。下方为错误摘要，可尝试重试或刷新页面。
+        {t('error.desc')}
       </p>
       <pre
         className="overflow-auto px-3 py-2"
@@ -44,7 +46,7 @@ export default function ErrorFallback({ error, resetErrorBoundary }: FallbackPro
           className="px-3 py-1 cursor-pointer"
           style={{ ...FONT.metric, color: COLORS.textPrimary, border: `1px solid ${COLORS.border}` }}
         >
-          重试
+          {t('error.retry')}
         </button>
         <button
           type="button"
@@ -52,7 +54,7 @@ export default function ErrorFallback({ error, resetErrorBoundary }: FallbackPro
           className="px-3 py-1 cursor-pointer"
           style={{ ...FONT.metric, color: COLORS.textPrimary, border: `1px solid ${COLORS.border}` }}
         >
-          刷新页面
+          {t('error.reload')}
         </button>
       </div>
     </div>

@@ -1,21 +1,24 @@
-// 平台支持的机型目录（UI + admin UI 角色感知）。
+// Supported-model catalog (UI + admin UI role-aware).
 //
-// - viewer：机型卡片（名称 / 形态 / 自由度 / 在册数 / 在线数 / 说明）。
-// - admin ：同卡片 + 机群管理明细（厂商 / 固件版本 / 工位 / 未登记标记）。
+// - viewer: model cards (name / form factor / DOF / registered count / online count / note).
+// - admin : same cards + fleet-management detail (vendor / firmware versions / stations / unregistered flag).
 //
-// 数据来自 GET /supported-robots（DB 驱动：robot_metadata.model_type 去重 + 机群构成）。
-// 颜色 / 字号全部走 theme/tokens，不引入新色相（spec/03 §3）。
+// Data comes from GET /supported-robots (DB-driven: distinct robot_metadata.model_type
+// + fleet composition). Colors / font sizes all come from theme/tokens — no new hues (spec/03 §3).
 //
-// 布局：本组件是 `shrink-0` 横条（固定高度、内部横向滚动），插在
-// FleetHealthAnalytics 与 FleetOverviewCards 之间，不挤占卡片墙的 flex-1 空间。
+// Layout: this component is a `shrink-0` horizontal strip (fixed height, internal horizontal
+// scroll), inserted between FleetHealthAnalytics and FleetOverviewCards; it does not consume
+// the flex-1 space of the card wall.
 
 import { useQuery } from '@tanstack/react-query';
 import { COLORS, FONT, RADIUS } from '../theme/tokens';
 import { fetchSupportedRobots } from '../auth/api';
 import { useIsAdmin } from '../auth/authStore';
 import { supportedRobotsKey, type SupportedRobot } from '../types/robot';
+import { useI18n } from '../i18n/I18nProvider';
 
 export default function SupportedRobotsPanel() {
+  const { t } = useI18n();
   const isAdmin = useIsAdmin();
   const { data, isLoading, isError } = useQuery({
     queryKey: supportedRobotsKey,
@@ -24,9 +27,9 @@ export default function SupportedRobotsPanel() {
   });
 
   const headerRight = data
-    ? `${data.models.length} 款 · 在册 ${data.total_robots} 台`
+    ? t('sr.headerRight', { n: data.models.length, m: data.total_robots })
     : isLoading
-      ? '加载中…'
+      ? t('sr.loading')
       : '—';
 
   return (
@@ -36,7 +39,7 @@ export default function SupportedRobotsPanel() {
     >
       <div className="flex items-center gap-2 mb-1.5">
         <span style={{ ...FONT.title, fontSize: '14px', color: COLORS.textPrimary }}>
-          平台支持的机型
+          {t('sr.header')}
         </span>
         <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>{headerRight}</span>
         {isAdmin && (
@@ -48,20 +51,20 @@ export default function SupportedRobotsPanel() {
               border: `1px solid ${COLORS.accent}`,
             }}
           >
-            管理视图
+            {t('sr.adminView')}
           </span>
         )}
       </div>
 
       {isError ? (
-        <span style={{ ...FONT.metric, color: COLORS.statusFault }}>机型目录加载失败</span>
+        <span style={{ ...FONT.metric, color: COLORS.statusFault }}>{t('sr.loadFail')}</span>
       ) : (
         <div className="flex gap-2 overflow-x-auto pb-1">
           {(data?.models ?? []).map((m) => (
             <ModelCard key={m.model_type} model={m} isAdmin={isAdmin} />
           ))}
           {isLoading && !data && (
-            <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>加载中…</span>
+            <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>{t('sr.loading')}</span>
           )}
         </div>
       )}
@@ -70,6 +73,7 @@ export default function SupportedRobotsPanel() {
 }
 
 function ModelCard({ model, isAdmin }: { model: SupportedRobot; isAdmin: boolean }) {
+  const { t } = useI18n();
   const allOnline = model.total > 0 && model.online === model.total;
   const onlineColor = allOnline ? COLORS.statusNormal : COLORS.statusWarning;
 
@@ -88,23 +92,23 @@ function ModelCard({ model, isAdmin }: { model: SupportedRobot; isAdmin: boolean
           {model.display_name}
         </span>
         {model.generic && (
-          <span style={{ fontSize: '9px', color: COLORS.textSecondary }}>未登记</span>
+          <span style={{ fontSize: '9px', color: COLORS.textSecondary }}>{t('sr.unregistered')}</span>
         )}
       </div>
 
       <span style={{ fontSize: '10px', color: COLORS.textSecondary }}>{model.model_type}</span>
 
       <div className="flex flex-wrap gap-1">
-        <Tag label={model.form_factor === '—' ? '形态未定义' : model.form_factor} />
-        <Tag label={model.dof > 0 ? `${model.dof} 自由度` : '自由度未定义'} />
+        <Tag label={model.form_factor === '—' ? t('sr.formFactorUndefined') : model.form_factor} />
+        <Tag label={model.dof > 0 ? t('sr.dof', { n: model.dof }) : t('sr.dofUndefined')} />
       </div>
 
       <div className="flex items-center gap-2" style={{ fontSize: '11px' }}>
-        <span style={{ color: COLORS.textSecondary }}>在册</span>
+        <span style={{ color: COLORS.textSecondary }}>{t('sr.registered')}</span>
         <span className="tabular-nums" style={{ color: COLORS.textPrimary }}>
           {model.total}
         </span>
-        <span style={{ color: COLORS.textSecondary }}>在线</span>
+        <span style={{ color: COLORS.textSecondary }}>{t('sr.online')}</span>
         <span className="tabular-nums" style={{ color: onlineColor }}>
           {model.online}
         </span>
@@ -119,12 +123,13 @@ function ModelCard({ model, isAdmin }: { model: SupportedRobot; isAdmin: boolean
             color: COLORS.textSecondary,
           }}
         >
-          <span>厂商：{model.vendor}</span>
+          <span>{t('sr.vendor', { v: model.vendor })}</span>
           <span>
-            固件：
-            {model.firmware_versions.length ? model.firmware_versions.join(' / ') : '—'}
+            {t('sr.firmware', {
+              f: model.firmware_versions.length ? model.firmware_versions.join(' / ') : '—',
+            })}
           </span>
-          <span>工位：{model.stations} 个</span>
+          <span>{t('sr.stations', { n: model.stations })}</span>
         </div>
       )}
 

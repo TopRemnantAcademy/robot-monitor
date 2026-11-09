@@ -5,7 +5,6 @@ import { memo, useMemo, useRef } from 'react';
 import {
   COLORS,
   DISPLAY_COLOR,
-  DISPLAY_LABEL,
   FONT,
   batteryColor,
   hasEverReported,
@@ -15,6 +14,7 @@ import {
 } from '../theme/tokens';
 import { useRobotStore, buildRobotIds } from '../store/robotStore';
 import { countCardRender } from '../lib/observability';
+import { useI18n } from '../i18n/I18nProvider';
 
 /** 卡片只吃自己的 robotId，配合 memo + 自订阅让「本帧没变的卡」不重渲染 */
 interface RobotCardProps {
@@ -24,6 +24,7 @@ interface RobotCardProps {
 }
 
 const RobotCard = memo(function RobotCard({ robotId, selected, onOpen }: RobotCardProps) {
+  const { t } = useI18n();
   // ISSUE #75 结构性共享：卡片**自己**订阅自己那一格（`s.robots.get(robotId)`）。
   // 旧形态是网格订阅整张 Map → 每个刷库帧都重建 100 个卡片元素 + 100 次 memo
   // 比较（哪怕本帧只有 3 台变了）；现在 zustand 按选择器输出（Object.is）逐卡
@@ -38,7 +39,7 @@ const RobotCard = memo(function RobotCard({ robotId, selected, onOpen }: RobotCa
   // 一台 1 小时前断电的"预警"机器人会一直亮着黄灯。现在它是灰色的「失联」。
   const state = robotDisplayState(robot.is_online === true, robot.status_code, hasEverReported(robot));
   const statusColor = DISPLAY_COLOR[state];
-  const statusLabel = DISPLAY_LABEL[state];
+  const statusLabel = t(`display.${state}`);
   const offlineDisplay = isOfflineDisplay(state);
   const battColor = batteryColor(robot.battery_pct);
   const tempClr = offlineDisplay ? COLORS.statusOffline : tempColor(robot.max_joint_temp);

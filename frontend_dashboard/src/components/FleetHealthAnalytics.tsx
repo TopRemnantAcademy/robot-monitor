@@ -24,7 +24,6 @@ import echarts from '../lib/echartsCore';
 import {
   COLORS,
   DISPLAY_COLOR,
-  DISPLAY_LABEL,
   FONT,
   batteryColor,
   hasEverReported,
@@ -33,6 +32,7 @@ import {
 } from '../theme/tokens';
 import type { RobotDisplayState } from '../theme/tokens';
 import { computeFleetSample, useRobotStore } from '../store/robotStore';
+import { useI18n } from '../i18n/I18nProvider';
 
 /** 采样间隔（ms）。2s 与 100ms 刷库解耦，且 90 点 ≈ 3 分钟窗口，够看趋势。 */
 const SAMPLE_INTERVAL_MS = 2000;
@@ -96,6 +96,7 @@ function Panel({ title, children }: { title: string; children: ReactNode }) {
 const CHART_STYLE = { height: 92, width: '100%' } as const;
 
 export default function FleetHealthAnalytics() {
+  const { t } = useI18n();
   // —— 分布：分桶计数选择器，useShallow 逐元素比较，桶不变则不重渲染 ——
   const statusDist = useRobotStore(
     useShallow((s) => {
@@ -147,13 +148,13 @@ export default function FleetHealthAnalytics() {
     grid: { left: 4, right: 30, top: 4, bottom: 4, containLabel: true },
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
     xAxis: { type: 'value', minInterval: 1, axisLabel, splitLine },
-    yAxis: {
-      type: 'category',
-      inverse: true,
-      data: STATUS_ORDER.map((st) => DISPLAY_LABEL[st]),
-      axisLabel: { color: COLORS.textSecondary, fontSize: 10 },
-      axisLine: { lineStyle: { color: COLORS.border } },
-    },
+      yAxis: {
+        type: 'category',
+        inverse: true,
+        data: STATUS_ORDER.map((st) => t(`display.${st}`)),
+        axisLabel: { color: COLORS.textSecondary, fontSize: 10 },
+        axisLine: { lineStyle: { color: COLORS.border } },
+      },
     series: [
       {
         type: 'bar',
@@ -224,7 +225,7 @@ export default function FleetHealthAnalytics() {
     grid: { left: 32, right: 32, top: 22, bottom: 16 },
     tooltip: { trigger: 'axis' },
     legend: {
-      data: ['在线率%', '活跃告警'],
+      data: [t('legend.onlineRate'), t('legend.activeAlerts')],
       textStyle: { color: COLORS.textSecondary, fontSize: 10 },
       top: 0,
       itemWidth: 12,
@@ -266,19 +267,19 @@ export default function FleetHealthAnalytics() {
 
   return (
     <div className="h-[132px] shrink-0 flex gap-3 px-3 py-2 overflow-x-auto">
-      <Panel title="状态分布（台）">
+      <Panel title={t('panel.statusDist')}>
         <ReactEChartsCore echarts={echarts} option={statusOption} style={CHART_STYLE} notMerge lazyUpdate />
       </Panel>
-      <Panel title="电量分布（%，收到过遥测）">
+      <Panel title={t('panel.batteryDist')}>
         <ReactEChartsCore echarts={echarts} option={batteryOption} style={CHART_STYLE} notMerge lazyUpdate />
       </Panel>
-      <Panel title="关节温度分布（°C，在线）">
+      <Panel title={t('panel.tempDist')}>
         <ReactEChartsCore echarts={echarts} option={tempOption} style={CHART_STYLE} notMerge lazyUpdate />
       </Panel>
-      <Panel title="在线率 / 活跃告警趋势（3 分钟）">
+      <Panel title={t('panel.trend')}>
         {samples.length === 0 ? (
           <div className="h-full flex items-center justify-center" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
-            趋势积累中…（每 {SAMPLE_INTERVAL_MS / 1000}s 采样）
+            {t('trend.accumulating', { n: SAMPLE_INTERVAL_MS / 1000 })}
           </div>
         ) : (
           <ReactEChartsCore echarts={echarts} option={trendOption} style={CHART_STYLE} notMerge lazyUpdate />

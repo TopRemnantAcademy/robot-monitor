@@ -151,15 +151,15 @@ describe('AlertLogTable — 抑制呈现（订单 35）', () => {
     // 关键：主列表**显式**带 suppressed=false（不依赖后端默认值，契约刻意中立）
     await waitFor(() => expect(alertsUrls.length).toBeGreaterThan(0));
     expect(alertsUrls[0]).toContain('suppressed=false');
-    // 正常行在场（ruleLabel: joint_stuck → 关节卡死）。
+    // 正常行在场（ruleLabel: joint_stuck → Joint stuck）。
     // 用 waitFor 而非 findByText：react-query 的 resolve → setState → 重渲染
     // 是一条 async 链，findByText 的 1s 默认窗口在本机实测会偶发超时。
     await waitFor(() => expect(screen.getByText('左肩关节卡死')).toBeInTheDocument());
-    expect(screen.getByText('关节卡死 · S2')).toBeInTheDocument();
+    expect(screen.getByText('Joint stuck · S2')).toBeInTheDocument();
     // 被抑制行不在默认视图里（后端已按 suppressed=false 过滤，前端也不该出现）
-    expect(screen.queryByText('⊘ 已抑制')).not.toBeInTheDocument();
+    expect(screen.queryByText('⊘ Suppressed')).not.toBeInTheDocument();
     // 开关是 off
-    expect(screen.getByRole('switch', { name: /显示已抑制/ })).toHaveAttribute(
+    expect(screen.getByRole('switch', { name: /Show suppressed/ })).toHaveAttribute(
       'aria-checked',
       'false',
     );
@@ -170,21 +170,21 @@ describe('AlertLogTable — 抑制呈现（订单 35）', () => {
     arm();
     render(<AlertLogTable />);
 
-    await user.click(await screen.findByRole('switch', { name: /显示已抑制/ }));
+    await user.click(await screen.findByRole('switch', { name: /Show suppressed/ }));
 
     // 专用查询带 suppressed=true（与主列表的 false 是两条独立请求）
     await waitFor(() => expect(alertsUrls.some((u) => u.includes('suppressed=true'))).toBe(true));
 
     // 行**在场**（降视觉权重而非删除）且标记可见
-    const tag = await screen.findByText('⊘ 已抑制');
+    const tag = await screen.findByText('⊘ Suppressed');
     expect(tag).toBeInTheDocument();
-    // 归因可读：title 把根因规则翻译成中文标签（motor_temp → 电机过热）
-    expect(tag).toHaveAttribute('title', '被更高等级告警抑制（根因规则：电机过热）');
+    // 归因可读：title 把根因规则翻译为英文标签（motor_temp → Motor overheat）
+    expect(tag).toHaveAttribute('title', 'Suppressed by higher-severity alert (root cause: Motor overheat)');
     // 被抑制的行仍在表格里（同一 AlertRow 渲染路径），消息文本可查
     expect(screen.getByText('电量 17.4% 低于 20%')).toBeInTheDocument();
     // 关闭开关回默认态：标记随之消失（但不清空缓存，故不重拉）
-    await user.click(screen.getByRole('switch', { name: /显示已抑制/ }));
-    await waitFor(() => expect(screen.queryByText('⊘ 已抑制')).not.toBeInTheDocument());
+    await user.click(screen.getByRole('switch', { name: /Show suppressed/ }));
+    await waitFor(() => expect(screen.queryByText('⊘ Suppressed')).not.toBeInTheDocument());
   });
 
   it('被抑制行只降视觉权重：opacity/grayscale 生效但行不被移除（可追溯）', async () => {
@@ -192,8 +192,8 @@ describe('AlertLogTable — 抑制呈现（订单 35）', () => {
     arm();
     const { container } = render(<AlertLogTable />);
 
-    await user.click(await screen.findByRole('switch', { name: /显示已抑制/ }));
-    const tag = await screen.findByText('⊘ 已抑制');
+    await user.click(await screen.findByRole('switch', { name: /Show suppressed/ }));
+    const tag = await screen.findByText('⊘ Suppressed');
 
     // 标记所在按钮的行容器 = 该行的根 div（AlertRow 的 <div> 包着一个 <button>）
     const rowDiv = tag.closest('button')?.parentElement as HTMLElement | null;
@@ -224,12 +224,12 @@ describe('RobotDetailDrawer — 抑制标记（订单 35）', () => {
 
     const aside = screen.getByRole('complementary');
     // 被抑制行在场 + 标记可读（复用 AlertLogTable 的同一措辞与 token）
-    const tag = await within(aside).findByText('⊘ 已抑制');
-    expect(tag).toHaveAttribute('title', '被更高等级告警抑制（根因规则：电机过热）');
+    const tag = await within(aside).findByText('⊘ Suppressed');
+    expect(tag).toHaveAttribute('title', 'Suppressed by higher-severity alert (root cause: Motor overheat)');
     expect(within(aside).getByText('电量 17.4% 低于 20%')).toBeInTheDocument();
     // 对照组：正常告警 render 但**不带**标记 —— 标记只属于被抑制那条
     expect(within(aside).getByText('左肩关节卡死')).toBeInTheDocument();
-    expect(within(aside).getAllByText('⊘ 已抑制')).toHaveLength(1);
+    expect(within(aside).getAllByText('⊘ Suppressed')).toHaveLength(1);
 
     // 抽屉的请求**没有** suppressed 过滤参数（刻意要全集：排障时被压制的行才是重点）。
     // 本轮用例用**自定义** implementation（按端点分流），不再走 `arm()` 的默认

@@ -4,6 +4,8 @@ import { useMemo } from 'react';
 import { COLORS, FONT } from '../theme/tokens';
 import { selectStatusCounts, useRobotStore } from '../store/robotStore';
 import { useShallow } from 'zustand/react/shallow';
+import { useI18n } from '../i18n/I18nProvider';
+import LanguageSwitcher from '../i18n/LanguageSwitcher';
 
 function Kpi({ label, value, unit, color }: { label: string; value: string; unit?: string; color?: string }) {
   return (
@@ -18,6 +20,7 @@ function Kpi({ label, value, unit, color }: { label: string; value: string; unit
 }
 
 export default function HealthSummaryHeader() {
+  const { t } = useI18n();
   const alerts = useRobotStore((s) => s.alerts);
   const wsStatus = useRobotStore((s) => s.wsStatus);
 
@@ -59,7 +62,8 @@ export default function HealthSummaryHeader() {
 
   const dotColor =
     wsStatus === 'open' ? COLORS.statusNormal : wsStatus === 'connecting' ? COLORS.statusWarning : COLORS.statusFault;
-  const dotLabel = wsStatus === 'open' ? '已连接' : wsStatus === 'connecting' ? '连接中' : '断开重连中';
+  const dotLabel =
+    wsStatus === 'open' ? t('ws.connected') : wsStatus === 'connecting' ? t('ws.connecting') : t('ws.reconnecting');
 
   return (
     <header
@@ -69,25 +73,27 @@ export default function HealthSummaryHeader() {
       <div className="flex items-baseline gap-2">
         <span style={{ ...FONT.title, color: COLORS.textPrimary }}>RobotMonitor</span>
         <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>
-          人形机器人工厂 · 100 台实时监控
+          {t('header.subtitle')}
         </span>
       </div>
 
       <div className="flex items-center gap-6">
         <Kpi
-          label="在线率"
+          label={t('kpi.onlineRate')}
           value={stats.onlineRate.toFixed(1)}
           // 失联台数直接挂在括号里：只看百分比看不出"是有 1 台还是 40 台掉了"，
           // 而这两者的处置动作完全不同（前者去现场，后者先查 Redis/MQTT 链路）。
-          unit={`% (${stats.online}/${stats.total}${stats.stale > 0 ? ` · 失联 ${stats.stale}` : ''})`}
+          unit={`% (${stats.online}/${stats.total}${stats.stale > 0 ? t('unit.lost', { n: stats.stale }) : ''})`}
           color={stats.onlineRate >= 90 ? COLORS.statusNormal : COLORS.statusWarning}
         />
         <Kpi
-          label="当前告警"
+          label={t('kpi.alerts')}
           value={String(activeAlerts)}
           color={activeAlerts > 0 ? COLORS.statusFault : COLORS.textPrimary}
         />
-        <Kpi label="平均电量" value={stats.avgBattery.toFixed(1)} unit="%" />
+        <Kpi label={t('kpi.avgBattery')} value={stats.avgBattery.toFixed(1)} unit="%" />
+
+        <LanguageSwitcher />
 
         <div className="flex items-center gap-2">
           <span

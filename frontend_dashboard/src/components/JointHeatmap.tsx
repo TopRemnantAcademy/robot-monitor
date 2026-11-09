@@ -4,6 +4,7 @@
 import { COLORS, tempColor } from '../theme/tokens';
 import { JOINT_NAMES } from '../types/robot';
 import type { JointDict } from '../types/robot';
+import { useI18n } from '../i18n/I18nProvider';
 
 interface JointHeatmapProps {
   temperatures: JointDict;
@@ -29,6 +30,7 @@ function shortName(joint: string): { group: string; axis: string } {
 }
 
 export default function JointHeatmap({ temperatures, selectedJoint, onSelectJoint }: JointHeatmapProps) {
+  const { t } = useI18n();
   return (
     <div className="grid grid-cols-6 gap-1">
       {JOINT_NAMES.map((joint) => {
@@ -42,8 +44,8 @@ export default function JointHeatmap({ temperatures, selectedJoint, onSelectJoin
           <button
             key={joint}
             type="button"
-            title={`${joint}${hasValue ? ` · ${(value as number).toFixed(1)}°C` : ' · 无数据'}`}
-            aria-label={`${joint} ${hasValue ? `${(value as number).toFixed(1)}°C` : '无数据'}`}
+            title={`${joint}${hasValue ? ` · ${(value as number).toFixed(1)}°C` : ` · ${t('joint.noData')}`}`}
+            aria-label={`${joint} ${hasValue ? `${(value as number).toFixed(1)}°C` : t('joint.noData')}`}
             onClick={() => onSelectJoint?.(joint)}
             className="h-10 rounded flex flex-col items-center justify-center px-1 cursor-pointer transition-colors"
             style={{
