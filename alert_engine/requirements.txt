@@ -1,5 +1,7 @@
 asyncpg==0.32.0
-redis[hiredis]==5.0.3
-pydantic-settings==2.2.1
-pydantic==2.6.4
-prometheus-client==0.21.1
+redis[hiredis]==8.1.0
+# ⚠️ pydantic / pydantic-settings 必须与 backend_ingestion/requirements.txt 完全一致：
+# CI 的 backend 作业把两份 requirements 装进同一个 venv，分叉会导致 pip ResolutionImpossible。
+pydantic-settings==2.16.2
+pydantic==2.14.3
+prometheus-client==0.26.0

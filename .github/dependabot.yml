@@ -7,11 +7,17 @@ updates:
     open-pull-requests-limit: 10
     labels:
       - "dependencies"
-    # Major bumps (e.g. vite 5->8, vitest 2->5, typescript 5->7) need deliberate,
-    # tested migrations so they don't break contributor builds. We handle those as
-    # dedicated PRs (see ROADMAP.md), not auto-PRs.
+    # Major bumps (e.g. vite 5->8, vitest 2->5, typescript 5->7, msw 2->3,
+    # echarts 5->6, react 18->19, @vitejs/plugin-react 4->6) need deliberate,
+    # tested migrations so they don't break contributor builds. We handle those
+    # as dedicated PRs (see ROADMAP.md), not auto-PRs.
     ignore:
       - update-types: ["version-update:semver-major"]
+    groups:
+      # @testing-library 套件一起升，避免单包漂移导致的类型不匹配。
+      testing-library:
+        patterns:
+          - "@testing-library/*"
 
   - package-ecosystem: "pip"
     directory: "/backend_ingestion"
@@ -22,6 +28,16 @@ updates:
       - "dependencies"
     ignore:
       - update-types: ["version-update:semver-major"]
+    groups:
+      # OpenTelemetry 是协调发布：API/SDK(exporter/instrumentation) 必须同版本。
+      # 分开升必冲突（ResolutionImpossible），故归为一组，一次 PR 全升。
+      opentelemetry:
+        patterns:
+          - "opentelemetry*"
+      # pydantic / pydantic-settings 必须同步升（且需与 alert_engine 对齐）。
+      pydantic:
+        patterns:
+          - "pydantic*"
 
   - package-ecosystem: "pip"
     directory: "/alert_engine"
@@ -32,6 +48,10 @@ updates:
       - "dependencies"
     ignore:
       - update-types: ["version-update:semver-major"]
+    groups:
+      pydantic:
+        patterns:
+          - "pydantic*"
 
   - package-ecosystem: "pip"
     directory: "/simulator"

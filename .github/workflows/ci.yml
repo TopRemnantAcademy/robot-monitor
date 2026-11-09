@@ -34,6 +34,21 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: "20"   # test_payload_contract.py 需要 node 实跑 payload.js
+      # 门禁：backend_ingestion 与 alert_engine 的 pydantic / pydantic-settings 必须完全一致。
+      # CI 把两份 requirements 装进同一个 venv，分叉会导致 pip ResolutionImpossible
+      #（PR #25 / #20 曾因此红）。这步在任何安装之前先卡死，避免「装到一半才炸」。
+      - name: Guard - pydantic pin lockstep (backend_ingestion <-> alert_engine)
+        run: |
+          set -eu
+          for pkg in pydantic pydantic-settings; do
+            a=$(grep -E "^${pkg}==" backend_ingestion/requirements.txt | head -1 || true)
+            b=$(grep -E "^${pkg}==" alert_engine/requirements.txt | head -1 || true)
+            if [ "$a" != "$b" ]; then
+              echo "::error::PIN MISMATCH: '$a' (backend_ingestion) vs '$b' (alert_engine) — CI installs both into one venv; divergence breaks pip resolve (PR #25/#20)"
+              exit 1
+            fi
+            echo "lockstep OK: $a"
+          done
       - name: Install Python deps
         run: |
           set -eu
@@ -117,6 +132,17 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: "20"
+      - name: Guard - pydantic pin lockstep (backend_ingestion <-> alert_engine)
+        run: |
+          set -eu
+          for pkg in pydantic pydantic-settings; do
+            a=$(grep -E "^${pkg}==" backend_ingestion/requirements.txt | head -1 || true)
+            b=$(grep -E "^${pkg}==" alert_engine/requirements.txt | head -1 || true)
+            if [ "$a" != "$b" ]; then
+              echo "::error::PIN MISMATCH: '$a' (backend_ingestion) vs '$b' (alert_engine)"
+              exit 1
+            fi
+          done
       - name: Install backend deps (OpenAPI 导出要 import app.main)
         run: |
           set -eu
