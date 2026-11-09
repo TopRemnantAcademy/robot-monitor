@@ -13,6 +13,24 @@ RobotMonitor 是一个开源运维看板，实时监视工厂车间的 **100 台
 
 ---
 
+## 预览
+
+<p align="center">
+  <img src="docs/assets/dashboard-preview.png" alt="RobotMonitor 看板 — 100 台机器人卡片墙与实时告警" width="820"/>
+  <br/>
+  <em>实时 fleet 视图 — 100 台人形机器人的状态 / 电量 / 温度以及实时告警流。</em>
+</p>
+
+<p align="center">
+  <img src="docs/assets/robot-detail-drawer.png" alt="机器人详情抽屉 — 关节温度图与告警历史" width="820"/>
+  <br/>
+  <em>单台机器人详情抽屉 — 关节温度图、近期历史与告警时间线。</em>
+</p>
+
+> 不想用 Docker 也想看效果？运行下方“快速开始（仅前端）”里的 **mock 后端** 即可。
+
+---
+
 ## 架构
 
 ```
@@ -60,7 +78,7 @@ npm run dev        # Vite 开发服务器 http://localhost:5173
 cd frontend_dashboard
 npm install
 node mock_backend.mjs            # 模拟 WS + REST 服务器 :8787
-npm run dev                      # Vite 开发服务器 :5173（代理到 :8787）
+VITE_API_BASE=http://localhost:8787 VITE_WS_HOST=localhost VITE_WS_PORT=8787 npm run dev   # Vite :5173，对接模拟后端
 ```
 
 模拟后端是**前端贡献者**以及无 Docker 机器上的 CI 本地测试推荐路径。详见 [docs/developer-guide.md](./docs/developer-guide.md)。
@@ -84,7 +102,10 @@ npm run dev                      # Vite 开发服务器 :5173（代理到 :8787�
 - 🤝 [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) — 社区规范
 - 🔒 [SECURITY.md](./SECURITY.md) — 漏洞报告方式
 
-入门友好问题标注 [`good first issue`](https://github.com/TopRemnantAcademy/robot-monitor/labels/good%20first%20issue)。
+- 🗺️ [ROADMAP.md](./ROADMAP.md) — 项目现状与可参与方向
+- 💡 功能提议请走 **Feature request** issue 或 **Discussions · Ideas**
+
+入门友好问题标注 [`good first issue`](https://github.com/TopRemnantAcademy/robot-monitor/labels/good%20first%20issue)；更大的任务用 [`help wanted`](https://github.com/TopRemnantAcademy/robot-monitor/labels/help%20wanted) 标注。
 
 ---
 

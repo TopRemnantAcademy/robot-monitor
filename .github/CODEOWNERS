@@ -1,0 +1,10 @@
+# RobotMonitor code owners
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+*                       @TopRemnantAcademy
+frontend_dashboard/     @TopRemnantAcademy
+backend_ingestion/      @TopRemnantAcademy
+alert_engine/           @TopRemnantAcademy
+simulator/              @TopRemnantAcademy
+infra/                  @TopRemnantAcademy
+docs/                   @TopRemnantAcademy

@@ -13,6 +13,24 @@ High-frequency telemetry (100 robots × 10 Hz = 1000 msg/s) flows over MQTT → 
 
 ---
 
+## Preview
+
+<p align="center">
+  <img src="docs/assets/dashboard-preview.png" alt="RobotMonitor dashboard — 100-robot fleet card wall with live alerts" width="820"/>
+  <br/>
+  <em>Live fleet view — 100 humanoid robots with status / battery / temperature and a real-time alert stream.</em>
+</p>
+
+<p align="center">
+  <img src="docs/assets/robot-detail-drawer.png" alt="Robot detail drawer with joint-temperature chart and alert history" width="820"/>
+  <br/>
+  <em>Per-robot detail drawer — joint-temperature chart, recent history, and alert timeline.</em>
+</p>
+
+> Want to see it live without Docker? Run the **mock backend** — see [Quick start (frontend only)](#quick-start-frontend-only--no-docker-needed).
+
+---
+
 ## Architecture
 
 ```
@@ -60,7 +78,7 @@ If you cannot run Docker in your environment, the dashboard can run against a **
 cd frontend_dashboard
 npm install
 node mock_backend.mjs            # mock WS + REST server on :8787
-npm run dev                      # Vite dev server on :5173 (proxies to :8787)
+VITE_API_BASE=http://localhost:8787 VITE_WS_HOST=localhost VITE_WS_PORT=8787 npm run dev   # Vite on :5173, talking to the mock
 ```
 
 The mock backend is the recommended path for **frontend contributors** and CI-local testing on machines without Docker. See [docs/developer-guide.md](./docs/developer-guide.md) for details.
@@ -83,8 +101,10 @@ We welcome contributors of every level — from first-time PRs to robotics-domai
 - 📐 [docs/developer-guide.md](./docs/developer-guide.md) — architecture, dev workflow, and the mock-backend path
 - 🤝 [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) — community standards
 - 🔒 [SECURITY.md](./SECURITY.md) — how to report vulnerabilities
+- 🗺️ [ROADMAP.md](./ROADMAP.md) — where we are and where to plug in
+- 💡 Propose a feature via a **Feature request** issue or **Discussions · Ideas**
 
-Good first issues are tagged [`good first issue`](https://github.com/TopRemnantAcademy/robot-monitor/labels/good%20first%20issue).
+Good first issues are tagged [`good first issue`](https://github.com/TopRemnantAcademy/robot-monitor/labels/good%20first%20issue); bigger tasks are tagged [`help wanted`](https://github.com/TopRemnantAcademy/robot-monitor/labels/help%20wanted).
 
 ---
 

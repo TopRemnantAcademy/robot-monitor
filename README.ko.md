@@ -13,6 +13,24 @@ RobotMonitor는 공장 바닥의 **휴머노이드 로봇 100대**를 실시간�
 
 ---
 
+## 미리보기
+
+<p align="center">
+  <img src="docs/assets/dashboard-preview.png" alt="RobotMonitor 대시보드 — 100대 로봇 카드월과 실시간 알림" width="820"/>
+  <br/>
+  <em>실시간 fleet 뷰 — 100대 휴머노이드 로봇의 상태/배터리/온도와 실시간 알림 스트림.</em>
+</p>
+
+<p align="center">
+  <img src="docs/assets/robot-detail-drawer.png" alt="로봇 상세 드로어 — 관절 온도 차트와 알림 이력" width="820"/>
+  <br/>
+  <em>로봇별 상세 드로어 — 관절 온도 차트, 최근 이력, 알림 타임라인.</em>
+</p>
+
+> Docker 없이 직접 보고 싶으신가요? 아래 '빠른 시작 (프론트엔드만)' 섹션의 **목 백엔드**를 실행하세요.
+
+---
+
 ## 아키텍처
 
 ```
@@ -60,7 +78,7 @@ Docker를 실행할 수 없는 환경에서는 **목 백엔드**를 통해 인�
 cd frontend_dashboard
 npm install
 node mock_backend.mjs            # 목 WS + REST 서버 :8787
-npm run dev                      # Vite 개발 서버 :5173(:8787로 프록시)
+VITE_API_BASE=http://localhost:8787 VITE_WS_HOST=localhost VITE_WS_PORT=8787 npm run dev   # Vite :5173, 목 백엔드 연결
 ```
 
 목 백엔드는 **프론트엔드 기여자**와 Docker 없는 머신에서의 CI 로컬 테스트에 권장되는 경로입니다. 자세한 내용은 [docs/developer-guide.md](./docs/developer-guide.md) 참고.
@@ -84,7 +102,10 @@ npm run dev                      # Vite 개발 서버 :5173(:8787로 프록시)
 - 🤝 [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) — 커뮤니티 표준
 - 🔒 [SECURITY.md](./SECURITY.md) — 취약점 보고 방법
 
-입문용 이슈는 [`good first issue`](https://github.com/TopRemnantAcademy/robot-monitor/labels/good%20first%20issue) 태그로 표시됩니다.
+- 🗺️ [ROADMAP.md](./ROADMAP.md) — 현재 위치와 기여 지점
+- 💡 기능 제안은 **Feature request** 이슈나 **Discussions · Ideas**에서
+
+입문용 이슈는 [`good first issue`](https://github.com/TopRemnantAcademy/robot-monitor/labels/good%20first%20issue) 태그로 표시됩니다. 더 큰 작업은 [`help wanted`](https://github.com/TopRemnantAcademy/robot-monitor/labels/help%20wanted) 태그를 사용합니다.
 
 ---
 

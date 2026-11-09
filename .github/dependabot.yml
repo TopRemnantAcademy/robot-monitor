@@ -1,0 +1,33 @@
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/frontend_dashboard"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+
+  - package-ecosystem: "pip"
+    directory: "/backend_ingestion"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+
+  - package-ecosystem: "pip"
+    directory: "/alert_engine"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+
+  - package-ecosystem: "pip"
+    directory: "/simulator"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
