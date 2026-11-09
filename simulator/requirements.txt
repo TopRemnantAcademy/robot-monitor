@@ -1,2 +1,2 @@
-aiomqtt==2.0.1
+aiomqtt==2.5.1
 rich==13.7.1
