@@ -15,6 +15,16 @@ interface I18nContextValue {
 
 const I18nContext = createContext<I18nContextValue | null>(null);
 
+// Stable fallback identity used when no <I18nProvider> is mounted (e.g. unit tests
+// that render a single component without the full provider tree). These MUST be
+// module-level constants — NOT recreated on every useI18n() call. Otherwise `t`
+// gets a new reference each render, which destabilises any useCallback/useEffect
+// that lists `t` in its deps (e.g. AlertLogTable's `load` + `useEffect([load])`),
+// producing an infinite async re-render loop that hangs the test runner.
+const FALLBACK_LOCALE: Locale = DEFAULT_LOCALE;
+const FALLBACK_SET_LOCALE = () => {};
+const FALLBACK_T: I18nContextValue['t'] = (key, vars) => translate(DEFAULT_LOCALE, key, vars);
+
 function readInitialLocale(): Locale {
   if (typeof localStorage === 'undefined') return DEFAULT_LOCALE;
   const saved = localStorage.getItem(LOCALE_STORAGE_KEY);
@@ -43,11 +53,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 export function useI18n(): I18nContextValue {
   const ctx = useContext(I18nContext);
   if (!ctx) {
-    return {
-      locale: DEFAULT_LOCALE,
-      setLocale: () => {},
-      t: (key: string, vars?: Record<string, string | number>) => translate(DEFAULT_LOCALE, key, vars),
-    };
+    return { locale: FALLBACK_LOCALE, setLocale: FALLBACK_SET_LOCALE, t: FALLBACK_T };
   }
   return ctx;
 }
