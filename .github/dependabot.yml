@@ -33,6 +33,12 @@ updates:
       # 二者升级必须先迁移 fastapi-users 到 pwdlib（见 requirements.txt 注释）。
       - dependency-name: "bcrypt"
       - dependency-name: "setuptools"
+      # 0.x 大版本跳变须刻意升级（dependabot 的 semver-major 对 0.x 分类不稳，显式钉死）：
+      # fastapi 0.110->0.162、uvicorn 0.28->0.54 都含破坏性变更；fastapi-users 12->15
+      # 切换 passlib->pwdlib，需配套鉴权层迁移。三者均在 ROADMAP 里作为 dedicated PR。
+      - dependency-name: "fastapi"
+      - dependency-name: "fastapi-users"
+      - dependency-name: "uvicorn"
     groups:
       # OpenTelemetry 是协调发布：API/SDK(exporter/instrumentation) 必须同版本。
       # 分开升必冲突（ResolutionImpossible），故归为一组，一次 PR 全升。
