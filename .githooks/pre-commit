@@ -1,0 +1,42 @@
+#!/bin/sh
+# .githooks/pre-commit — keep the tech-stack diagram in sync with manifests.
+#
+# RobotMonitor's README tech-stack graph is GENERATED from the real manifests
+# (infra/docker-compose.yml, */requirements.txt, frontend_dashboard/package.json)
+# by scripts/gen_techstack.py. This hook regenerates it and blocks the commit
+# if the committed diagram has drifted from the current dependencies, so the
+# graph always "changes together" with the project.
+#
+# To fix a blocked commit: stage the regenerated files and commit again:
+#   git add README.md README.ko.md README.zh.md docs/tech-stack.mmd
+#   git commit ...
+
+ROOT=$(git rev-parse --show-toplevel) || exit 1
+cd "$ROOT" || exit 1
+
+python3 scripts/gen_techstack.py >/dev/null 2>&1
+
+# 1) Tracked files: any change => diagram is stale.
+if ! git diff --quiet -- README.md README.ko.md README.zh.md docs/tech-stack.mmd 2>/dev/null; then
+  echo "" >&2
+  echo "ERROR: tech-stack diagram is out of date (a manifest changed but the" >&2
+  echo "       generated diagram was not refreshed)." >&2
+  echo "" >&2
+  echo "  Run:  python3 scripts/gen_techstack.py" >&2
+  echo "  Then: git add README.md README.ko.md README.zh.md docs/tech-stack.mmd" >&2
+  echo "        git commit ..." >&2
+  echo "" >&2
+  exit 1
+fi
+
+# 2) docs/tech-stack.mmd may be newly created on first generation.
+if git ls-files --others --exclude-standard -- docs/tech-stack.mmd | grep -q .; then
+  echo "" >&2
+  echo "ERROR: docs/tech-stack.mmd was just generated but is not yet tracked." >&2
+  echo "  Run:  git add docs/tech-stack.mmd" >&2
+  echo "        git commit ..." >&2
+  echo "" >&2
+  exit 1
+fi
+
+exit 0

@@ -158,6 +158,31 @@ jobs:
       - name: Run contract gate (复用 ci/contract-gate.sh)
         run: bash ci/contract-gate.sh
 
+  docs-sync:
+    name: Docs sync (tech-stack diagram)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # The README tech-stack graph is GENERATED from the real manifests
+      # (docker-compose.yml, requirements.txt, package.json) by
+      # scripts/gen_techstack.py. This job regenerates it and fails the build
+      # if the committed diagram has drifted, so the graph always stays in
+      # sync with the project's actual dependencies.
+      - name: Regenerate tech-stack diagram and verify in sync
+        run: |
+          set -eu
+          python3 scripts/gen_techstack.py
+          if ! git diff --quiet -- README.md README.ko.md README.zh.md docs/tech-stack.mmd; then
+            echo "::error::Tech-stack diagram is stale. Run 'python3 scripts/gen_techstack.py' and commit the result."
+            git --no-pager diff -- README.md README.ko.md README.zh.md docs/tech-stack.mmd
+            exit 1
+          fi
+          echo "tech-stack diagram in sync with manifests"
+
   e2e:
     name: E2E 30k landing (real TimescaleDB stack)
     runs-on: ubuntu-latest
