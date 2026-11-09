@@ -32,5 +32,14 @@ export default defineConfig({
     setupFiles: ['./src/test/setup.ts'],
     include: ['src/**/*.{test,spec}.{ts,tsx}'],
     restoreMocks: true,
+    // 测试始终打 msw 的 8000 端口，与本地 `.env.local`（可能指向 8787 的 mock 后端）
+    // 解耦。否则带 `.env.local` 的开发者本地跑测试会因 /supported-robots 等端点
+    // 打到 8787 而飘红，CI（无 .env.local）却全绿 —— 这种不对称会让贡献者误判。
+    // 强制 8000 后，所有依赖真实 fetch 的用例都走 msw handler（契约即断言）。
+    env: {
+      VITE_API_BASE: 'http://localhost:8000',
+      VITE_WS_HOST: 'localhost',
+      VITE_WS_PORT: '8000',
+    },
   },
 });

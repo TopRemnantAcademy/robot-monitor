@@ -7,8 +7,13 @@
 import puppeteer from 'puppeteer';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const OUT = path.resolve('docs/assets');
+// Resolve to the repo-root docs/assets (the location referenced by README),
+// independent of the cwd the script is launched from. (__dirname is not available
+// in ESM, so derive it from import.meta.url.)
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const OUT = path.resolve(SCRIPT_DIR, '../../docs/assets');
 fs.mkdirSync(OUT, { recursive: true });
 const BASE = process.env.CAPTURE_BASE ?? 'http://127.0.0.1:5173';
 

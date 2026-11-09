@@ -139,11 +139,18 @@ const server = createServer(async (req, res) => {
   // 지원 기종
   if (path === '/supported-robots' && req.method === 'GET') {
     return sendJson(res, 200, {
-      models: [{
-        model_type: 'HUMANOID-24DOF', display_name: 'Humanoid 24-DOF', form_factor: '双足人形',
-        dof: 24, vendor: 'RobotMonitor Platform', description: '플랫폼 주력 24 자유도 인간형.',
-        generic: false, total: 100, online: 90, firmware_versions: ['1.0.0'], stations: 10,
-      }],
+      models: [
+        {
+          model_type: 'HUMANOID-24DOF', display_name: 'Humanoid 24-DOF', form_factor: '双足人形',
+          dof: 24, vendor: 'RobotMonitor Platform', description: '플랫폼 주력 24 자유도 인간형.',
+          generic: false, total: 80, online: 72, firmware_versions: ['1.0.0'], stations: 10,
+        },
+        {
+          model_type: 'AMR-S4', display_name: 'AMR Service-4', form_factor: '轮式服务机器人',
+          dof: 0, vendor: 'RobotMonitor Platform', description: '4륜 서비스 AMR · 카페/식당 배송.',
+          generic: false, total: 20, online: 18, firmware_versions: ['1.2.0'], stations: 4,
+        },
+      ],
       total_robots: 100,
     }, origin);
   }

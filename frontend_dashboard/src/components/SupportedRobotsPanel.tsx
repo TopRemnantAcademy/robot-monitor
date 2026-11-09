@@ -27,7 +27,12 @@ export default function SupportedRobotsPanel() {
   });
 
   const headerRight = data
-    ? t('sr.headerRight', { n: data.models.length, m: data.total_robots })
+    ? t('sr.headerRight', {
+        n: data.models.length,
+        modelNoun:
+          data.models.length === 1 ? t('sr.modelNoun_one') : t('sr.modelNoun_other'),
+        m: data.total_robots,
+      })
     : isLoading
       ? t('sr.loading')
       : '—';
@@ -41,10 +46,12 @@ export default function SupportedRobotsPanel() {
         <span style={{ ...FONT.title, fontSize: '14px', color: COLORS.textPrimary }}>
           {t('sr.header')}
         </span>
-        <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>{headerRight}</span>
+        <span className="ml-auto" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
+          {headerRight}
+        </span>
         {isAdmin && (
           <span
-            className="ml-auto px-1.5 py-0.5 rounded-sm"
+            className="ml-2 px-1.5 py-0.5 rounded-sm"
             style={{
               fontSize: '10px',
               color: COLORS.accent,
@@ -79,9 +86,9 @@ function ModelCard({ model, isAdmin }: { model: SupportedRobot; isAdmin: boolean
 
   return (
     <div
-      className="shrink-0 flex flex-col gap-1 px-3 py-2"
+      className="flex flex-col gap-1 px-3 py-2"
       style={{
-        minWidth: '208px',
+        flex: '1 1 240px',
         backgroundColor: COLORS.surface,
         border: `1px solid ${COLORS.border}`,
         borderRadius: RADIUS.card,

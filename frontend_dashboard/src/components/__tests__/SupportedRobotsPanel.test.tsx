@@ -29,6 +29,12 @@ test('viewer：渲染支持的机型卡片（名称 + 机型标识 + 在册/在�
   // viewer 不应看到管理视图标记与机群管理明细
   expect(screen.queryByText('Admin view')).not.toBeInTheDocument();
   expect(screen.queryByText(/Stations:/)).not.toBeInTheDocument();
+
+  // 单机型时必须是单数 '1 model'（不是 '1 models'）—— i18n 单复数回归
+  await waitFor(() => {
+    expect(screen.getByText('1 model · 100 robots registered')).toBeInTheDocument();
+  });
+  expect(screen.queryByText(/1 models/)).not.toBeInTheDocument();
 });
 
 test('admin：额外展示机群管理明细（管理视图标记 + 厂商/固件/工位）', async () => {

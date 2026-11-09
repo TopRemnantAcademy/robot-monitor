@@ -100,8 +100,13 @@ const en: Dict = {
   'suppressed.titleSimple': 'Suppressed by higher-severity alert',
 
   // Supported robots panel
+  // NOTE: English has plural forms for "model" (1 model / N models); Korean and
+  // Chinese are plural-agnostic, so their `sr.headerRight` strings simply omit the
+  // {modelNoun} placeholder (translate() ignores unused vars).
   'sr.header': 'Supported models',
-  'sr.headerRight': '{n} models · {m} robots registered',
+  'sr.headerRight': '{n} {modelNoun} · {m} robots registered',
+  'sr.modelNoun_one': 'model',
+  'sr.modelNoun_other': 'models',
   'sr.adminView': 'Admin view',
   'sr.loadFail': 'Model catalog load failed',
   'sr.loading': 'Loading…',
