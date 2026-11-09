@@ -7,9 +7,9 @@ High-frequency telemetry (100 robots × 10 Hz = 1000 msg/s) flows over MQTT → 
 > 🌍 **This project is international.** Documentation is available in:
 > - 🇺🇸 **English** (this file)
 > - 🇰🇷 [한국어](./README.ko.md)
-> - 🇨🇳 [中文](./README.zh.md)
+> - 🇨🇳 [Chinese](./README.zh.md)
 >
-> The dashboard UI itself supports **English / 한국어 / 中文 / 日本語** with a live language switcher (default: English). See [docs/README.md](./docs/README.md).
+> The dashboard UI itself supports **English / Korean / Chinese / Japanese** with a live language switcher (default: English). See [docs/README.md](./docs/README.md).
 
 <p align="center">
   <a href="https://github.com/TopRemnantAcademy/robot-monitor/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/TopRemnantAcademy/robot-monitor/actions/workflows/ci.yml/badge.svg"></a>

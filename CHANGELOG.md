@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Contributor-facing docs: `CONTRIBUTING` in **English / 한국어 / 中文** (`CONTRIBUTING.md`, `CONTRIBUTING.ko.md`, `CONTRIBUTING.zh.md`).
+- Contributor-facing docs: `CONTRIBUTING` in **English / Korean / Chinese** (`CONTRIBUTING.md`, `CONTRIBUTING.ko.md`, `CONTRIBUTING.zh.md`).
 - `ROADMAP.md` with a phased plan and an explicit **dependency policy** (which pins are deliberate holds and why).
 - `CODEOWNERS`, `.github/dependabot.yml` (with coordinated-release groups for OpenTelemetry & pydantic), and issue/PR templates.
 - GitHub Discussions seeded: a **Welcome** thread and an **Ideas** category for proposals.

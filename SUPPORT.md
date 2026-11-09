@@ -1,6 +1,6 @@
-# Support / 지원 / 支持
+# Support
 
-RobotMonitor is an international, open-source project. Help is available in **English, 한국어, 中文, 日本語**.
+RobotMonitor is an international, open-source project. Help is available in **English, Korean, Chinese, and Japanese**.
 
 ## Where to ask
 - **Ideas, usage questions, and community discussion** → [GitHub Discussions](https://github.com/TopRemnantAcademy/robot-monitor/discussions). Start in the *Ideas* category, or say hello in the *Welcome* thread (#16).

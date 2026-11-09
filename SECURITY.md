@@ -1,6 +1,6 @@
 # Security Policy
 
-> 🌐 Also available in: [한국어](./SECURITY.ko.md) · [中文](./SECURITY.zh.md)
+> 🌐 Also available in: [Korean](./SECURITY.ko.md) · [Chinese](./SECURITY.zh.md)
 
 ## Supported Versions
 
