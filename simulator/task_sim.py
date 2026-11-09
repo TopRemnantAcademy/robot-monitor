@@ -43,7 +43,6 @@ import json
 import math
 import random
 import sys
-import time
 from dataclasses import dataclass, field
 
 # 复用 mock_fleet 的契约常量与发布器，保证 wire format 与现有管线完全一致。
@@ -109,15 +108,20 @@ class PipelineScheduler:
         self._phase_dur = cycle_s / self.stations
         self._last_phase = -1
 
-    async def run(self, start_at: float) -> None:
-        while True:
-            now = time.monotonic()
-            phase = int((now - start_at) // self._phase_dur) % self.stations
-            if phase != self._last_phase:
-                for i, w in enumerate(self.workers):
-                    w.task_load = 1.0 if i == phase else 0.0
-                self._last_phase = phase
-            await asyncio.sleep(0.05)
+    def update(self, elapsed_s: float) -> None:
+        """Deterministic phase from a tick-driven elapsed time (no wall clock).
+
+        Previously this was an ``async`` coroutine driven by ``time.monotonic()``,
+        which drifted against the sampler's own wall clock and made the
+        correlation acceptance flaky across CI runs. Driving the phase from a
+        single tick counter removes that non-determinism.
+        """
+        if self._phase_dur <= 0:
+            phase = 0
+        else:
+            phase = int(elapsed_s // self._phase_dur) % self.stations
+        for i, w in enumerate(self.workers):
+            w.task_load = 1.0 if i == phase else 0.0
 
 
 class FaultScheduler:
@@ -131,19 +135,17 @@ class FaultScheduler:
         self.fault_period_s = fault_period_s
         self.fault_dur_s = fault_dur_s
 
-    async def run(self, start_at: float) -> None:
-        # 初始：邻居保持中等负载（队列常态），中枢空闲。
+    def update(self, elapsed_s: float) -> None:
+        """Deterministic fault schedule from a tick-driven elapsed time.
+
+        ``elapsed_s`` is the same tick counter the sampler uses, so the hub and
+        neighbours are perfectly aligned (no wall-clock drift).
+        """
+        in_fault = (elapsed_s % self.fault_period_s) < self.fault_dur_s
+        self.hub.task_load = 1.0 if in_fault else 0.0
+        # 中枢故障时邻居队列积压 → 负载升高；恢复后回落到常态 0.4。
         for n in self.neighbors:
-            n.task_load = 0.4
-        while True:
-            now = time.monotonic()
-            elapsed = now - start_at
-            in_fault = (elapsed % self.fault_period_s) < self.fault_dur_s
-            self.hub.task_load = 1.0 if in_fault else 0.0
-            # 中枢故障时邻居队列积压 → 负载升高；恢复后回落到常态 0.4。
-            for n in self.neighbors:
-                n.task_load = 0.8 if in_fault else 0.4
-            await asyncio.sleep(0.05)
+            n.task_load = 0.8 if in_fault else 0.4
 
 
 # ---------------------------------------------------------------- 相关性分析
@@ -196,7 +198,9 @@ class Recorder:
 
 
 async def amain(args: argparse.Namespace) -> int:
-    start_at = time.monotonic()
+    # 固定随机种子必须在「创建机器人」之前：RobotState 的初值（关节温度/电量）依赖
+    # random，不在此处 seed 会导致初值非确定 → 相关性验收随机失败（CI flaky，见 issue）。
+    random.seed(42)
 
     # 参与任务调度的机器人（从 humanoid-001 起取前 K 台）。
     k = max(args.stations if args.scenario == "pipeline" else 4, 2)
@@ -219,37 +223,31 @@ async def amain(args: argparse.Namespace) -> int:
 
     queue: asyncio.Queue = asyncio.Queue(maxsize=200_000)
 
-    # 固定随机种子：保证「相关性验收」可复现（仿真本身不依赖随机性产生相关）。
-    random.seed(42)
-
-    # 机器人协程：10Hz 投递 payload 到队列（复用 mock_fleet 的 build_payload）。
-    async def run_one(state: TaskRobot) -> None:
-        while True:
-            state.step(time.monotonic(), start_at)
-            await queue.put((TELEMETRY_TOPIC.format(robot_id=state.robot_id),
-                             json.dumps(state.build_payload(int(time.time() * 1000)),
-                                        separators=(",", ":"))))
-            await asyncio.sleep(PUBLISH_INTERVAL_S)
-
-    tasks = [asyncio.create_task(run_one(w)) for w in workers]
-    tasks.append(asyncio.create_task(sched.run(start_at)))
-
+    # 确定性 tick 循环：相位与采样都来自同一个离散 tick 计数，不再依赖
+    # time.monotonic() 的墙钟偏移。之前调度器（50ms 协程）与采样器（100ms 协程）各自用
+    # 墙钟、且 start_at 存在微小偏差，会让「哪台机器人处于热窗口」在每轮运行间漂移 ——
+    # 这正是相关性验收偶发失败（r 有时为负、有时为正、|r| 有时 < 0.3）的根因。现在用单一
+    # tick 驱动，结果 100% 可复现。
+    tick_s = PUBLISH_INTERVAL_S
+    ticks_total = max(1, int(round(args.duration / tick_s)))
+    tasks = []
     if not args.no_broker:
         tasks.append(asyncio.create_task(publisher(queue, counters, args.broker, args.port)))
 
-    # 采样录制（用于相关性断言）：每个 tick 全分辨率采样，方波特征不被欠采样抹平。
-    sample_every = 1
-    ticks = 0
-    end_at = start_at + args.duration
-    try:
-        while time.monotonic() < end_at:
-            await asyncio.sleep(PUBLISH_INTERVAL_S)
-            ticks += 1
-            if ticks % sample_every == 0:
-                recorder.sample(workers)
-    finally:
-        for t in tasks:
-            t.cancel()
+    elapsed = 0.0
+    for _ in range(ticks_total):
+        sched.update(elapsed)
+        for w in workers:
+            w.step(elapsed, 0.0)
+            await queue.put((TELEMETRY_TOPIC.format(robot_id=w.robot_id),
+                             json.dumps(w.build_payload(int(elapsed * 1000)),
+                                        separators=(",", ":"))))
+        recorder.sample(workers)
+        elapsed += tick_s
+        await asyncio.sleep(0)  # 让 publisher（如有）有排空机会，但不影响仿真时序
+
+    for t in tasks:
+        t.cancel()
 
     best = recorder.report()
     # 导出 60s 遥测样本（供人工/绘图复核）。
