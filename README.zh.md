@@ -9,7 +9,15 @@ RobotMonitor 是一个开源运维看板，实时监视工厂车间的 **100 台
 > - 🇰🇷 [한국어](./README.ko.md)
 > - 🇨🇳 **中文**（本文件）
 >
-> 看板界面本身支持 **English / 한국어 / 中文**，并带有实时语言切换器（默认：English）。详见 [docs/README.md](./docs/README.md)。
+> 看板界面本身支持 **English / 한국어 / 中文 / 日本語**，并带有实时语言切换器（默认：English）。详见 [docs/README.md](./docs/README.md)。
+
+<p align="center">
+  <a href="https://github.com/TopRemnantAcademy/robot-monitor/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/TopRemnantAcademy/robot-monitor/actions/workflows/ci.yml/badge.svg"></a>
+  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green">
+  <img alt="i18n EN|KO|ZH|JA" src="https://img.shields.io/badge/i18n-EN%20%7C%20KO%20%7C%20ZH%20%7C%20JA-blue">
+  <img alt="Stack FastAPI|TimescaleDB|React" src="https://img.shields.io/badge/stack-FastAPI%20%7C%20TimescaleDB%20%7C%20React-9cf">
+  <img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-brightgreen">
+</p>
 
 ---
 
@@ -43,7 +51,7 @@ RobotMonitor 是一个开源运维看板，实时监视工厂车间的 **100 台
 
 | 路径 | 说明 |
 | :--- | :--- |
-| `spec/` | 6 份设计规范（00 架构 / 01 后端 / 02 告警 / 03 前端 / 04 模拟器 / 05 剧本） |
+| `docs/` | 架构文档、开发者指南、API 契约（`openapi`、`ws-envelope`）与审计笔记 |
 | `infra/` | `docker-compose.yml`（EMQX + TimescaleDB + Redis）、`init.sql`（超表 + 连续聚合） |
 | `backend_ingestion/` | FastAPI 采集存储服务（提供 `/ws/robots` 与 REST） |
 | `alert_engine/` | 告警/健康规则引擎 |

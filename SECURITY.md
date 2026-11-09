@@ -1,5 +1,7 @@
 # Security Policy
 
+> 🌐 Also available in: [한국어](./SECURITY.ko.md) · [中文](./SECURITY.zh.md)
+
 ## Supported Versions
 
 Security fixes are applied to the latest `main` branch. We do not maintain separate release branches.

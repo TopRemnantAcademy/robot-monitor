@@ -9,7 +9,15 @@ RobotMonitor는 공장 바닥의 **휴머노이드 로봇 100대**를 실시간�
 > - 🇰🇷 **한국어** (이 파일)
 > - 🇨🇳 [中文](./README.zh.md)
 >
-> 대시보드 UI 자체도 **English / 한국어 / 中文**을 실시간 언어 전환기와 함께 지원합니다(기본값: English). [docs/README.md](./docs/README.md) 참고.
+> 대시보드 UI 자체도 **English / 한국어 / 中文 / 日本語**를 실시간 언어 전환기와 함께 지원합니다(기본값: English). [docs/README.md](./docs/README.md) 참고.
+
+<p align="center">
+  <a href="https://github.com/TopRemnantAcademy/robot-monitor/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/TopRemnantAcademy/robot-monitor/actions/workflows/ci.yml/badge.svg"></a>
+  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green">
+  <img alt="i18n EN|KO|ZH|JA" src="https://img.shields.io/badge/i18n-EN%20%7C%20KO%20%7C%20ZH%20%7C%20JA-blue">
+  <img alt="Stack FastAPI|TimescaleDB|React" src="https://img.shields.io/badge/stack-FastAPI%20%7C%20TimescaleDB%20%7C%20React-9cf">
+  <img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-brightgreen">
+</p>
 
 ---
 
@@ -43,7 +51,7 @@ RobotMonitor는 공장 바닥의 **휴머노이드 로봇 100대**를 실시간�
 
 | 경로 | 설명 |
 | :--- | :--- |
-| `spec/` | 6개 설계 명세(00 아키텍처 / 01 백엔드 / 02 알림 / 03 프론트엔드 / 04 시뮬레이터 / 05 플레이북) |
+| `docs/` | 아키텍처 문서, 개발자 가이드, API 계약(`openapi`, `ws-envelope`), 감사 노트 |
 | `infra/` | `docker-compose.yml`(EMQX + TimescaleDB + Redis), `init.sql`(하이퍼테이블 + 연속 집계) |
 | `backend_ingestion/` | FastAPI 수집·저장 서비스(`/ws/robots` 및 REST 제공) |
 | `alert_engine/` | 알림·건강 규칙 엔진 |

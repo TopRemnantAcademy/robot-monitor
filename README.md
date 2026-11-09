@@ -11,6 +11,14 @@ High-frequency telemetry (100 robots × 10 Hz = 1000 msg/s) flows over MQTT → 
 >
 > The dashboard UI itself supports **English / 한국어 / 中文 / 日本語** with a live language switcher (default: English). See [docs/README.md](./docs/README.md).
 
+<p align="center">
+  <a href="https://github.com/TopRemnantAcademy/robot-monitor/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/TopRemnantAcademy/robot-monitor/actions/workflows/ci.yml/badge.svg"></a>
+  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green">
+  <img alt="i18n EN|KO|ZH|JA" src="https://img.shields.io/badge/i18n-EN%20%7C%20KO%20%7C%20ZH%20%7C%20JA-blue">
+  <img alt="Stack FastAPI|TimescaleDB|React" src="https://img.shields.io/badge/stack-FastAPI%20%7C%20TimescaleDB%20%7C%20React-9cf">
+  <img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-brightgreen">
+</p>
+
 ---
 
 ## Preview
@@ -43,7 +51,7 @@ Robot fleet (Edge) --MQTT--> [backend_ingestion] --batch--> TimescaleDB
 
 | Path | What it is |
 | :--- | :--- |
-| `spec/` | 6 design specs (00 architecture / 01 backend / 02 alerts / 03 frontend / 04 simulator / 05 playbook) |
+| `docs/` | Architecture write-up, developer guide, API contracts (`openapi`, `ws-envelope`), and audit notes |
 | `infra/` | `docker-compose.yml` (EMQX + TimescaleDB + Redis), `init.sql` (hypertables + continuous aggregates) |
 | `backend_ingestion/` | FastAPI ingestion + storage service (serves `/ws/robots` and REST) |
 | `alert_engine/` | Alert / health rule engine |
