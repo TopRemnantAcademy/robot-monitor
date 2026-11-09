@@ -283,6 +283,11 @@ HEAD 变为 `c8f8248`）。切回后 `docs/reconnection.md` 与
 
 ## 6. 第五批：从零重扫（含「完全替换」候选）—— 2026-10-10
 
+> ⚠️ **本节（§6）是「评估候选池 / 研究笔记」，不是「已下载清单」。**
+> 下列仓库**均未克隆到本仓磁盘**——磁盘只含 `fetch-sources.sh` 的 22 个源（§5 + §7）。
+> 它们是按 32 项审计逐条回溯上游时**评估过**的替代/补充方案。若未来决定采用，
+> 必须先加入 `external/fetch-sources.sh` 的 `SOURCES` 数组并实际 clone，再据此更新本节。
+
 > **本轮方法变了**。前四批是「看名字猜需求」，本轮按 **32 项审计**里
 > 每一条**尚未有参考源的需求点**逐条回溯上游，并且**主动找更完美的替代品**
 > （不是补缺，是问「现在选的这个是不是最好的」）。
@@ -291,7 +296,10 @@ HEAD 变为 `c8f8248`）。切回后 `docs/reconnection.md` 与
 > ②仓库是否活跃（`pushed_at`）③是否有官方发布镜像/可直接跑（决定「下载」还是「装服务」）
 > ④是否有更优替代（可替换现有依赖）。
 
-### 6.1 本轮新增 20 个源（全部 `git clone --depth 1`，实测可达）
+### 6.1 候选源（评估中，尚未克隆到本仓）
+
+> 下表是**评估候选**，并非「已下载」。本仓磁盘只含 `fetch-sources.sh` 的 22 个源（§5 + §7）。
+> 真要采用，须先加入 `fetch-sources.sh` 的 `SOURCES` 数组并实际 clone。
 
 | # | 需求点（对应审计/缺口） | 仓库 | 体积 | HEAD | 关键实证 |
 |---|---|---|---|---|---|
@@ -368,7 +376,7 @@ HEAD 变为 `c8f8248`）。切回后 `docs/reconnection.md` 与
 
 ---
 
-## 复现命令（第五批增量）
+## 候选克隆命令（若决定采用，先加入 fetch-sources.sh 再执行——当前未克隆到本仓）
 
 ```bash
 cd external
@@ -408,7 +416,7 @@ git clone --depth 1 https://github.com/wal-g/wal-g.git
 
 | 结论 | 状态 |
 |---|---|
-| 20+ 仓库 `git clone` 成功（实测体积/HEAD 见 §5.1） | ✅ 实测 |
+| 20+ 候选**已评估**（仅研究，**未克隆到本仓**；真要采用须先加入 `fetch-sources.sh`） | ➖ 评估 |
 | `DATA_SOURCE_NAME` / `REDIS_ADDR` / `/metrics` 行号 | ✅ 实测（`grep -n`） |
 | `fastapi-users 15.0.5` 与 `fastapi>=0.65.2` 兼容区间 | ✅ 实测（源码） |
 | Grafana OnCall 已归档 | ✅ 实测（`README.md:3` 原文） |
@@ -416,3 +424,24 @@ git clone --depth 1 https://github.com/wal-g/wal-g.git
 | **未跑通任何新源的服务** | ❌ 无 Docker 环境，未起 k6/keep/OTel |
 | **未实装 fastapi-users** | ❌ 未与 `fastapi==0.110.0` 做运行时联调 |
 | `xk6-mqtt` 是否兼容 k6 v2 线 | ❌ 未编译（需 Go） |
+
+---
+
+## 7. 本仓实际已克隆但未在上文逐条列出的参考源（补充对账）
+
+> 为与磁盘和 `fetch-sources.sh` 完全对账：§5 表列了 14 个，本仓磁盘共 22 个
+> （见 `fetch-sources.sh` 的 `SOURCES` 数组 + `alertmanager`）。下列 **8 个**在
+> `fetch-sources.sh` 中已声明并实际克隆，但 §1–§5 正文未逐条展开，补录于此：
+
+| 仓库 | 归属层 | 用途 / 套用结论 |
+|---|---|---|
+| `locustio/locust` | 压测 | 订单 06 可选负载工具，与 `emqtt-bench`/`mock_fleet.py` 互补（I-4） |
+| `python-websockets/websockets` | 后端运行时 | `aiomqtt` 下层 WS 契约核对；本仓 WS 推送参考 |
+| `Kludex/uvicorn` | 后端运行时 | ASGI server 契约核对（上游已迁至 `Kludex/uvicorn`） |
+| `sqlalchemy/sqlalchemy` | 后端运行时 | ORM 契约核对（`alembic` 的底层） |
+| `pydantic/pydantic-settings` | 后端运行时 | 配置层契约核对 |
+| `prometheus/node_exporter` | 基础设施 | 主机指标 exporter（compose 已引用） |
+| `timescale/timescaledb-docker` | 基础设施 | TimescaleDB 镜像/初始化契约（compose 已引用） |
+| `timescale/timescaledb-tune` | 基础设施 | PG/TimescaleDB 调优工具契约 |
+
+> **对账结论**：磁盘 22 = `fetch-sources.sh` 22 = §5(14) + §7(8)。§6 所列 ~30 个为**评估候选**，不在磁盘。
