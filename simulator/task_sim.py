@@ -1,38 +1,41 @@
 #!/usr/bin/env python3
-"""RobotMonitor 任务级多机器人协同仿真（Issue #63 / G-7）。
+"""RobotMonitor task-level multi-robot coordinated simulation (Issue #63 / G-7).
 
-与 `mock_fleet.py` 的区别
-------------------------
-`mock_fleet.py` 只产**独立波形**（每台各自随机游走），没有「任务级」概念。
-本脚本在 `mock_fleet` 的 payload 构造器与 MQTT 发布器之上，叠加一个
-**任务调度器**，让 N 台机器人的遥测在**时间上相关**：
+How this differs from `mock_fleet.py`
+-------------------------------------
+`mock_fleet.py` only produces **independent waveforms** (each robot random-walks on its own)
+and has no "task-level" concept. This script builds on `mock_fleet`'s payload builder and MQTT
+publisher, adding a **task scheduler** so that the telemetry of N robots becomes **time-correlated**:
 
-- 流水线场景（pipeline）：机器人被分派到工位（上料→焊接→下料），按节拍轮转；
-  某一工位「干活」时其任务关节升温、相邻的下一工位待机降温 —— 相邻工位的
-  关节温度序列呈**反相关**，相关完全来自调度逻辑，而非硬编码系数。
-- 故障传播场景（fault）：一台中枢机器人周期性过热故障，其邻居因队列积压而
-  任务关节温度被抬高 —— 故障机与邻居的温度序列呈**正相关**。
+- Pipeline scenario: robots are assigned to stations (load -> weld -> unload) and rotate by beat;
+  when a station is "working", its task joint heats up while the next station idles and cools down
+  -> the neighbouring stations' joint-temperature series are **negatively correlated**, and the
+  correlation comes entirely from the scheduler, not from hard-coded coefficients.
+- Fault-propagation scenario: a hub robot overheats periodically; its neighbours' task-joint
+  temperature is raised by queue backlog -> the hub and its neighbours are **positively correlated**.
 
-关键纪律（Issue #63 禁止项）
---------------------------
-- **禁止**为「看起来相关」而在波形里硬编码相关系数：所有相关性必须来自
-  `TaskScheduler` 对 `task_load` 的调度（见 `TaskRobot.step` 与调度器）。
-- **禁止**引入 GPU / 重框架：纯 Python `asyncio`，复用 `mock_fleet` 的发布器。
-- 输出仍走 MQTT（topic / payload schema 与 `mock_fleet` 完全一致），
-  保持与现有压测/落库管线一致。
+Key discipline (Issue #63 forbidden items)
+-----------------------------------------
+- **Forbidden**: hard-coding a correlation coefficient into the waveform just to "look correlated".
+  All correlation must come from `TaskScheduler`'s scheduling of `task_load` (see `TaskRobot.step`
+  and the schedulers).
+- **Forbidden**: introducing GPU / heavy frameworks. Pure Python `asyncio`, reusing mock_fleet's publisher.
+- Output still goes over MQTT (topic / payload schema identical to `mock_fleet`), keeping the
+  existing load-test / landing pipeline consistent.
 
-运行
-----
-    # 流水线场景，纯仿真 + 相关性断言（不需要 broker，用于验收）
+Run
+---
+    # Pipeline scenario, pure simulation + correlation assertion (no broker needed, for acceptance)
     python simulator/task_sim.py --scenario pipeline --no-broker --duration 60
 
-    # 故障传播场景，发给真实 broker
+    # Fault-propagation scenario, send to a real broker
     python simulator/task_sim.py --scenario fault --robots 12 --broker localhost --port 1883
 
-    # 自定义工位/节拍
+    # Custom stations / cycle
     python simulator/task_sim.py --scenario pipeline --stations 3 --cycle 12
 
-退出码：0 = 通过（至少一对机器人指标序列显著相关）；2 = 相关性未达标（验收失败）。
+Exit code: 0 = passed (at least one pair of robot metric series is significantly correlated);
+2 = correlation below threshold (acceptance failed).
 """
 
 from __future__ import annotations
@@ -45,14 +48,14 @@ import random
 import sys
 from dataclasses import dataclass, field
 
-# 复用 mock_fleet 的契约常量与发布器，保证 wire format 与现有管线完全一致。
+# Reuse mock_fleet's contract constants and publisher so the wire format is identical to the existing pipeline.
 try:
     from mock_fleet import (  # type: ignore
         JOINT_NAMES, RobotState, TELEMETRY_TOPIC, publisher, PUBLISH_INTERVAL_S,
         STATUS_OFFLINE, STATUS_OK, STATUS_WARN, STATUS_FAULT,
         TEMP_BASE_RANGE, OVERHEAT_TARGET_C, BATTERY_DRAIN_PER_S,
     )
-except ImportError:  # 作为包导入时（python -m simulator.task_sim）
+except ImportError:  # imported as a package (python -m simulator.task_sim)
     from simulator.mock_fleet import (  # type: ignore
         JOINT_NAMES, RobotState, TELEMETRY_TOPIC, publisher, PUBLISH_INTERVAL_S,
         STATUS_OFFLINE, STATUS_OK, STATUS_WARN, STATUS_FAULT,
@@ -60,21 +63,24 @@ except ImportError:  # 作为包导入时（python -m simulator.task_sim）
     )
 
 ROBOT_COUNT = 100
-ACTIVE_JOINT = "right_elbow_pitch"  # 任务加热关节（焊接/上料相关，pipeline 与 fault 共用）
-TASK_HEAT_PER_LOAD = 50.0           # 单位 task_load 每 tick 注入的升温（°C）；取大值 → 任务关节在
-                                     # 激活瞬间即达上限，形成无斜坡的方波，相关性判定稳健可复现。
-# 默认只让「被调度」的机器人参与相关性分析，其余保持独立波形（与 mock_fleet 一致）。
+ACTIVE_JOINT = "right_elbow_pitch"  # the task-heated joint (weld/load related, shared by pipeline and fault)
+TASK_HEAT_PER_LOAD = 50.0           # temperature rise per tick per unit task_load (°C); a large value -> the
+                                     # task joint hits the ceiling instantly, forming a ramp-less square wave so the
+                                     # correlation judgement is robust and reproducible.
+# By default, only "scheduled" robots participate in correlation analysis; the rest keep independent
+# waveforms (consistent with mock_fleet).
 
 
-# ---------------------------------------------------------------- 任务机器人
+# ---------------------------------------------------------------- task robot
 
 @dataclass
 class TaskRobot(RobotState):
-    """在 mock_fleet.RobotState 之上增加任务负载维度。
+    """Adds a task-load dimension on top of mock_fleet.RobotState.
 
-    `task_load` 由调度器按工位/故障状态设定（0..1）。`step()` 在父类的
-    电量下降 + 基础随机游走 + 过热注入之外，对 `ACTIVE_JOINT` 叠加任务升温；
-    当 load=0 时父类把温度拉回基础区间 —— 从而温度随任务节拍起落。
+    `task_load` is set by the scheduler per station / fault state (0..1). `step()` adds task heating
+    to `ACTIVE_JOINT` on top of the parent's battery drain + base random-walk + overheat injection;
+    when load=0 the parent pulls the temperature back into the base range -> temperature rises and
+    falls with the task beat.
     """
 
     task_load: float = 0.0
@@ -83,22 +89,23 @@ class TaskRobot(RobotState):
         super().step(now, start_at)
         if self.task_load > 0:
             cur = self.joint_temps[ACTIVE_JOINT]
-            # 升温幅度与 task_load 成正比；上限放宽到过热区间之上，便于观察。
+            # Heating amplitude is proportional to task_load; the ceiling is relaxed above the overheat
+            # range for visibility.
             self.joint_temps[ACTIVE_JOINT] = min(
                 OVERHEAT_TARGET_C + 6.0, cur + self.task_load * TASK_HEAT_PER_LOAD
             )
         else:
-            # 无负载：向基础区间自然回落（父类的随机游走会把 >65 的值拉回上界）。
+            # No load: naturally fall back toward the base range (the parent's random walk pulls >65 back to the ceiling).
             pass
 
 
-# ---------------------------------------------------------------- 调度器
+# ---------------------------------------------------------------- schedulers
 
 class PipelineScheduler:
-    """流水线节拍：N 个工位轮转，每个 tick 只有当前工位在干活。
+    """Pipeline beat: N stations rotate; each tick only the current station is working.
 
-    station i 在相位 i 时 task_load=1，其余为 0。相邻工位的 ACTIVE_JOINT
-    温度随之此消彼长 —— 产生真实的（反）相关，无硬编码系数。
+    Station i has task_load=1 at phase i, others 0. The neighbouring stations' ACTIVE_JOINT
+    temperatures ebb and flow accordingly -> genuine (negative) correlation, no hard-coded coefficients.
     """
 
     def __init__(self, workers: list[TaskRobot], stations: int, cycle_s: float) -> None:
@@ -125,8 +132,9 @@ class PipelineScheduler:
 
 
 class FaultScheduler:
-    """故障传播：一台中枢机器人周期性过热故障（task_load 拉满一段时间），
-    其邻居因队列积压而保持中等负载 —— 故障机与邻居温度正相关。"""
+    """Fault propagation: a hub robot overheats periodically (task_load maxed for a while),
+    and its neighbours stay at a medium load due to queue backlog -> the hub and neighbours are
+    positively correlated."""
 
     def __init__(self, hub: TaskRobot, neighbors: list[TaskRobot],
                  fault_period_s: float, fault_dur_s: float) -> None:
@@ -143,15 +151,15 @@ class FaultScheduler:
         """
         in_fault = (elapsed_s % self.fault_period_s) < self.fault_dur_s
         self.hub.task_load = 1.0 if in_fault else 0.0
-        # 中枢故障时邻居队列积压 → 负载升高；恢复后回落到常态 0.4。
+        # When the hub faults, neighbours' queue backlog -> load rises; after recovery it falls back to 0.4.
         for n in self.neighbors:
             n.task_load = 0.8 if in_fault else 0.4
 
 
-# ---------------------------------------------------------------- 相关性分析
+# ---------------------------------------------------------------- correlation analysis
 
 def pearson(a: list[float], b: list[float]) -> float:
-    """Pearson 相关系数（长度不等时取较短者）。"""
+    """Pearson correlation coefficient (takes the shorter when lengths differ)."""
     n = min(len(a), len(b))
     if n < 3:
         return 0.0
@@ -165,7 +173,7 @@ def pearson(a: list[float], b: list[float]) -> float:
     return num / (da * db)
 
 
-# ---------------------------------------------------------------- 录制 + 主循环
+# ---------------------------------------------------------------- recorder + main loop
 
 @dataclass
 class Recorder:
@@ -188,21 +196,22 @@ class Recorder:
                 if abs(r) > abs(best):
                     best = r
                     best_pair = (ids[i], ids[j])
-                    # 相邻工位（pipeline）呈反相关；中枢-邻居（fault）呈正相关。
-                    best_kind = "正相关" if r > 0 else "反相关"
-        print(f"[correlation] 最强相关对 {best_pair[0]} ↔ {best_pair[1]}: "
-              f"r={best:+.3f}（{best_kind}）")
-        print(f"[correlation] 显著阈值 |r| ≥ {threshold}："
-              f"{'通过' if abs(best) >= threshold else '未达标'}")
+                    # Neighbouring stations (pipeline) are negatively correlated; hub-neighbour (fault) positive.
+                    best_kind = "positive" if r > 0 else "negative"
+        print(f"[correlation] strongest pair {best_pair[0]} <-> {best_pair[1]}: "
+              f"r={best:+.3f} ({best_kind})")
+        print(f"[correlation] significance threshold |r| >= {threshold}: "
+              f"{'passed' if abs(best) >= threshold else 'below threshold'}")
         return best
 
 
 async def amain(args: argparse.Namespace) -> int:
-    # 固定随机种子必须在「创建机器人」之前：RobotState 的初值（关节温度/电量）依赖
-    # random，不在此处 seed 会导致初值非确定 → 相关性验收随机失败（CI flaky，见 issue）。
+    # The fixed random seed MUST be set before "creating robots": RobotState's initial values
+    # (joint temperatures / battery) depend on random; not seeding here makes the initial values
+    # non-deterministic -> correlation acceptance randomly fails (CI flaky, see issue).
     random.seed(42)
 
-    # 参与任务调度的机器人（从 humanoid-001 起取前 K 台）。
+    # Robots participating in task scheduling (take the first K, starting from humanoid-001).
     k = max(args.stations if args.scenario == "pipeline" else 4, 2)
     workers: list[TaskRobot] = []
     for i in range(k):
@@ -223,11 +232,12 @@ async def amain(args: argparse.Namespace) -> int:
 
     queue: asyncio.Queue = asyncio.Queue(maxsize=200_000)
 
-    # 确定性 tick 循环：相位与采样都来自同一个离散 tick 计数，不再依赖
-    # time.monotonic() 的墙钟偏移。之前调度器（50ms 协程）与采样器（100ms 协程）各自用
-    # 墙钟、且 start_at 存在微小偏差，会让「哪台机器人处于热窗口」在每轮运行间漂移 ——
-    # 这正是相关性验收偶发失败（r 有时为负、有时为正、|r| 有时 < 0.3）的根因。现在用单一
-    # tick 驱动，结果 100% 可复现。
+    # Deterministic tick loop: phase and sampling both come from the same discrete tick counter,
+    # no longer depending on time.monotonic() wall-clock skew. Previously the scheduler (50ms
+    # coroutine) and the sampler (100ms coroutine) each used their own wall clock and had a tiny
+    # start_at offset, so "which robot is in a hot window" drifted between runs -- that was the root
+    # cause of the occasional correlation-acceptance failure (r sometimes negative, sometimes
+    # positive, |r| sometimes < 0.3). Now a single tick drives it, 100% reproducible.
     tick_s = PUBLISH_INTERVAL_S
     ticks_total = max(1, int(round(args.duration / tick_s)))
     tasks = []
@@ -244,31 +254,31 @@ async def amain(args: argparse.Namespace) -> int:
                                         separators=(",", ":"))))
         recorder.sample(workers)
         elapsed += tick_s
-        await asyncio.sleep(0)  # 让 publisher（如有）有排空机会，但不影响仿真时序
+        await asyncio.sleep(0)  # let the publisher (if any) drain, without affecting simulation timing
 
     for t in tasks:
         t.cancel()
 
     best = recorder.report()
-    # 导出 60s 遥测样本（供人工/绘图复核）。
+    # Export 60s telemetry samples (for manual / plotting review).
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(recorder.series, f)
-    print(f"[task_sim] 场景={args.scenario} 工位/参与台数={k} "
-          f"样本/台={len(next(iter(recorder.series.values())))} 导出→{args.out}")
+    print(f"[task_sim] scenario={args.scenario} stations/participating={k} "
+          f"samples/robot={len(next(iter(recorder.series.values())))} exported->{args.out}")
     return 0 if abs(best) >= 0.3 else 2
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="RobotMonitor 任务级多机器人协同仿真 (Issue #63)")
+    p = argparse.ArgumentParser(description="RobotMonitor task-level multi-robot coordinated simulation (Issue #63)")
     p.add_argument("--scenario", choices=["pipeline", "fault"], default="pipeline")
-    p.add_argument("--stations", type=int, default=3, help="流水线工位数（pipeline）")
-    p.add_argument("--robots", type=int, default=ROBOT_COUNT, help="参与调度的机器人台数")
-    p.add_argument("--cycle", type=float, default=12.0, help="流水线/故障周期（秒）")
+    p.add_argument("--stations", type=int, default=3, help="number of pipeline stations (pipeline)")
+    p.add_argument("--robots", type=int, default=ROBOT_COUNT, help="number of robots in scheduling")
+    p.add_argument("--cycle", type=float, default=12.0, help="pipeline / fault cycle (seconds)")
     p.add_argument("--broker", default="localhost")
     p.add_argument("--port", type=int, default=1883)
     p.add_argument("--duration", type=float, default=60.0)
-    p.add_argument("--out", default="task_sim_series.json", help="相关性样本导出路径")
-    p.add_argument("--no-broker", action="store_true", help="纯仿真 + 相关性断言，不连 MQTT")
+    p.add_argument("--out", default="task_sim_series.json", help="correlation-sample export path")
+    p.add_argument("--no-broker", action="store_true", help="pure simulation + correlation assertion, no MQTT")
     args = p.parse_args()
     try:
         rc = asyncio.run(amain(args))
