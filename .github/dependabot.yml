@@ -39,6 +39,10 @@ updates:
       - dependency-name: "fastapi"
       - dependency-name: "fastapi-users"
       - dependency-name: "uvicorn"
+      # sqlalchemy 2.0.28->2.1.x 是 2.0->2.1 功能版（移除部分长期 deprecated API）。
+      # 本仓用 modern 2.0 风格（Mapped/mapped_column/async），大概率兼容，但本环境未实测，
+      # 先钉死 2.0.28，待专项 PR 在 CI 实测通过后再升（见 ROADMAP 依赖策略）。
+      - dependency-name: "sqlalchemy"
     groups:
       # OpenTelemetry 是协调发布：API/SDK(exporter/instrumentation) 必须同版本。
       # 分开升必冲突（ResolutionImpossible），故归为一组，一次 PR 全升。

@@ -62,6 +62,7 @@ dedicated PRs rather than dependabot auto-PRs:
 | `fastapi-users` | `12.1.3` | `13→15` switches `passlib→pwdlib` (password hashing backend) | dedicated auth migration PR |
 | `fastapi` | `0.110.0` | `0.x` major jumps carry breaking changes | deliberate upgrade PR |
 | `uvicorn` | `0.28.0` | `0.x` major jump (`0.28→0.54`) | deliberate upgrade PR |
+| `sqlalchemy` | `2.0.28` | `2.0→2.1` feature release removes some long-deprecated APIs; our usage is modern 2.0-style (verified-compatible in principle, not yet CI-tested at 2.1.x) | deliberate upgrade PR after CI verification |
 | `opentelemetry*` | `1.22.0` / `0.43b0` | coordinated release — SDK/API/exporter/instrumentation must share a version | grouped single-PR bump (dependabot `groups`) |
 
 All other dependencies are auto-bumped by dependabot as **minor/patch** only; the
