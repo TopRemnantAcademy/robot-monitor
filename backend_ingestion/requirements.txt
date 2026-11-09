@@ -1,5 +1,5 @@
 fastapi==0.110.0
-uvicorn[standard]==0.28.0
+uvicorn[standard]==0.54.0
 # ⚠️ pydantic / pydantic-settings 必须与 alert_engine/requirements.txt 完全一致：
 # CI 的 backend 作业把两份 requirements 装进**同一个 venv** 跑测试，分叉会导致
 # pip ResolutionImpossible（PR #25 / #20 曾因此红）。改这里必须同步改 alert_engine。
