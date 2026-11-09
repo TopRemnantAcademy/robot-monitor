@@ -123,7 +123,10 @@ class TestWhitelist:
         """⚠️ 给 /metrics 加鉴权 = Prometheus 抓不到 = 可观测性静默失效。"""
         r = client.get("/metrics")
         assert r.status_code == 200
-        assert r.headers["content-type"].startswith("text/plain; version=0.0.4")
+        # prometheus-client 0.26.0 默认 exposition 为 version=1.0.0（0.21.1 为 0.0.4，
+        # 并带 "; charset=utf-8" 后缀）。断言只校验稳定的 "text/plain" MIME 族——跨 client
+        # 版本不脆，且足以证明这是 Prometheus 文本暴露格式而非 HTML/JSON 错误页。
+        assert r.headers["content-type"].startswith("text/plain")
 
 
 class TestRestAuth:

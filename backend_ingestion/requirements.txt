@@ -10,7 +10,11 @@ sqlalchemy[asyncio]==2.0.28
 redis[hiredis]==8.1.0
 aiomqtt==2.5.1
 websockets==17.4
-# prometheus-client 与 alert_engine 保持一致（0.26.0）；0.x 小版本间兼容，已随 alert_engine 验证 CI 绿。
+# prometheus-client 与 alert_engine 保持一致（0.26.0）；0.x 小版本间兼容。
+# ⚠️ 0.21.1 -> 0.26.0 把 /metrics 默认 exposition 从 version=0.0.4 改为 version=1.0.0
+# （并加 "; charset=utf-8" 后缀）。backend_ingestion/tests/test_auth.py 的 content-type
+# 断言已改为只校验 "text/plain" 前缀，跨版本不脆。保持与 alert_engine 一致可避免共享
+# venv 安装时的降/升版抖动（原本第二份 requirements 会把 0.26.0 再降到 0.21.1）。
 prometheus-client==0.26.0
 
 # ---- 认证 / RBAC（订单 15）----
