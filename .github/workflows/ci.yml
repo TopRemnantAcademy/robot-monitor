@@ -31,7 +31,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "20"   # test_payload_contract.py 需要 node 实跑 payload.js
       - name: Install Python deps
@@ -72,6 +72,12 @@ jobs:
           set -eu
           (cd backend_ingestion && JWT_SECRET=ci-import-smoke-placeholder python -c "import app.main; print('backend app.main import OK')")
           (cd alert_engine && JWT_SECRET=ci-import-smoke-placeholder python -c "import app.main; print('alert_engine app.main import OK')")
+      # `test_metric_naming_probe.py` 不依赖 Docker（只给 `assert_metric_naming` 喂伪造
+      # /metrics 文本，不起栈）。但上面的 `pytest -q --ignore=tests/e2e` 把它一并排除了，
+      # 导致它此前**不在任何 CI 链路里实跑**。这里显式补跑，让订单 32 的命名反例门禁
+      # 在单元测试里也常驻（e2e 链路只顺带验一次，覆盖不够）。
+      - name: pytest metric-naming guard (docker-free)
+        run: python -m pytest tests/e2e/test_metric_naming_probe.py -v
 
   frontend:
     name: Frontend tests (Node 20)
@@ -82,7 +88,7 @@ jobs:
         working-directory: frontend_dashboard
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "20"
       - name: Install (Linux 全新 resolve，避开 Windows 生成的 lockfile)
@@ -108,7 +114,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "20"
       - name: Install backend deps (OpenAPI 导出要 import app.main)
