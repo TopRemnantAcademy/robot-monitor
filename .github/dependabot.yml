@@ -7,6 +7,11 @@ updates:
     open-pull-requests-limit: 10
     labels:
       - "dependencies"
+    # Major bumps (e.g. vite 5->8, vitest 2->5, typescript 5->7) need deliberate,
+    # tested migrations so they don't break contributor builds. We handle those as
+    # dedicated PRs (see ROADMAP.md), not auto-PRs.
+    ignore:
+      - update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "pip"
     directory: "/backend_ingestion"
@@ -15,6 +20,8 @@ updates:
     open-pull-requests-limit: 10
     labels:
       - "dependencies"
+    ignore:
+      - update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "pip"
     directory: "/alert_engine"
@@ -23,6 +30,8 @@ updates:
     open-pull-requests-limit: 10
     labels:
       - "dependencies"
+    ignore:
+      - update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "pip"
     directory: "/simulator"
@@ -31,3 +40,5 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
+    ignore:
+      - update-types: ["version-update:semver-major"]
