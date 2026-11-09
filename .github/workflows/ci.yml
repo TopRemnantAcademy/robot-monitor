@@ -1,0 +1,131 @@
+# RobotMonitor CI (GitHub Actions)
+#
+# CNB `.cnb.yml` 的测试门禁 1:1 移植到 GitHub Actions，保证两处口径一致：
+#   - backend   : pytest(testpaths) + backend_ingestion/tests + compileall + 测试文件健全性 + import 冒烟
+#   - frontend  : npm test + typecheck + vite build + bundle-size 守卫
+#   - contract-gate : OpenAPI 快照漂移/breaking + 生成类型须与入库 api.gen.ts 一致 + WS 信封 ajv + tsc
+#   - e2e       : 真实 TimescaleDB 栈 30k 落库（ISSUE #60 禁止 mock 替身）
+#
+# 触发：push 到 main、对 main 开 PR。
+# 铁律（与 CNB 一致）：全程禁止静默吞失败 —— 任何门禁红都必须让构建变红。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend tests (Python 3.11)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"   # test_payload_contract.py 需要 node 实跑 payload.js
+      - name: Install Python deps
+        run: |
+          set -eu
+          python -m pip install --upgrade pip
+          python -m pip install -r alert_engine/requirements.txt
+          python -m pip install -r backend_ingestion/requirements.txt
+          # fakeredis / httpx / rich 是测试期依赖（见 .cnb.yml 同款注释）
+          python -m pip install pytest pytest-timeout "httpx<0.28" fakeredis "rich==13.7.1"
+      - name: pytest (root testpaths = tests + alert_engine/tests)
+        run: python -m pytest -q
+      - name: pytest backend_ingestion/tests (顶层 app 包冲突，单独跑)
+        run: python -m pytest backend_ingestion/tests/ -v --timeout=60
+      - name: Compile all (syntax gate)
+        run: python -m compileall -q backend_ingestion/app alert_engine/app simulator tests
+      - name: Test-file sanity (每个 test_*.py 至少一个真实 test 函数)
+        run: |
+          set -eu
+          missing=0
+          for f in $(find tests alert_engine/tests backend_ingestion/tests -name 'test_*.py'); do
+            if ! grep -qE '^[[:space:]]*def test_' "$f"; then
+              echo "无真实测试函数: $f"
+              missing=1
+            fi
+          done
+          if [ "$missing" != "0" ]; then
+            echo "发现假覆盖测试文件 —— 门禁拒绝"
+            exit 1
+          fi
+      - name: Backend import smoke
+        run: |
+          set -eu
+          (cd backend_ingestion && JWT_SECRET=ci-import-smoke-placeholder python -c "import app.main; print('backend app.main import OK')")
+          (cd alert_engine && JWT_SECRET=ci-import-smoke-placeholder python -c "import app.main; print('alert_engine app.main import OK')")
+
+  frontend:
+    name: Frontend tests (Node 20)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend_dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install (Linux 全新 resolve，避开 Windows 生成的 lockfile)
+        run: |
+          set -eu
+          rm -f package-lock.json
+          npm install
+      - name: Unit tests
+        run: npm test
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Build
+        run: npx vite build
+      - name: Bundle-size guard (gzip < 320 kB)
+        run: node scripts/report-bundle-size.mjs
+
+  contract-gate:
+    name: Contract gate (OpenAPI / types / WS envelope)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install backend deps (OpenAPI 导出要 import app.main)
+        run: |
+          set -eu
+          python -m pip install --upgrade pip
+          python -m pip install -r backend_ingestion/requirements.txt
+          python -m pip install -r alert_engine/requirements.txt
+      - name: Install frontend deps
+        working-directory: frontend_dashboard
+        run: |
+          set -eu
+          rm -f package-lock.json
+          npm install
+      - name: Run contract gate (复用 ci/contract-gate.sh)
+        run: bash ci/contract-gate.sh
+
+  e2e:
+    name: E2E 30k landing (real TimescaleDB stack)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run e2e (复用 ci/run-e2e.sh，与 CNB e2e-30k-landing 等效)
+        run: bash ci/run-e2e.sh
