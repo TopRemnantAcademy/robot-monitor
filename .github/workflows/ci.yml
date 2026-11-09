@@ -42,8 +42,13 @@ jobs:
           python -m pip install -r backend_ingestion/requirements.txt
           # fakeredis / httpx / rich 是测试期依赖（见 .cnb.yml 同款注释）
           python -m pip install pytest pytest-timeout "httpx<0.28" fakeredis "rich==13.7.1"
-      - name: pytest (root testpaths = tests + alert_engine/tests)
-        run: python -m pytest -q
+      # tests/e2e/ 는 Docker 통합 테스트다. CNB의 유닛 잡은 python:3.11 이미지에
+      # docker 가 없어 이 파일들이 항상 skip 됐다. GitHub runner 는 docker 가 있어
+      # 실제 실행되는데, 이 테스트들은 독립 실행(전용 e2e 잡) 또는 컨테이너 준비 대기
+      # 순서 등으로 유닛 잡에서 바로 돌리면 실패/타임아웃된다. CNB 와 동일하게
+      # 유닛 잡에서는 제외하고, 전용 e2e 잡이 test_e2e_30k.py 를 스크립트로 실행한다.
+      - name: pytest (root testpaths; e2e Docker tests run in dedicated e2e job)
+        run: python -m pytest -q --ignore=tests/e2e
       - name: pytest backend_ingestion/tests (顶层 app 包冲突，单独跑)
         run: python -m pytest backend_ingestion/tests/ -v --timeout=60
       - name: Compile all (syntax gate)
