@@ -37,6 +37,9 @@ services:
       # 而不是起一个用空密钥签 token 的后端（那等于没有鉴权）。
       JWT_SECRET: "${JWT_SECRET:?JWT_SECRET 未设置：请在宿主机 .env 里配置（openssl rand -hex 32）}"
       JWT_LIFETIME_SECONDS: "${JWT_LIFETIME_SECONDS:-28800}"
+      # 本地开发：允许单独起的前端（Vite :5173）跨源访问后端（CORS_ALLOW_ORIGINS
+      # 对应 backend_ingestion/app/config.py。默认空 = 不挂 CORS 中间件，同源部署即可）。
+      CORS_ALLOW_ORIGINS: "${CORS_ALLOW_ORIGINS:-}"
     depends_on:
       emqx:
         condition: service_healthy
