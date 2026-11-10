@@ -1,0 +1,16 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "iso21423-rs"
+version = "0.1.0"
+description = "ISO 21423:2026 envelope mapper (Rust acceleration, Phase 0 POC)"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[tool.maturin]
+module-name = "iso21423_rs"

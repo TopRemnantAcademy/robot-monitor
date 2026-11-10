@@ -15,6 +15,9 @@ __pycache__/
 venv/
 .pytest_cache/
 
+# Rust/maturin build artifacts (Phase 0 POC: bridge/iso21423-rs)
+bridge/iso21423-rs/target/
+
 # Node
 node_modules/
 dist/
