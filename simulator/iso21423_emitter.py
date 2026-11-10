@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import dataclasses
 import json
 import logging
 import os
@@ -69,7 +68,7 @@ async def run_robot(state: RobotState, queue: asyncio.Queue, start_at: float) ->
         envelope = telemetry_to_iso21423(payload, manufacturer=MANUFACTURER)
         # 2) convert back to RobotMonitor telemetry (lossless mapper)
         telemetry = iso21423_to_telemetry(envelope)
-        envelope_dict = dataclasses.asdict(envelope)
+        envelope_dict = envelope.to_dict()
         await queue.put((TELEMETRY_TOPIC.format(robot_id=state.robot_id),
                          json.dumps(telemetry, separators=(",", ":")),
                          envelope_dict))

@@ -111,6 +111,15 @@ class ISO21423RobotState:
     condition: dict[str, float] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
+    def to_dict(self) -> dict:
+        """Backend-agnostic nested-dict view (mirrors the Rust extension).
+
+        Consumers such as ``simulator/iso21423_emitter.py`` rely on this instead
+        of ``dataclasses.asdict`` so the code works whether the envelope is the
+        pure-Python dataclass or the compiled ``iso21423_rs`` pyclass.
+        """
+        return dataclasses.asdict(self)
+
 
 # --------------------------------------------------------------------------
 # Mappers

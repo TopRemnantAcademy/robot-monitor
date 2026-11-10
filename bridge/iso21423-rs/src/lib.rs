@@ -349,6 +349,75 @@ impl ISO21423RobotState {
             errors,
         }
     }
+
+    /// Backend-agnostic nested-dict view of the envelope.
+    ///
+    /// Mirrors what `dataclasses.asdict()` produced for the pure-Python
+    /// dataclass so consumers (e.g. `simulator/iso21423_emitter.py`) that
+    /// previously relied on the dataclass no longer break once the Rust
+    /// extension replaces it.
+    fn to_dict(&self, py: Python<'_>) -> Py<PyDict> {
+        let d = PyDict::new(py);
+        d.set_item("version", &self.version).unwrap();
+        d.set_item("manufacturer", &self.manufacturer).unwrap();
+        d.set_item("serial_number", &self.serial_number).unwrap();
+        d.set_item("timestamp_ms", self.timestamp_ms).unwrap();
+        d.set_item("operating_mode", &self.operating_mode).unwrap();
+
+        let battery = PyDict::new(py);
+        battery
+            .set_item("charge_pct", attr_f64(py, &self.battery, "charge_pct").unwrap_or(0.0))
+            .unwrap();
+        battery
+            .set_item("voltage_v", attr_f64(py, &self.battery, "voltage_v").unwrap_or(0.0))
+            .unwrap();
+        battery
+            .set_item("current_a", attr_f64(py, &self.battery, "current_a").unwrap_or(0.0))
+            .unwrap();
+        battery
+            .set_item(
+                "temperature_c",
+                attr_f64(py, &self.battery, "temperature_c").unwrap_or(0.0),
+            )
+            .unwrap();
+        battery
+            .set_item(
+                "power_supply_status",
+                attr_i64(py, &self.battery, "power_supply_status").unwrap_or(0),
+            )
+            .unwrap();
+        d.set_item("battery", &battery).unwrap();
+
+        let pose = PyDict::new(py);
+        pose.set_item("x", attr_f64(py, &self.pose, "x").unwrap_or(0.0)).unwrap();
+        pose.set_item("y", attr_f64(py, &self.pose, "y").unwrap_or(0.0)).unwrap();
+        pose.set_item("z", attr_f64(py, &self.pose, "z").unwrap_or(0.0)).unwrap();
+        pose.set_item("qw", attr_f64(py, &self.pose, "qw").unwrap_or(1.0)).unwrap();
+        pose.set_item("qx", attr_f64(py, &self.pose, "qx").unwrap_or(0.0)).unwrap();
+        pose.set_item("qy", attr_f64(py, &self.pose, "qy").unwrap_or(0.0)).unwrap();
+        pose.set_item("qz", attr_f64(py, &self.pose, "qz").unwrap_or(0.0)).unwrap();
+        pose.set_item("map_id", attr_str(py, &self.pose, "map_id").unwrap()).unwrap();
+        d.set_item("pose", &pose).unwrap();
+
+        let velocity = PyDict::new(py);
+        velocity
+            .set_item("vx", attr_f64(py, &self.velocity, "vx").unwrap_or(0.0))
+            .unwrap();
+        velocity
+            .set_item("vy", attr_f64(py, &self.velocity, "vy").unwrap_or(0.0))
+            .unwrap();
+        velocity
+            .set_item("omega", attr_f64(py, &self.velocity, "omega").unwrap_or(0.0))
+            .unwrap();
+        d.set_item("velocity", &velocity).unwrap();
+
+        d.set_item("joint_positions", &self.joint_positions).unwrap();
+        d.set_item("joint_torques", &self.joint_torques).unwrap();
+        d.set_item("condition", &self.condition).unwrap();
+        d.set_item("errors", &self.errors).unwrap();
+
+        d.unbind()
+    }
 }
 
 #[pyclass]
@@ -481,6 +550,14 @@ fn telemetry_to_iso21423(
 
 fn attr_f64(py: Python<'_>, obj: &Py<PyAny>, name: &str) -> PyResult<f64> {
     obj.bind(py).getattr(name)?.extract::<f64>()
+}
+
+fn attr_i64(py: Python<'_>, obj: &Py<PyAny>, name: &str) -> PyResult<i64> {
+    obj.bind(py).getattr(name)?.extract::<i64>()
+}
+
+fn attr_str(py: Python<'_>, obj: &Py<PyAny>, name: &str) -> PyResult<String> {
+    Ok(obj.bind(py).getattr(name)?.extract::<String>()?)
 }
 
 #[pyfunction]
