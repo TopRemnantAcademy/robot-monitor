@@ -1,22 +1,24 @@
-"""Schema 契约测试：`infra/init.sql` ←→ ORM(`db/models.py`) 必须逐列一致。
+"""Schema contract test: `infra/init.sql` <-> ORM (`db/models.py`) must match column by column.
 
-为什么需要这个测试
-------------------
-`AGENTS.md` §4「数据契约」要求「改动 Schema 必须同步更新 init.sql 与对应 ORM 模型」，
-但此前仓库**没有任何机器可执行的校验** —— 全靠人工肉眼比对。
-实际已经漏过一次：`robot_alert` 在 ORM 里被写成映射级复合主键 `(time, robot_id)`，
-而 init.sql 根本没给这张表主键，两侧已经漂移很久无人发现。
-订单 19 已把主键**真实落到两边**（`alert_id BIGSERIAL` + `PRIMARY KEY (time, alert_id)`），
-本文件据此断言：DDL 含 PK、detail 为 JSONB、无 `__mapper_args__` 权宜之计、两侧列集合相等。
+Why this test is needed
+----------------------
+`AGENTS.md` §4 "Data Contract" requires "changing the Schema must update init.sql and the
+corresponding ORM model synchronously", but the repo previously had **no machine-executable
+verification** -- it relied entirely on manual eyeballing. It already slipped once: `robot_alert`
+was written in the ORM as a mapped composite primary key `(time, robot_id)`, while init.sql gave
+this table no primary key at all, and the two sides drifted unnoticed for a long time. Order 19
+finally landed the primary key on **both sides** (`alert_id BIGSERIAL` + `PRIMARY KEY (time, alert_id)`),
+and this file asserts on that: the DDL contains a PK, detail is JSONB, there is no `__mapper_args__`
+stopgap, and the two sides have equal column sets.
 
-本测试把「人工比对」固化为可重复运行的断言，不再依赖注意力。
+This test hardens the "manual comparison" into a repeatable assertion, no longer depending on attention.
 
-运行
-----
-    python -m pytest tests/ -v      # 有 pytest 时
-    python tests/test_schema_contract.py   # 无 pytest 时（本文件自带 main）
+Run
+---
+    python -m pytest tests/ -v      # with pytest
+    python tests/test_schema_contract.py   # without pytest (this file has its own main)
 
-依赖：仅标准库（re / pathlib）。不引入 pytest 也能跑。
+Dependencies: standard library only (re / pathlib). Runs without pytest too.
 """
 
 from __future__ import annotations
@@ -29,16 +31,16 @@ ROOT = Path(__file__).resolve().parent.parent
 INIT_SQL = ROOT / "infra" / "init.sql"
 MODELS_PY = ROOT / "backend_ingestion" / "app" / "db" / "models.py"
 
-# init.sql 里定义的表（本轮范围：三张业务表）
+# Tables defined in init.sql (scope of this round: three business tables)
 BUSINESS_TABLES = ("robot_telemetry", "robot_metadata", "robot_alert")
 
 
 def parse_init_table(sql: str, table: str) -> dict | None:
-    """从 init.sql 抽取某张表的列名与主键列。
+    """Extract a table's column names and primary-key columns from init.sql.
 
-    支持的写法：
-    - 表级 `PRIMARY KEY (a, b)`
-    - 列内联 `robot_id TEXT PRIMARY KEY`
+    Supported forms:
+    - Table-level `PRIMARY KEY (a, b)`
+    - Inline column `robot_id TEXT PRIMARY KEY`
     """
     m = re.search(r"CREATE TABLE IF NOT EXISTS " + table + r"\s*\((.*?)\n\);", sql, re.S)
     if not m:
@@ -70,7 +72,7 @@ def parse_init_table(sql: str, table: str) -> dict | None:
 
 
 def parse_orm_table(models_src: str, table: str) -> dict | None:
-    """从 models.py 抽取某张表对应的 ORM 列与主键列（按类切块，兼容类内 docstring）。"""
+    """Extract a table's ORM columns and primary-key columns from models.py (split by class, tolerating in-class docstrings)."""
     for block in re.split(r"\nclass ", "\n" + models_src):
         if f'__tablename__ = "{table}"' not in block:
             continue
@@ -87,7 +89,7 @@ def parse_orm_table(models_src: str, table: str) -> dict | None:
 
 
 def _class_block(models_src: str, table: str) -> str | None:
-    """返回 __tablename__ == table 的那个 class 块（到下一个 class 为止）。"""
+    """Return the class block whose __tablename__ == table (up to the next class)."""
     for block in re.split(r"\nclass ", "\n" + models_src):
         if f'__tablename__ = "{table}"' in block:
             return block
@@ -95,7 +97,7 @@ def _class_block(models_src: str, table: str) -> str | None:
 
 
 def collect_failures() -> list[str]:
-    """返回所有不一致描述；空列表 = 全部通过。"""
+    """Return all inconsistency descriptions; empty list = all passed."""
     sql = INIT_SQL.read_text(encoding="utf-8")
     src = MODELS_PY.read_text(encoding="utf-8")
     failures: list[str] = []
@@ -105,52 +107,53 @@ def collect_failures() -> list[str]:
         orm = parse_orm_table(src, table)
 
         if init is None:
-            failures.append(f"{table}: init.sql 中找不到该表（契约源缺失）")
+            failures.append(f"{table}: table not found in init.sql (contract source missing)")
             continue
         if orm is None:
-            failures.append(f"{table}: models.py 中未建模（ORM 缺失）")
+            failures.append(f"{table}: not modeled in models.py (ORM missing)")
             continue
 
         only_init = sorted(set(init["cols"]) - set(orm["cols"]))
         only_orm = sorted(set(orm["cols"]) - set(init["cols"]))
         if only_init:
-            failures.append(f"{table}: 仅 init.sql 有的列 {only_init}（ORM 漏建模）")
+            failures.append(f"{table}: columns only in init.sql {only_init} (ORM missing modeling)")
         if only_orm:
-            failures.append(f"{table}: 仅 ORM 有的列 {only_orm}（init.sql 漏加列）")
+            failures.append(f"{table}: columns only in ORM {only_orm} (init.sql missing columns)")
 
         if sorted(init["pk"]) != sorted(orm["pk"]):
             failures.append(
-                f"{table}: 主键不一致 init={sorted(init['pk'])} orm={sorted(orm['pk'])}"
+                f"{table}: primary key mismatch init={sorted(init['pk'])} orm={sorted(orm['pk'])}"
             )
 
     return failures
 
 
 def test_init_sql_exists() -> None:
-    assert INIT_SQL.is_file(), f"契约源缺失：{INIT_SQL}"
+    assert INIT_SQL.is_file(), f"Contract source missing: {INIT_SQL}"
 
 
 def test_models_py_exists() -> None:
-    assert MODELS_PY.is_file(), f"ORM 源缺失：{MODELS_PY}"
+    assert MODELS_PY.is_file(), f"ORM source missing: {MODELS_PY}"
 
 
 def test_schema_contract() -> None:
     failures = collect_failures()
-    assert not failures, "Schema 契约漂移：\n  - " + "\n  - ".join(failures)
+    assert not failures, "Schema contract drift:\n  - " + "\n  - ".join(failures)
 
 
-# ---------------------------------------------------------------- 订单 19 防漂移
+# ---------------------------------------------------------------- Order 19 anti-drift
 
 
 def compile_orm_ddl(models_src: str, table: str) -> str:
-    """把 models.py 里某张表的 ORM 定义编译成 PostgreSQL DDL 文本。
+    """Compile a table's ORM definition from models.py into PostgreSQL DDL text.
 
-    直接用 `CreateTable(...).compile(postgresql.dialect())`，
-    与订单 19 自检脚本里的命令同源，确保「测的就是验的」。
+    Use `CreateTable(...).compile(postgresql.dialect())` directly, from the same source as the
+    Order 19 self-check script, to ensure "what we test is what we verify".
 
-    实现要点：必须把模型模块**以真实模块名注册进 sys.modules** 再 exec ——
-    SQLAlchemy 2.0 用 `Mapped[...]` 字符串注解时按 `__module__` 回查 globals，
-    模块名不存在会 KeyError: 'Mapped'（实测）。注册后注解才解析得到。
+    Implementation note: the model module must be registered in sys.modules **under its real
+    module name** before exec -- SQLAlchemy 2.0 resolves `Mapped[...]` string annotations by
+    looking up globals via `__module__`, and a missing module name raises KeyError: 'Mapped'
+    (verified empirically). After registration the annotations resolve.
     """
     import sys
     import types
@@ -172,127 +175,131 @@ def compile_orm_ddl(models_src: str, table: str) -> str:
 
 
 def test_alert_orm_ddl_declares_primary_key() -> None:
-    """① ORM 编译出的 DDL 必须含 `PRIMARY KEY (time, alert_id)`。
+    """(1) The DDL compiled from the ORM must contain `PRIMARY KEY (time, alert_id)`.
 
-    订单 19 正题：旧实现靠映射级 `__mapper_args__` 造身份，不产生 DDL，
-    ORM 与库内真实结构永远不一致。断言 PK 真实出现在 DDL 里，杜绝回潮。
+    Order 19's core point: the old implementation faked identity via mapping-level
+    `__mapper_args__`, producing no DDL, so the ORM and the real in-DB structure were
+    forever inconsistent. Assert that the PK truly appears in the DDL to prevent regression.
     """
     ddl = compile_orm_ddl(MODELS_PY.read_text(encoding="utf-8"), "RobotAlert")
-    assert "PRIMARY KEY (time, alert_id)" in ddl, f"ORM DDL 缺主键：\n{ddl}"
+    assert "PRIMARY KEY (time, alert_id)" in ddl, f"ORM DDL missing primary key:\n{ddl}"
 
 
 def test_alert_orm_ddl_detail_is_jsonb() -> None:
-    """② `detail` 编译结果必须是 JSONB（非 JSON）。
+    """(2) `detail`'s compiled result must be JSONB (not JSON).
 
-    旧分支多次把 JSONB 换成 sqlalchemy.JSON —— 编译成 JSON，
-    丢索引/操作符能力且与 init.sql 漂移。
+    Old branches repeatedly swapped JSONB for sqlalchemy.JSON -- compiled to JSON, losing
+    index/operator capabilities and drifting from init.sql.
     """
     ddl = compile_orm_ddl(MODELS_PY.read_text(encoding="utf-8"), "RobotAlert")
-    assert re.search(r"detail\s+JSONB", ddl), f"detail 不是 JSONB：\n{ddl}"
-    assert not re.search(r"detail\s+JSON\b(?!B)", ddl), f"detail 退化为 JSON：\n{ddl}"
+    assert re.search(r"detail\s+JSONB", ddl), f"detail is not JSONB:\n{ddl}"
+    assert not re.search(r"detail\s+JSON\b(?!B)", ddl), f"detail regressed to JSON:\n{ddl}"
 
 
 def test_alert_no_mapper_args_workaround() -> None:
-    """③ `RobotAlert` 不得再出现映射级 `__mapper_args__` 权宜之计。
+    """(3) `RobotAlert` must no longer use the mapping-level `__mapper_args__` stopgap.
 
-    正主键落地后，任何 `__mapper_args__` 都是把身份从 DDL 里挪走的旧病复发。
-    只查**代码**：先去掉类 docstring 与 `#` 注释，避免文档里提到该词造成误报。
+    Once the real primary key landed, any `__mapper_args__` is a relapse of the old trick of
+    moving identity out of the DDL. Only inspect **code**: first strip class docstrings and `#`
+    comments to avoid false positives from the word merely appearing in documentation.
     """
     block = _class_block(MODELS_PY.read_text(encoding="utf-8"), "robot_alert")
-    assert block is not None, "models.py 中找不到 RobotAlert"
+    assert block is not None, "RobotAlert not found in models.py"
     code = re.sub(r'"""((?!""").)*"""', "", block, flags=re.S)
     code = "\n".join(l for l in code.splitlines() if not l.strip().startswith("#"))
-    assert "__mapper_args__" not in code, "RobotAlert 仍带 __mapper_args__ 权宜之计"
+    assert "__mapper_args__" not in code, "RobotAlert still carries the __mapper_args__ stopgap"
 
 
 def test_alert_columns_match_init_sql_exactly() -> None:
-    """④ ORM 列集合 == init.sql:75-88 建表列集合（缺失/多余都报错）。
+    """(4) ORM column set == init.sql:75-88 create-table column set (missing/extra both error).
 
-    这是本单的核心：消灭 ORM 与 DDL 的漂移。没有这条，下次改表还会再漂一次。
+    This is the core of the ticket: eliminate ORM vs DDL drift. Without this, the next schema
+    change would drift again.
     """
     init = parse_init_table(INIT_SQL.read_text(encoding="utf-8"), "robot_alert")
-    assert init is not None, "robot_alert 未在 init.sql 中定义"
+    assert init is not None, "robot_alert not defined in init.sql"
     orm = parse_orm_table(MODELS_PY.read_text(encoding="utf-8"), "robot_alert")
-    assert orm is not None, "robot_alert 未在 models.py 中建模"
+    assert orm is not None, "robot_alert not modeled in models.py"
 
     only_init = sorted(set(init["cols"]) - set(orm["cols"]))
     only_orm = sorted(set(orm["cols"]) - set(init["cols"]))
-    assert not only_init, f"仅 init.sql 有的列：{only_init}"
-    assert not only_orm, f"仅 ORM 有的列：{only_orm}"
+    assert not only_init, f"Columns only in init.sql: {only_init}"
+    assert not only_orm, f"Columns only in ORM: {only_orm}"
     assert init["cols"] == orm["cols"], (
-        f"列顺序不一致 init={init['cols']} orm={orm['cols']}"
+        f"Column order mismatch init={init['cols']} orm={orm['cols']}"
     )
-    # PK 逐字一致（顺序也一致）
+    # PK matches verbatim (including order)
     assert init["pk"] == orm["pk"] == ["time", "alert_id"], (
-        f"主键不一致 init={init['pk']} orm={orm['pk']}"
+        f"Primary key mismatch init={init['pk']} orm={orm['pk']}"
     )
 
 
 def test_alert_ack_fields_present() -> None:
-    """⑤ ack_at / ack_by 两侧都在（本轮只建字段，不做 ack 接口）。"""
+    """(5) ack_at / ack_by present on both sides (this round only creates fields, no ack API)."""
     init = parse_init_table(INIT_SQL.read_text(encoding="utf-8"), "robot_alert")
     assert init is not None
     for col in ("ack_at", "ack_by"):
-        assert col in init["cols"], f"init.sql robot_alert 缺列 {col}"
+        assert col in init["cols"], f"init.sql robot_alert missing column {col}"
 
 
 def test_alert_suppressed_fields_present_on_both_sides() -> None:
-    """⑥ 订单 35：suppressed / suppressed_by 两侧都在，且 ORM 默认值为 FALSE。
+    """(6) Order 35: suppressed / suppressed_by present on both sides, and the ORM default is FALSE.
 
-    为什么这条必须存在（不是 `test_alert_columns_match_init_sql_exactly` 的重复）：
-    后者只比**列集合**。suppressed 若在 ORM 里被写成 `default=True` 或 nullable，
-    列集合照样相等，但库里的语义就反了 —— 每一条新告警都变成"已抑制"，
-    告警流会整体静默。这里把默认值与可空性钉死。
+    Why this must exist (not a duplicate of `test_alert_columns_match_init_sql_exactly`):
+    the latter only compares the **column set**. If suppressed is written as `default=True` or
+    nullable in the ORM, the column sets are still equal, but the in-DB semantics are inverted --
+    every new alert becomes "already suppressed" and the alert stream goes silently quiet. Here we
+    pin the default value and nullability.
 
-    存量库迁移同样靠 `DEFAULT FALSE`：历史行语义必须保持不变。
+    Existing-database migration also relies on `DEFAULT FALSE`: historical rows' semantics must stay unchanged.
     """
     init = parse_init_table(INIT_SQL.read_text(encoding="utf-8"), "robot_alert")
     assert init is not None
     for col in ("suppressed", "suppressed_by"):
-        assert col in init["cols"], f"init.sql robot_alert 缺列 {col}"
+        assert col in init["cols"], f"init.sql robot_alert missing column {col}"
 
-    # init.sql：suppressed 非空 + 显式 DEFAULT FALSE；suppressed_by 可空（未抑制时为 NULL）
+    # init.sql: suppressed is NOT NULL + explicit DEFAULT FALSE; suppressed_by is nullable (NULL when not suppressed)
     sql = INIT_SQL.read_text(encoding="utf-8")
     assert re.search(
         r"suppressed\s+BOOLEAN\s+NOT NULL\s+DEFAULT FALSE", sql
-    ), "init.sql 的 suppressed 必须是 BOOLEAN NOT NULL DEFAULT FALSE（历史行语义不变）"
-    assert re.search(r"suppressed_by\s+TEXT\b", sql), "init.sql 的 suppressed_by 应为可空 TEXT"
+    ), "init.sql's suppressed must be BOOLEAN NOT NULL DEFAULT FALSE (historical rows' semantics unchanged)"
+    assert re.search(r"suppressed_by\s+TEXT\b", sql), "init.sql's suppressed_by should be nullable TEXT"
 
-    # ORM：同一语义。SQLAlchemy 编译出的 DDL 对 `server_default` 为空的列
-    # **不会**输出 DEFAULT 子句（本机实测：`suppressed BOOLEAN NOT NULL`），
-    # 默认值由 ORM 的 Python 侧 `default=False` 提供，而 init.sql 的 DEFAULT FALSE
-    # 兜住直连 SQL 的写入。故这里只能钉「NOT NULL + 非默认 True」＋「源码里
-    # default=False」，而不是期待 DDL 出现 DEFAULT 字样。
+    # ORM: same semantics. SQLAlchemy's compiled DDL for columns with empty `server_default`
+    # does **not** emit a DEFAULT clause (verified locally: `suppressed BOOLEAN NOT NULL`); the
+    # default is provided by the ORM's Python-side `default=False`, while init.sql's DEFAULT FALSE
+    # covers direct SQL writes. So here we can only pin "NOT NULL + default not True" + "default=False
+    # in source", rather than expect a DEFAULT clause in the DDL.
     ddl = compile_orm_ddl(MODELS_PY.read_text(encoding="utf-8"), "RobotAlert")
     assert re.search(r"suppressed\s+BOOLEAN NOT NULL", ddl), (
-        f"ORM suppressed 列属性漂移：\n{ddl}"
+        f"ORM suppressed column property drifted:\n{ddl}"
     )
     assert not re.search(r"suppressed\s+BOOLEAN[^,]*DEFAULT true", ddl, re.I), (
-        f"ORM suppressed 默认值不得为 True（会让所有新告警都变'已抑制'）：\n{ddl}"
+        f"ORM suppressed default must not be True (would make all new alerts 'suppressed'):\n{ddl}"
     )
     block = _class_block(MODELS_PY.read_text(encoding="utf-8"), "robot_alert")
     assert block is not None
     assert re.search(
         r"suppressed:\s*Mapped\[bool\]\s*=\s*mapped_column\(\s*Boolean,\s*nullable=False,\s*default=False\s*\)",
         block,
-    ), "ORM suppressed 必须显式 default=False（与 init.sql 的 DEFAULT FALSE 对齐）"
+    ), "ORM suppressed must explicitly set default=False (aligned with init.sql's DEFAULT FALSE)"
     assert re.search(
         r"suppressed_by:\s*Mapped\[str \| None\]\s*=\s*mapped_column\(\s*Text\s*\)",
         block,
-    ), "ORM suppressed_by 应为可空 Text"
+    ), "ORM suppressed_by should be nullable Text"
 
 
 def main() -> int:
     checks = [
-        ("init.sql 存在", test_init_sql_exists),
-        ("models.py 存在", test_models_py_exists),
-        ("Schema 契约（列 + 主键）", test_schema_contract),
-        ("ORM DDL 含 PRIMARY KEY (time, alert_id)", test_alert_orm_ddl_declares_primary_key),
-        ("ORM DDL detail 为 JSONB", test_alert_orm_ddl_detail_is_jsonb),
-        ("无 __mapper_args__ 权宜之计", test_alert_no_mapper_args_workaround),
-        ("两侧列集合逐列相等", test_alert_columns_match_init_sql_exactly),
-        ("ack_at / ack_by 已建字段", test_alert_ack_fields_present),
-        ("suppressed / suppressed_by 双侧一致（订单 35）", test_alert_suppressed_fields_present_on_both_sides),
+        ("init.sql exists", test_init_sql_exists),
+        ("models.py exists", test_models_py_exists),
+        ("Schema contract (columns + primary key)", test_schema_contract),
+        ("ORM DDL contains PRIMARY KEY (time, alert_id)", test_alert_orm_ddl_declares_primary_key),
+        ("ORM DDL detail is JSONB", test_alert_orm_ddl_detail_is_jsonb),
+        ("no __mapper_args__ stopgap", test_alert_no_mapper_args_workaround),
+        ("both column sets equal column-by-column", test_alert_columns_match_init_sql_exactly),
+        ("ack_at / ack_by fields created", test_alert_ack_fields_present),
+        ("suppressed / suppressed_by consistent on both sides (Order 35)", test_alert_suppressed_fields_present_on_both_sides),
     ]
     failed = 0
     for name, fn in checks:
@@ -302,7 +309,7 @@ def main() -> int:
         except AssertionError as exc:
             failed += 1
             print(f"  FAIL  {name}\n        {exc}")
-    print(f"\n{len(checks) - failed}/{len(checks)} 通过")
+    print(f"\n{len(checks) - failed}/{len(checks)} passed")
     return 1 if failed else 0
 
 

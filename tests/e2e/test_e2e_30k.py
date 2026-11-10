@@ -1,83 +1,88 @@
-"""端到端 30,000 行落库验证 harness（ISSUE #60）。
+"""End-to-end 30,000-row landing verification harness (ISSUE #60).
 
-考什么
-------
-`STATUS.md` §九「仍未验证」与 `docs/requirements/R-09-database-integration.md` §6
-同时挂着一条：**端到端 30,000 行（含 MQTT/模拟器）未验证**。
-已有的证据都不覆盖这条完整链路：
-  - `tests/test_schema_contract.py`、`backend_ingestion/tests/*` 是**单测口径**，
-    不接 MQTT、不接真实 TimescaleDB；
-  - `test_integration.sh`（订单 06）在宿主机裸跑，且**无 Docker 就整体退出**，
-    没有「CI 可跑 / 无 Docker 可 skip」的分支。
-本文件把这条链路固化成**可一键重复运行**的用例：
-  起栈（emqx + timescaledb:2.13.1 + redis + backend）→ 等真实健康
-  → 容器内跑 mock_fleet（--duration 受控时长）→ 直连 DB 数行数 → 断言。
+What it tests
+-------------
+`STATUS.md` §9 "still unverified" and `docs/requirements/R-09-database-integration.md` §6
+both carry one item: **end-to-end 30,000 rows (incl. MQTT/simulator) unverified**.
+Existing evidence does not cover this full chain:
+  - `tests/test_schema_contract.py`, `backend_ingestion/tests/*` are **unit-test scope**;
+    they do not connect MQTT nor a real TimescaleDB;
+  - `test_integration.sh` (Order 06) runs bare on the host and **exits entirely without Docker**,
+    with no "CI-runnable / skip-without-Docker" branch.
+This file hardens this chain into a **one-click repeatable** test case:
+  bring up stack (emqx + timescaledb:2.13.1 + redis + backend) -> wait for real health
+  -> run mock_fleet in container (controlled --duration) -> count rows directly against DB -> assert.
 
-断言与「无 PK 冲突丢行」
-------------------------
-1. `robot_telemetry` 行数 **>= 30000**（不是 `==`：网络/调度抖动允许向下浮动，
-   用 `>=` 是 ISSUE #60 的明确要求）。
-2. **无 PK 冲突丢行**：从两侧取证，缺一不可 ——
-   a) 库内不存在 `(time, robot_id)` 重复组（`GROUP BY ... HAVING count(*)>1`），
-      且 PK 唯一约束真实存在于 TimescaleDB 侧；
-   b) 后端自报的丢行三元组 `rows_written == rows_submitted` 且 `rows_skipped == 0`
-      且 `rejected == 0`。
-   `rows_skipped` 正是 `ON CONFLICT DO NOTHING` **静默丢行**的计数器
-   （`backend_ingestion/app/services/batch_writer.py:166-174`），
-   只看「日志无报错」或只看行数够多，都发现不了它。
-   (a) 与 (b) 必须同时成立：只查库只能证明"落进去的没重复"，
-   证明不了"该落的都落了"；只查计数只信后端自报，证明不了库内事实。
+Assertion and "no PK-conflict row loss"
+--------------------------------------
+1. `robot_telemetry` row count **>= 30000** (not `==`: network/scheduling jitter allows downward
+   float; using `>=` is an explicit ISSUE #60 requirement).
+2. **No PK-conflict row loss**: evidence from both sides is required, neither alone suffices --
+   a) no `(time, robot_id)` duplicate groups exist in the DB (`GROUP BY ... HAVING count(*)>1`),
+      and the PK unique constraint truly exists on the TimescaleDB side;
+   b) the backend's self-reported row-loss triple: `rows_written == rows_submitted` and
+      `rows_skipped == 0` and `rejected == 0`.
+   `rows_skipped` is exactly the **silent row-loss** counter for `ON CONFLICT DO NOTHING`
+   (`backend_ingestion/app/services/batch_writer.py:166-174`); looking only at "no error in logs"
+   or only at "enough rows" would never catch it.
+   (a) and (b) must both hold: querying only the DB proves "what landed has no duplicates" but not
+   "everything that should land did land"; trusting only the backend's self-report proves nothing
+   about the in-DB reality.
 
-为什么必须真 TimescaleDB（禁止 mock 替身）
-------------------------------------------
-本用例要考的 `init.sql` 特性（超表、连续聚合 `robot_status_10s`、
-`add_retention_policy` / `add_compression_policy`）**只在 TimescaleDB 存在**。
-拿 PostgreSQL 或内存替身顶上，等于把「e2e 通过」与「生产建表正确」脱钩，
-这正是 ISSUE #60 点名禁止的。
+Why a real TimescaleDB is mandatory (mock stand-ins forbidden)
+-------------------------------------------------------------
+The `init.sql` features this test exercises (hypertable, continuous aggregate `robot_status_10s`,
+`add_retention_policy` / `add_compression_policy`) **only exist in TimescaleDB**. Substituting
+PostgreSQL or an in-memory stand-in decouples "e2e passes" from "production tables built correctly",
+which is precisely what ISSUE #60 explicitly forbids.
 
-无 Docker 时
-------------
-**skip 并报明**（`pytest.skip` / 退出码 3），绝不 red。判定顺序：
-`docker` 命令在不在 → `docker info`（daemon 是否可达）→ 镜像/栈能否起来。
-每一层都给出「为什么 skip」与「需要什么才能验证」，避免把环境问题伪装成代码失败。
+When Docker is absent
+--------------------
+**skip and report clearly** (`pytest.skip` / exit code 3), never red. Decision order:
+is the `docker` command present -> `docker info` (daemon reachable) -> can the image/stack come up.
+Each layer gives "why skipped" and "what is needed to verify", avoiding masking an environment
+problem as a code failure.
 
-跑法
-----
-    # 有 pytest
+How to run
+----------
+    # with pytest
     python -m pytest tests/e2e/test_e2e_30k.py -v -s
-    # 无 pytest（本文件自带 main，退出码 0=通过 3=skip 1=失败）
+    # without pytest (this file has its own main; exit code 0=pass 3=skip 1=fail)
     python tests/e2e/test_e2e_30k.py
 
-指标命名反例探针（订单 32 / ISSUE #100）
---------------------------------------
-本文件除了 30k 落库，还**顺路**在真实栈上验一次指标命名：`/healthz` 与
-`/metrics` 是同一进程暴露的两个端点，既然栈已经起着，抓一次真实
-`/metrics` 的**原始字节**来断言「新名在、旧名消失」比另起一套 mock 更硬。
-`assert_metric_naming()` 断言的失败对象是**服务**（旧名残留 / 新名缺失），
-不属环境问题，按「不伪装 skip」的规矩必须 red —— 详见该函数注释。
-为什么不写成单测：`backend_ingestion/tests/test_observability.py` 用的是
-`metrics.render()`（**进程内、自带 registry**）+ `TestClient`，它证明不了
-「跑起来的那个进程吐出的字节」—— 而 `robot_monitor_*` 恰恰是**运行时多注册一个
-Collector** 就能复活的东西。探针要盯的是那个进程，所以它必须在栈里、对着真端口。
+Metric-naming anti-example probe (Order 32 / ISSUE #100)
+--------------------------------------------------------
+Besides the 30k landing, this file **also** verifies metric naming once on the real stack:
+`/healthz` and `/metrics` are two endpoints exposed by the same process, so with the stack already
+up, grabbing the real `/metrics` **raw bytes** to assert "new name present, old name gone" is
+harder than spinning up a separate mock. `assert_metric_naming()`'s failure target is the **service**
+(residual old name / missing new name), which is not an environment issue and, per the "do not fake
+skip" rule, must go red -- see that function's comment. Why not a unit test:
+`backend_ingestion/tests/test_observability.py` uses `metrics.render()` (**in-process, with its own
+registry**) + `TestClient`, which cannot prove "the bytes emitted by the actually-running process" --
+and `robot_monitor_*` is exactly the kind of thing that can resurrect by **registering one more
+Collector at runtime**. The probe must watch that process, so it has to be inside the stack, against
+the real port.
 
-环境变量（都有默认值，默认即 ISSUE #60 的验收口径）：
-    E2E_DURATION=40        压测秒数（40s × 100 台 × 10Hz ≈ 40,000 帧）
-    E2E_ROBOTS=100         台数
-    E2E_MIN_ROWS=30000     行数阈值
-    E2E_KEEP=1             结束后保留栈（排查用）
-    E2E_UP_TIMEOUT=300     起栈+等健康的超时（秒）
-    E2E_COMPOSE=<path>     覆盖 compose 文件路径
-    E2E_METRICS_URL=<url>  /metrics 端点（默认后端 compose 映射的 18000 端口）
-    E2E_METRICS_PREFIX=... 只取该前缀的指标行做命名断言（默认 robot_）
+Environment variables (all have defaults; the defaults are ISSUE #60's acceptance criteria):
+    E2E_DURATION=40        stress seconds (40s x 100 robots x 10Hz ~= 40,000 frames)
+    E2E_ROBOTS=100         robot count
+    E2E_MIN_ROWS=30000     row threshold
+    E2E_KEEP=1             keep the stack after finishing (for investigation)
+    E2E_UP_TIMEOUT=300     stack-up + health-wait timeout (seconds)
+    E2E_COMPOSE=<path>     override compose file path
+    E2E_METRICS_URL=<url>  /metrics endpoint (default backend compose-mapped 18000 port)
+    E2E_METRICS_PREFIX=... only take metric rows with this prefix for the naming assertion (default robot_)
 
-压测自身的发送量下限
---------------------
-脚本会按 `E2E_ROBOTS * 10 * E2E_DURATION * 0.5` 算出下限并作为 `FLEET_MIN_SENT`
-注入 `mock_fleet`（`simulator/mock_fleet.py --min-sent`）。
-为什么必须有这条：`--duration` 只保证跑满时长，不保证发送量，而
-`docker compose run --rm` **不会**清掉 compose 里为同一变量设的默认值 ——
-台数被静默覆盖时压测照样退 0，失败要到断言阶段才暴露（甚至被阈值放过）。
-下限让压测阶段自己先红，且失败信息直指原因。
+The stress run's own send-volume floor
+---------------------------------------
+The script computes a floor as `E2E_ROBOTS * 10 * E2E_DURATION * 0.5` and injects it as
+`FLEET_MIN_SENT` into mock_fleet (`simulator/mock_fleet.py --min-sent`).
+Why this must exist: `--duration` only guarantees the full duration is run, not the send volume, and
+`docker compose run --rm` **does not** clear the default value compose set for the same variable --
+so when the robot count is silently overridden, the stress run still exits 0, and the failure only
+surfaces at the assertion stage (or is even passed by the threshold). The floor makes the stress
+stage itself go red first, with a failure message pointing straight at the cause.
 """
 
 from __future__ import annotations
@@ -102,47 +107,50 @@ MIN_ROWS = int(os.environ.get("E2E_MIN_ROWS", "30000"))
 UP_TIMEOUT = int(os.environ.get("E2E_UP_TIMEOUT", "300"))
 KEEP = os.environ.get("E2E_KEEP") == "1"
 
-# 宿主机侧探 /healthz 的口（compose 里映射 18000→8000）。
-# 走宿主机端口而不是 `compose exec`，是为了不额外依赖容器内的 curl/wget
-# —— backend 镜像只有 python:3.11-slim，没装这俩。
+# Host-side probe port for /healthz (compose maps 18000->8000).
+# We hit the host port rather than `compose exec` to avoid depending on curl/wget inside the
+# container -- the backend image is only python:3.11-slim and does not have them.
 BACKEND_URL = os.environ.get("E2E_BACKEND_URL", "http://127.0.0.1:18000")
 
-# 指标命名探针（订单 32）：走宿主机映射端口，与 BACKEND_URL 同源同理由
-# （backend 镜像只有 python:3.11-slim，容器内没有 curl/wget，从外面打更省事）。
+# Metric-naming probe (Order 32): use the host-mapped port, for the same reason as BACKEND_URL
+# (the backend image is only python:3.11-slim with no curl/wget inside; hitting from outside is easier).
 METRICS_URL = os.environ.get("E2E_METRICS_URL", BACKEND_URL + "/metrics")
 METRICS_PREFIX = os.environ.get("E2E_METRICS_PREFIX", "robot_")
 
 PYTEST_SKIP_MARKER = "E2E-SKIP"
 
-# R-13 / R-16：cagg 实时回填断言用的机器人 ID 与灌数行数（灌 [now-30min, now]，10Hz；
-# R-16 的 `robot_status_10s` 另按 1min 实时区口径灌 [now-30s, now]，见该文件 CAGG_PLAN）。
+# R-13 / R-16: robot ID and insert-row count used by the cagg real-time backfill assertion
+# (insert [now-30min, now] at 10Hz; R-16's `robot_status_10s` inserts [now-30s, now] per its 1min
+# real-time-segment criterion -- see CAGG_PLAN in that file).
 ROBOT_ID = os.environ.get("E2E_CAGG_ROBOT_ID", "humanoid-001")
 BACKFILL_ROWS = int(os.environ.get("E2E_CAGG_ROWS", "1800"))
 
-# 每个子进程都要有上限，禁止无限等待（ISSUE #60 §3「复用 test_integration.sh 的超时守卫思路」）。
-# 下载/构建镜像可能慢，故 up 给得宽；其余步骤都是本地操作，几十秒足够。
+# Every subprocess must have an upper bound; no infinite waiting (ISSUE #60 §3 "reuse test_integration.sh's
+# timeout-guard idea"). Image download/build can be slow, so up is generous; the rest are local ops, tens of
+# seconds suffice.
 UP_TIMEOUT_S = UP_TIMEOUT
 HEALTH_TIMEOUT_S = 180
 STRESS_TIMEOUT_S = DURATION + 120
-# 发送量下限：理论值 台数×10Hz×秒数 的一半。留一半余量是因为
-# 起栈初期 broker 未就绪会有重连空转，真正的**回归**（broker 写错、台数被覆盖、
-# 发布侧持续报错）会让它掉到零头，两者区分度极大，不需要扣得很精确。
+# Send-volume floor: half of the theoretical value (robots x 10Hz x seconds). The half margin exists
+# because early in stack-up the broker is not ready and there is reconnect idle-spin; a real **regression**
+# (wrong broker, robot count overridden, publisher persistently erroring) drops it to a fraction, and the two
+# are extremely distinguishable, so no need to be precise.
 MIN_SENT = int(ROBOTS * 10 * DURATION * 0.5)
 PSQL_TIMEOUT_S = 60
 
 
 class E2ESkip(Exception):
-    """环境不具备（无 Docker 等）—— 不是代码失败，必须显式 skip。"""
+    """Environment not ready (no Docker, etc.) -- not a code failure; must skip explicitly."""
 
 
 def run(cmd: list[str], timeout: int, check: bool = True) -> subprocess.CompletedProcess:
-    """跑子进程，带硬超时与原始输出保留（失败时报文要能贴进 Issue）。"""
+    """Run a subprocess with a hard timeout and raw output preserved (failure messages must be pasteable into an Issue)."""
     proc = subprocess.run(
         cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=timeout,
     )
     if check and proc.returncode != 0:
         raise AssertionError(
-            f"命令失败：{' '.join(cmd)}\n"
+            f"command failed: {' '.join(cmd)}\n"
             f"exit={proc.returncode}\n"
             f"--- stdout ---\n{proc.stdout}\n"
             f"--- stderr ---\n{proc.stderr}"
@@ -155,38 +163,39 @@ def compose(*args: str, timeout: int = PSQL_TIMEOUT_S, check: bool = True):
                timeout=timeout, check=check)
 
 
-# ------------------------------------------------------------------ 先决条件
+# ------------------------------------------------------------------ prerequisites
 
 def require_docker() -> None:
-    """无 Docker 就 skip（带明确原因），绝不 red。"""
+    """skip if no Docker (with a clear reason), never red."""
     if shutil.which("docker") is None:
         raise E2ESkip(
-            "PATH 内找不到 docker 命令。本用例需要真实 Docker 引擎起 "
-            "emqx + timescaledb:2.13.1-pg16 + redis，且**禁止**用 mock 替身"
-            "（ISSUE #60 禁止项）。需要：在装了 Docker 的机器/runner 上运行。"
+            "docker command not found in PATH. This test needs a real Docker engine to bring up "
+            "emqx + timescaledb:2.13.1-pg16 + redis, and **forbids** mock stand-ins "
+            "(ISSUE #60 forbidden item). Need: run on a machine/runner with Docker installed."
         )
     probe = subprocess.run(["docker", "info"], capture_output=True, text=True)
     if probe.returncode != 0:
         raise E2ESkip(
-            "docker daemon 不可达（`docker info` 非 0）。"
-            f"原始输出：{(probe.stderr or probe.stdout).strip()[:400]}"
+            "docker daemon not reachable (`docker info` non-zero)."
+            f"Raw output: {(probe.stderr or probe.stdout).strip()[:400]}"
         )
     if not COMPOSE_FILE.is_file():
-        raise E2ESkip(f"compose 文件不存在：{COMPOSE_FILE}")
-    # `docker compose`（插件版）必须可用：老式 `docker-compose`（独立二进制）
-    # 与脚本调用的命令格式不同，混用会在起栈时才炸成「代码失败」。
-    # 这一条**不能**放进下面的 try 里 —— 那里捕获的是 docker daemon 未就绪（E2ESkip），
-    # 而这里是环境缺件（有 docker 但没 compose 插件），必须显式 skip 且带原因。
+        raise E2ESkip(f"compose file does not exist: {COMPOSE_FILE}")
+    # `docker compose` (plugin version) must be available: the legacy `docker-compose` (standalone
+    # binary) uses a different command format than what the script calls, and mixing them would blow
+    # up as a "code failure" only at stack-up time. This check **cannot** go inside the try below --
+    # that one catches docker daemon not ready (E2ESkip), whereas this is a missing dependency (docker
+    # present but no compose plugin), which must skip explicitly with a reason.
     probe = subprocess.run(["docker", "compose", "version"], capture_output=True, text=True)
     if probe.returncode != 0:
         raise E2ESkip(
-            "`docker compose`（插件版）不可用，`docker compose version` 非 0。"
-            "本用例整套起栈/执行/取证都走 compose。原始输出："
+            "`docker compose` (plugin version) unavailable, `docker compose version` non-zero. "
+            "This test's entire stack-up/execution/evidence path uses compose. Raw output: "
             f"{(probe.stderr or probe.stdout).strip()[:400]}"
         )
 
 
-# ------------------------------------------------------------------ 探针
+# ------------------------------------------------------------------ probes
 
 def backend_health() -> dict | None:
     try:
@@ -197,12 +206,13 @@ def backend_health() -> dict | None:
 
 
 def wait_backend_db_up(timeout: int = HEALTH_TIMEOUT_S) -> dict:
-    """等到 /healthz 的 db=up。
+    """Wait until /healthz reports db=up.
 
-    为什么不等「容器 running」：`/healthz` 是**存活探针**语义，依赖不可达时
-    照样返回 200 且 status=degraded（backend_ingestion/app/main.py:85-118）。
-    若此时就开跑，模拟器发的第一批会堆到队列里、DB 通了才落库，
-    行数看似正常但时序已经错乱 —— 所以必须等 db=up 这个**语义**而非端口。
+    Why not wait for "container running": `/healthz` is a **liveness-probe** semantic and still
+    returns 200 with status=degraded when the dependency is unreachable
+    (backend_ingestion/app/main.py:85-118). If we started running at that point, the simulator's
+    first batch would pile up in the queue and only land once the DB is up -- row counts look fine
+    but the timing is already scrambled. So we must wait for the **semantic** db=up, not the port.
     """
     deadline = time.monotonic() + timeout
     last = None
@@ -212,47 +222,49 @@ def wait_backend_db_up(timeout: int = HEALTH_TIMEOUT_S) -> dict:
             return last
         time.sleep(2)
     raise AssertionError(
-        f"后端 /healthz 在 {timeout}s 内未达到 db=up（最后快照：{last}）"
+        f"backend /healthz did not reach db=up within {timeout}s (last snapshot: {last})"
     )
 
 
 def psql(sql: str) -> str:
-    """在 timescaledb 容器里执行 SQL，返回单值（去空白）。"""
+    """Execute SQL inside the timescaledb container, return a single value (whitespace stripped)."""
     proc = compose("exec", "-T", "timescaledb", "psql", "-U", "postgres",
                    "-d", "robot_monitor", "-tAc", sql)
     return proc.stdout.strip()
 
 
-# ------------------------------------------------------------------ 用例主体
+# ------------------------------------------------------------------ test body
 
 def run_e2e() -> dict:
-    """执行完整链路，返回取证结果（供断言与报告共用）。"""
+    """Execute the full chain and return the evidence result (shared by assertions and reporting)."""
     evidence: dict = {}
 
     print(f"[e2e] compose = {COMPOSE_FILE}", flush=True)
-    print(f"[e2e] 口径：{ROBOTS} 台 × 10Hz × {DURATION}s，阈值 >= {MIN_ROWS} 行", flush=True)
+    print(f"[e2e] criteria: {ROBOTS} robots x 10Hz x {DURATION}s, threshold >= {MIN_ROWS} rows", flush=True)
 
-    # 1) 起栈（构建镜像 + 拉镜像）。不随 up 起 mock_fleet：它挂在 stress profile 下，
-    #    压测必须晚于「后端能落库」这一步，否则是在测一个还没准备好的系统。
+    # 1) Bring up the stack (build + pull images). Do not bring up mock_fleet with up: it lives under
+    #    the stress profile, and the stress run must come after "backend can land rows", otherwise we
+    #    are testing a system that is not ready yet.
     up_started = time.monotonic()
     compose("up", "-d", "--build", timeout=UP_TIMEOUT_S)
     evidence["up_seconds"] = round(time.monotonic() - up_started, 1)
-    print(f"[e2e] 栈已起（{evidence['up_seconds']}s）", flush=True)
+    print(f"[e2e] stack up ({evidence['up_seconds']}s)", flush=True)
 
-    # 2) 等后端确认 DB 可达
+    # 2) Wait for the backend to confirm DB is reachable
     health = wait_backend_db_up()
     print(f"[e2e] /healthz = {json.dumps(health, ensure_ascii=False)}", flush=True)
     evidence["health_before"] = health
 
-    # 3) 压测前基线（复用栈时基线可能非 0；本用例默认每次 down -v，故通常为 0）
+    # 3) Pre-stress baseline (when reusing a stack the baseline may be non-zero; this test defaults to
+    #    down -v each run, so it is usually 0)
     before = int(psql("SELECT count(*) FROM robot_telemetry;") or 0)
     evidence["rows_before"] = before
-    print(f"[e2e] 压测前 robot_telemetry = {before}", flush=True)
+    print(f"[e2e] pre-stress robot_telemetry = {before}", flush=True)
 
-    # 4) 容器内跑受控时长压测。用 `compose run` 而不是 `up`：
-    #    run 是前台阻塞、退出码即压测成败，天然给出同步点，
-    #    不必靠轮询容器状态猜「跑完了没」。
-    print(f"[e2e] 压测发送量下限 = {MIN_SENT} 条（理论 {ROBOTS * 10 * DURATION} 的一半）",
+    # 4) Run a controlled-duration stress test inside the container. Use `compose run` rather than `up`:
+    #    run is foreground-blocking and its exit code is the stress result, giving a natural sync point
+    #    instead of polling container state to guess "did it finish".
+    print(f"[e2e] stress send-volume floor = {MIN_SENT} rows (half of theoretical {ROBOTS * 10 * DURATION})",
           flush=True)
     stress_started = time.monotonic()
     compose(
@@ -264,17 +276,18 @@ def run_e2e() -> dict:
         timeout=STRESS_TIMEOUT_S,
     )
     evidence["stress_seconds"] = round(time.monotonic() - stress_started, 1)
-    print(f"[e2e] 压测结束（{evidence['stress_seconds']}s）", flush=True)
+    print(f"[e2e] stress finished ({evidence['stress_seconds']}s)", flush=True)
 
-    # 5) 等后端把在飞批次刷完。
-    #    双重触发是「满 500 条 **或** 满 1s」，最后一小批最多等 1s 才刷盘
-    #    （backend_ingestion/app/services/batch_writer.py）。这里不能裸 sleep 一个拍脑袋值，
-    #    而要等到队列真空 + 计数不再增长，否则会得到「行数少一点」的假失败。
+    # 5) Wait for the backend to flush in-flight batches.
+    #    The dual trigger is "every 500 rows **or** every 1s", and the last small batch waits up to 1s
+    #    to flush (backend_ingestion/app/services/batch_writer.py). We must not bare-sleep some
+    #    made-up value here; we wait until the queue is empty AND the count stops growing, otherwise
+    #    we get a false failure of "slightly fewer rows".
     health = wait_writer_drained()
     evidence["health_after"] = health
-    print(f"[e2e] /healthz（落定后）= {json.dumps(health, ensure_ascii=False)}", flush=True)
+    print(f"[e2e] /healthz (settled) = {json.dumps(health, ensure_ascii=False)}", flush=True)
 
-    # 6) 库内取证（真实 SQL 计数，不看日志）
+    # 6) In-DB evidence (real SQL counts, not logs)
     after = int(psql("SELECT count(*) FROM robot_telemetry;") or 0)
     dup_groups = int(psql(
         "SELECT count(*) FROM ("
@@ -303,39 +316,42 @@ def run_e2e() -> dict:
         "is_hypertable": hypertable,
         "timescaledb_version": db_version,
     })
-    print(f"[e2e] 库内取证：after={after} delta={after - before} "
+    print(f"[e2e] in-DB evidence: after={after} delta={after - before} "
           f"dup_pk_groups={dup_groups} pk=({pk_defined}) "
           f"hypertable={hypertable} tsdb={db_version}", flush=True)
 
-    # 7) 指标命名反例探针（订单 32）：栈还活着，顺手抓一次真实 /metrics 的原始字节。
-    #    放在落库取证之后：先保证主链路可用，再验命名 ——
-    #    否则「服务根本没起来」会被误报成「命名有问题」。
+    # 7) Metric-naming anti-example probe (Order 32): the stack is alive, so grab the real /metrics
+    #    raw bytes while we're here. Done after the landing evidence: ensure the main chain works
+    #    before verifying naming -- otherwise "the service never came up" would be misreported as
+    #    "naming problem".
     assert_metric_naming(METRICS_URL, METRICS_PREFIX)
 
-    # 8) cagg 实时聚合回填（栈还活着，复用真 TimescaleDB）：
-    #    R-13 的 `/history` 两条数据源 + R-16 的 `robot_status_10s`（看板最新态）。
-    #    为什么并入这里而不是另起一套栈：CI 的 e2e stage 只跑本文件，栈起一次成本已付；
-    #    另起一套只为跑几条 count 断言是浪费（R-13 文档 §7 明确允许「并入现有 e2e」，
-    #    R-16 沿用同一接入方式）。
-    #    断言主体在 test_cagg_realtime_backfill.py，本文件把**自己的** psql 传进去，
-    #    与 30k 落库共用同一容器连接（同一 `-U postgres -d robot_monitor`）。
-    #    一旦有人把 init.sql §5.1c（R-13）或 §5.1d（R-16）的 `SET (materialized_only = false)`
-    #    删掉/改回 true，这里立即红 —— 这就是这两个需求要挂的回归警报。
+    # 8) cagg real-time aggregation backfill (stack alive, reuse real TimescaleDB):
+    #    R-13's two `/history` data sources + R-16's `robot_status_10s` (dashboard latest state).
+    #    Why fold it in here rather than bring up a separate stack: CI's e2e stage only runs this file,
+    #    and the stack-up cost is already paid; a separate stack just to run a few count assertions is
+    #    wasteful (R-13 doc §7 explicitly allows "fold into the existing e2e", and R-16 reuses the same
+    #    integration). The assertion body lives in test_cagg_realtime_backfill.py; this file passes its
+    #    **own** psql in, sharing the same container connection (same `-U postgres -d robot_monitor`)
+    #    with the 30k landing. The moment someone deletes or flips back to true the
+    #    `SET (materialized_only = false)` in init.sql §5.1c (R-13) or §5.1d (R-16), this goes red
+    #    immediately -- that is the regression alarm these two requirements hang on.
     from test_cagg_realtime_backfill import assert_cagg_realtime_backfill  # noqa: PLC0415
 
     evidence["cagg_realtime_backfill"] = assert_cagg_realtime_backfill(
         psql_fn=psql, robot_id=ROBOT_ID, rows=BACKFILL_ROWS)
-    print(f"[e2e] cagg 实时回填（R-13 /history ×2 + R-16 看板最新态）："
+    print(f"[e2e] cagg real-time backfill (R-13 /history x2 + R-16 dashboard latest state): "
           f"{evidence['cagg_realtime_backfill']}", flush=True)
 
     return evidence
 
 
 def wait_writer_drained(timeout: int = 60) -> dict:
-    """等 BatchWriter 队列排空、计数稳定。
+    """Wait until the BatchWriter queue drains and counts stabilize.
 
-    判定「稳定」而不是「队列为 0」：队列瞬时为 0 也可能刚好在两批之间，
-    下一批还没进来。取连续两次 1s 间隔内 `rows_submitted` 不变 才算落定。
+    Judge "stable" rather than "queue is 0": the queue being momentarily 0 could also be right
+    between two batches before the next one comes in. Conclude settled only when `rows_submitted`
+    is unchanged across two consecutive 1s intervals.
     """
     deadline = time.monotonic() + timeout
     prev = None
@@ -351,77 +367,83 @@ def wait_writer_drained(timeout: int = 60) -> dict:
         time.sleep(1)
     last = backend_health()
     raise AssertionError(
-        f"BatchWriter 在 {timeout}s 内未排空/未稳定（最后 /healthz：{last}）。"
-        "队列持续积压说明落库速率跟不上 1000 msg/s，需要看 /metrics。"
+        f"BatchWriter did not drain/stabilize within {timeout}s (last /healthz: {last}). "
+        "A persistently backed-up queue means the landing rate cannot keep up with 1000 msg/s; "
+        "check /metrics."
     )
 
 
 def teardown() -> None:
     if KEEP:
-        print("[e2e] E2E_KEEP=1，保留栈（手动清理："
-              f"docker compose -f {COMPOSE_FILE} down -v）", flush=True)
+        print("[e2e] E2E_KEEP=1, keeping the stack (manual cleanup: "
+              f"docker compose -f {COMPOSE_FILE} down -v)", flush=True)
         return
-    # down -v：连卷一起删。e2e 每次都要「全新库 + init.sql 重跑」，
-    # 留着卷会让上轮数据混进本轮计数（基线非 0 时阈值判定会失真）。
+    # down -v: delete volumes too. Each e2e needs a "brand-new DB + init.sql re-run";
+    # keeping the volume would mix last round's data into this round's counts (baseline non-zero
+    # would skew the threshold judgment).
     compose("down", "-v", "--remove-orphans", check=False, timeout=120)
 
 
-# ------------------------------------------------------------------ 断言
+# ------------------------------------------------------------------ assertions
 
 def assert_e2e(ev: dict) -> None:
-    # 0) 前置事实：确认我们连的是**真 TimescaleDB**，不是 PG 替身。
-    #    没有这条，后面的断言在「误连到一个普通 PG」时也会绿。
+    # 0) Precondition: confirm we are connected to a **real TimescaleDB**, not a PG stand-in.
+    #    Without this, the later assertions would still go green when "mistakenly connected to a plain PG".
     assert ev["is_hypertable"] == "1", (
-        "robot_telemetry 不是 hypertable —— 说明连到的不是运行了 init.sql 的 "
-        f"TimescaleDB（is_hypertable={ev['is_hypertable']!r}）。"
+        "robot_telemetry is not a hypertable -- meaning we are not connected to a TimescaleDB that "
+        f"ran init.sql (is_hypertable={ev['is_hypertable']!r})."
     )
     assert ev["pk_columns"] == "time,robot_id", (
-        "robot_telemetry 主键形状不对：期望 (time, robot_id)，"
-        f"实际 ({ev['pk_columns']!r})。PK 是「无冲突丢行」判定的锚点，必须先锚准。"
+        "robot_telemetry primary key shape is wrong: expected (time, robot_id), "
+        f"got ({ev['pk_columns']!r}). The PK is the anchor for the 'no conflict row loss' judgment, "
+        "so it must be anchored correctly first."
     )
-    assert ev["timescaledb_version"], "pg_extension 里查不到 timescaledb，DB 不是 TimescaleDB 实例"
+    assert ev["timescaledb_version"], "timescaledb not found in pg_extension; DB is not a TimescaleDB instance"
 
-    # 1) 行数阈值（ISSUE #60：>= 30000，禁止 ==）
+    # 1) Row-count threshold (ISSUE #60: >= 30000, `==` forbidden)
     assert ev["rows_delta"] >= MIN_ROWS, (
-        f"robot_telemetry 新增 {ev['rows_delta']} 行 < 阈值 {MIN_ROWS}"
-        f"（压测 {DURATION}s × {ROBOTS} 台 × 10Hz 期望 ≈ {ROBOTS * 10 * DURATION}）。"
-        f"基线 {ev['rows_before']} → 结束 {ev['rows_after']}。"
+        f"robot_telemetry added {ev['rows_delta']} rows < threshold {MIN_ROWS}"
+        f"(stress {DURATION}s x {ROBOTS} robots x 10Hz expected ~= {ROBOTS * 10 * DURATION})."
+        f"baseline {ev['rows_before']} -> end {ev['rows_after']}."
     )
 
-    # 2) 无 PK 冲突丢行 —— 库内事实侧
+    # 2) No PK-conflict row loss -- in-DB fact side
     assert ev["dup_pk_groups"] == 0, (
-        f"库内存在 {ev['dup_pk_groups']} 组重复的 (time, robot_id)，"
-        "说明写入路径的幂等性被破坏（ON CONFLICT 未生效或 PK 未建）。"
+        f"DB contains {ev['dup_pk_groups']} duplicate (time, robot_id) groups, "
+        "meaning the write path's idempotency is broken (ON CONFLICT not in effect or PK not built)."
     )
 
-    # 3) 无 PK 冲突丢行 —— 后端自报侧（rows_skipped 是静默丢行的唯一计数器）
+    # 3) No PK-conflict row loss -- backend self-report side (rows_skipped is the only silent row-loss counter)
     h: dict = ev["health_after"]
     assert h.get("rejected", 1) == 0, (
-        f"rejected={h.get('rejected')}：降级链 L3 判定有坏行被丢弃，属真丢数据。"
+        f"rejected={h.get('rejected')}: degradation-chain L3 judged bad rows discarded, a true data loss."
     )
     assert h.get("rows_skipped", 1) == 0, (
-        f"rows_skipped={h.get('rows_skipped')}：被 ON CONFLICT DO NOTHING 静默丢弃的行数非 0，"
-        "即「收到的数据没全部入库」。这正是 ISSUE #19 G2 定义的丢行证据。"
+        f"rows_skipped={h.get('rows_skipped')}: rows silently dropped by ON CONFLICT DO NOTHING is non-zero, "
+        "i.e. 'not all received data landed'. This is exactly the row-loss evidence defined by ISSUE #19 G2."
     )
     assert h.get("rows_written") == h.get("rows_submitted"), (
-        f"rows_written={h.get('rows_written')} != rows_submitted={h.get('rows_submitted')}："
-        "提交与入库不相等，存在丢行。"
+        f"rows_written={h.get('rows_written')} != rows_submitted={h.get('rows_submitted')}: "
+        "submitted and landed counts differ, row loss exists."
     )
-    assert h.get("db") == "up", f"结束态 /healthz db={h.get('db')}，DB 掉线，数据不完整"
+    assert h.get("db") == "up", f"final /healthz db={h.get('db')}, DB offline, data incomplete"
 
-    # 4) 交叉校验：库内新增行数不应 **大于** 后端自报入库行数多少。
-    #    两者口径不完全等价（若是复用栈，基线含上轮数据；后端计数是本进程累计），
-    #    故只做「库内未凭空多出」的方向性校验，避免造出脆弱断言。
+    # 4) Cross-check: in-DB added rows should not be **greater** than the backend's self-reported
+    #    landed rows by much. The two are not fully equivalent (when reusing a stack, the baseline
+    #    includes last round's data; the backend count is this process's cumulative), so we only do a
+    #    directional check of "DB did not conjure extra rows", avoiding a fragile assertion.
     assert ev["rows_delta"] <= h.get("rows_written", 0) + 10, (
-        f"库内新增 {ev['rows_delta']} 行 > 后端自报入库 {h.get('rows_written')} 行（+10 容差），"
-        "说明有绕过后端计数的写入路径，或基线统计有误。"
+        f"in-DB added {ev['rows_delta']} rows > backend self-reported landed {h.get('rows_written')} "
+        f"rows (+10 tolerance), meaning there is a write path bypassing the backend count, or the "
+        f"baseline statistic is wrong."
     )
 
 
-# ------------------------------------------------------------------ 指标命名反例探针（订单 32）
+# ------------------------------------------------------------------ metric-naming anti-example probe (Order 32)
 
-# 订单 32 T1 的改前 `grep -rn robot_monitor_` 清单里，**曾被注册为指标**的 6 个旧名。
-# 它们是本探针的失败面：任何一个在真实 /metrics 里出现即 red。
+# The 6 old names that **were once registered as metrics** in Order 32 T1's pre-change `grep -rn
+# robot_monitor_` list. They are this probe's failure surface: any one appearing in the real
+# /metrics makes it red.
 LEGACY_MONITOR_METRICS = (
     "robot_monitor_batch_queue_size",
     "robot_monitor_batch_flush_total",
@@ -431,20 +453,24 @@ LEGACY_MONITOR_METRICS = (
     "robot_monitor_history_latency_seconds",
 )
 
-# 改后必须存在的规范名（订单 32 T2 的两个真正新增 + 消重后承接同源计数的 4 个）。
+# Canonical names that must exist after the change (Order 32 T2's two genuinely new ones + the 4 that
+# deduplicated and inherited the same-source counts).
 #
-# 分两组的原因（订单 34 实测）：prometheus_client 对**带 label 的 Counter**，
-# 在某个 label 组合**尚未被观测到**时**不导出任何样本行**（连 0 值行都没有）——
-# 它的时间序列是「首次 `.labels(...).inc()` 时才诞生」的。
-# 实证：PR #111 首次 CI（构建 cnb-dr0-1k4pbtmr7-002）的命名探针在**刚 up -d 完、
-# 零遥测**的栈上跑，报 `缺少规范名 ['robot_backend_batch_flushes_total']` ——
-# 而该指标在 `backend_ingestion/app/metrics.py:77` 明明已注册（`labelnames=("reason",)`），
-# 只是那一批 `{reason=count|timeout}` 还没发生过任何一次刷批。
-# 这是**探针判据的事实错误**（把「无 series」当成「指标不存在」），不是服务缺陷。
-# 故拆两类：无 label 的必须随时在；带 label 的只在「已发生事件」后要求 ——
-# 30k 落库路径（本文件 run_e2e() 第 7 步）跑在**压测之后**，那时刷批必然已发生，
-# 因此对它的要求**不打折**；只有 CI 里那条零流量的独立 `--metric-naming-check`
-# 允许它们缺席（并由调用方显式声明 allow_unemitted=True，不许默认放宽）。
+# Reason for splitting into two groups (Order 34 empirical): prometheus_client, for a **Counter with
+# labels**, exports **no sample line at all** (not even a 0-value line) until a particular label
+# combination **has been observed** -- its time series is "born on first `.labels(...).inc()`".
+# Evidence: PR #111's first CI (build cnb-dr0-1k4pbtmr7-002) ran the naming probe on a stack that had
+# just finished `up -d` with **zero telemetry** and reported `missing canonical name
+# ['robot_backend_batch_flushes_total']` -- yet that metric is clearly registered in
+# `backend_ingestion/app/metrics.py:77` (`labelnames=("reason",)`); it is just that no
+# `{reason=count|timeout}` flush batch had happened yet that round.
+# This is a **probe-criterion factual error** (treating "no series" as "metric does not exist"), not a
+# service defect. Hence the split into two classes: unlabeled ones must always be present; labeled ones
+# are only required after "an event has occurred" -- the 30k landing path (step 7 of run_e2e() in this
+# file) runs **after** the stress test, by which time flushes have necessarily happened, so its
+# requirement is **not relaxed**; only the zero-traffic standalone `--metric-naming-check` in CI may
+# allow their absence (and the caller must explicitly declare allow_unemitted=True; default relaxation
+# is forbidden).
 REQUIRED_BACKEND_METRICS = (
     "robot_backend_queue_depth",
     "robot_backend_telemetry_written_total",
@@ -453,20 +479,21 @@ REQUIRED_BACKEND_METRICS = (
     "robot_backend_history_latency_seconds",
 )
 
-# 带 label 的 Counter：有事件才导出。见上段说明，不在「随时在位」之列。
+# Labeled Counter: only exported when an event occurs. See above; not in the "always present" class.
 LABELED_BACKEND_METRICS = (
     "robot_backend_batch_flushes_total",
 )
 
 
 def metric_lines(metric_name_prefix: str, text: str) -> list[tuple[str, str]]:
-    """从 /metrics 文本里提取指标行。
+    """Extract metric lines from /metrics text.
 
-    为什么必须有这一层：`metrics.py` 的头部注释里**有意保留**旧名的迁移记录
-    （把「旧名已作废」写下来，比删掉它更有用）。直接 `in` 全文断言会把注释
-    误判成违规指标，从而造出一个「永远红」的假门禁 —— 这类门禁最坏的结局是被人加
-    `|| true` 关掉。这里只认指标行：Prometheus exposition 的指标行形如
-    `name{suffix}?[ ][value]`，注释行以 `#` 开头（含 `# HELP` / `# TYPE`）。
+    Why this layer is necessary: `metrics.py`'s header comment **intentionally keeps** the old-name
+    migration record (writing down "old name deprecated" is more useful than deleting it). A direct
+    `in` over the whole text would misjudge the comment as a violating metric, creating a "permanently
+    red" fake gate -- the worst fate of such a gate is someone adding `|| true` to disable it. Here we
+    only recognize metric lines: Prometheus exposition metric lines look like `name{suffix}?[ ][value]`,
+    while comment lines start with `#` (incl. `# HELP` / `# TYPE`).
     """
     out = []
     for line in text.splitlines():
@@ -484,34 +511,36 @@ def metric_lines(metric_name_prefix: str, text: str) -> list[tuple[str, str]]:
 
 
 def assert_metric_naming(url: str, prefix: str, allow_unemitted: bool = False) -> None:
-    """对真实服务断言：规范名在、旧名消失。
+    """Assert against the real service: canonical names present, old names gone.
 
-    取值的两种失败必须分开报：
-      - HTTP 拿不到（探针从没跑成）→ skip 并说明，不伪装成通过；
-      - HTTP 拿到了但内容不合口径（旧名还在 / 新名缺了）→ **red**。
-    后者是本探针存在的唯一理由：它是一道**反例门禁**，
-    不能因为它「只是顺路加的」就在断言失败时退化成 skip。
+    The two failure modes of fetching must be reported separately:
+      - HTTP unreachable (the probe never ran) -> skip and explain, do not fake a pass;
+      - HTTP reached but content violates the criterion (old name still there / new name missing) -> **red**.
+    The latter is the only reason this probe exists: it is an **anti-example gate** and must not degrade
+    into a skip when the assertion fails just because "it was only added along the way".
 
-    allow_unemitted：仅用于**零流量**的独立探针调用（CI 里刚 up -d 完就跑的那种）。
-    为 True 时，带 label 的 Counter（LABELED_BACKEND_METRICS）缺席只记信息不判红 ——
-    因为它们「有事件才导出」，零流量下缺席是**正确行为**而非回归。
-    30k 落库路径（压测之后调用）必须传 False（默认），要求全量在位。
+    allow_unemitted: only for the **zero-traffic** standalone probe call (the kind CI runs right after
+    `up -d`). When True, the absence of labeled Counters (LABELED_BACKEND_METRICS) is recorded as info
+    without going red -- because they are "exported only on event", so absence under zero traffic is
+    **correct behavior**, not a regression. The 30k landing path (called after the stress test) must pass
+    False (the default), requiring the full set to be present.
     """
     text = http_get(url)
     if text is None:
         _pytest_skip(
-            f"指标命名探针无法访问 {url}（backend:8000 的 /metrics）。"
-            "若服务未起来，wait_backend_db_up 已先失败；此处属探针未配好。"
+            f"metric-naming probe cannot reach {url} (backend:8000's /metrics). "
+            "If the service did not come up, wait_backend_db_up already failed first; this is a probe "
+            "misconfiguration."
         )
         return
 
     shown = metric_lines(prefix, text)
-    # 命中判据必须**逐族**而不是逐名字面量：Prometheus exposition 里
-    #   - Counter / Gauge / Summary 有 `robot_backend_x <v>` 这样以名字开头的裸样本行；
-    #   - **Histogram 没有** —— 它只有 `robot_backend_x_bucket{le=...}` / `_count` / `_sum`。
-    # 第一版写成 `name == "robot_backend_history_latency_seconds"` 就永远命中不了，
-    # 造出一道「离线正例都过不去」的假门禁（本文件外加实测抓出来的）。
-    # 故判据改为「名字本身，或名字 + `_` 后跟细分后缀」。
+    # The hit criterion must be **per family**, not per literal name: in Prometheus exposition
+    #   - Counter / Gauge / Summary have bare sample lines like `robot_backend_x <v>` starting with the name;
+    #   - **Histogram has none** -- it only has `robot_backend_x_bucket{le=...}` / `_count` / `_sum`.
+    # The first version wrote `name == "robot_backend_history_latency_seconds"` and could never hit,
+    # creating a fake gate that "even offline positive cases cannot pass" (caught by this file's extra
+    # empirical testing). So the criterion became "the name itself, or name + `_` followed by a subdivided suffix".
     names_here = {ln["name"] for ln in shown}
 
     def _hits(metric: str) -> list[dict]:
@@ -520,29 +549,30 @@ def assert_metric_naming(url: str, prefix: str, allow_unemitted: bool = False) -
 
     leaked = [m for m in LEGACY_MONITOR_METRICS if _hits(m)]
     assert not leaked, (
-        f"真实 /metrics 残留旧前缀指标 {leaked}（订单 32 验收：旧名必须消失）。"
-        f"实测原始行：{[ln['raw'] for m in leaked for ln in _hits(m)][:5]}"
+        f"real /metrics still has legacy-prefix metrics {leaked} (Order 32 acceptance: old names must vanish)."
+        f"Actual raw lines: {[ln['raw'] for m in leaked for ln in _hits(m)][:5]}"
     )
     missing = [m for m in REQUIRED_BACKEND_METRICS if not _hits(m)]
-    # 带 label 的 Counter 只在「已发生事件」后才导出；零流量探针允许其缺席，
-    # 但必须**打印出来**（静默放过与明确记录是两回事，本单反复强调这条界线）。
+    # Labeled Counters are only exported after "an event has occurred"; zero-traffic probes allow their
+    # absence, but they must be **printed** (silently letting them pass vs. explicitly recording are two
+    # different things; this ticket repeatedly stresses that boundary).
     unemitted = [m for m in LABELED_BACKEND_METRICS if not _hits(m)]
     if unemitted and not allow_unemitted:
         missing = missing + unemitted
     if unemitted and allow_unemitted:
-        print(f"[e2e] 指标命名探针：带 label 指标尚未导出（本轮零流量，属预期）：{unemitted}",
+        print(f"[e2e] metric-naming probe: labeled metrics not yet exported (zero traffic this round, expected): {unemitted}",
               flush=True)
     assert not missing, (
-        f"真实 /metrics 缺少规范名 {missing}（订单 32 验收：新名必须在）。"
-        f"该前缀下实测到 {len(names_here)} 个指标名，样本：{sorted(names_here)[:8]}"
+        f"real /metrics missing canonical names {missing} (Order 32 acceptance: new names must be present)."
+        f"Under this prefix, observed {len(names_here)} metric names, sample: {sorted(names_here)[:8]}"
     )
     total = len(REQUIRED_BACKEND_METRICS) + len(LABELED_BACKEND_METRICS) - len(unemitted)
-    print(f"[e2e] 指标命名探针通过：旧名前缀 0 命中，规范名 {total} 个在位",
+    print(f"[e2e] metric-naming probe passed: 0 legacy-prefix hits, {total} canonical names present",
           flush=True)
 
 
 def http_get(url: str, timeout: int = 5) -> str | None:
-    """取 URL 文本；失败返回 None（调用方决定 skip 还是 red）。"""
+    """Fetch URL text; return None on failure (caller decides skip or red)."""
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             return resp.read().decode("utf-8", "replace")
@@ -550,38 +580,38 @@ def http_get(url: str, timeout: int = 5) -> str | None:
         return None
 
 
-# ------------------------------------------------------------------ 报告
+# ------------------------------------------------------------------ report
 
 def render_report(ev: dict) -> str:
-    """产出可直接贴进 Issue/PR 的取证报告（SQL 计数 + 命令口径）。"""
+    """Produce an evidence report that can be pasted directly into an Issue/PR (SQL counts + command criteria)."""
     h = ev["health_after"]
     lines = [
-        "## e2e 30k 落库取证（真实 TimescaleDB）",
+        "## e2e 30k landing evidence (real TimescaleDB)",
         "",
-        f"- 栈：`tests/e2e/docker-compose.e2e.yml`（emqx:5.6 + **timescaledb {ev['timescaledb_version']}** + redis:7.2 + backend + mock_fleet）",
-        f"- 起栈耗时：{ev['up_seconds']}s；压测：{ev['stress_seconds']}s（{DURATION}s 受控时长）",
-        f"- `SQL> SELECT count(*) FROM robot_telemetry;` → 压测前 {ev['rows_before']} / 结束后 {ev['rows_after']}"
-        f"（**新增 {ev['rows_delta']}**，阈值 >= {MIN_ROWS}）",
-        f"- `SQL> SELECT count(*) FROM (... GROUP BY time, robot_id HAVING count(*)>1) t;` → **{ev['dup_pk_groups']}**（PK 冲突组）",
-        f"- `SQL> {('robot_telemetry 主键 = (' + ev['pk_columns'] + ')')}`；hypertable = {ev['is_hypertable']}",
-        f"- 后端 `/healthz` 丢行三元组：rows_submitted={h.get('rows_submitted')} / "
+        f"- Stack: `tests/e2e/docker-compose.e2e.yml` (emqx:5.6 + **timescaledb {ev['timescaledb_version']}** + redis:7.2 + backend + mock_fleet)",
+        f"- Stack-up time: {ev['up_seconds']}s; stress: {ev['stress_seconds']}s ({DURATION}s controlled duration)",
+        f"- `SQL> SELECT count(*) FROM robot_telemetry;` -> pre-stress {ev['rows_before']} / post {ev['rows_after']}"
+        f" (**added {ev['rows_delta']}**, threshold >= {MIN_ROWS})",
+        f"- `SQL> SELECT count(*) FROM (... GROUP BY time, robot_id HAVING count(*)>1) t;` -> **{ev['dup_pk_groups']}** (PK conflict groups)",
+        f"- `SQL> {('robot_telemetry PK = (' + ev['pk_columns'] + ')')}`; hypertable = {ev['is_hypertable']}",
+        f"- backend `/healthz` row-loss triple: rows_submitted={h.get('rows_submitted')} / "
         f"rows_written={h.get('rows_written')} / rows_skipped={h.get('rows_skipped')}"
-        f"；rejected={h.get('rejected')}；mqtt_dropped={h.get('mqtt_dropped')}",
+        f"; rejected={h.get('rejected')}; mqtt_dropped={h.get('mqtt_dropped')}",
         "",
-        "结论：**通过** —— 行数达标且无 PK 冲突丢行。",
+        "Conclusion: **PASS** -- row count meets threshold and no PK-conflict row loss.",
     ]
     return "\n".join(lines)
 
 
 def _pytest_skip(reason: str):
-    """在 pytest 与裸跑两种上下文里都 skip。
+    """Skip under both pytest and bare-run contexts.
 
-    实现注意（实测踩过）：不能只用 `import pytest` 判断上下文 ——
-    pytest **装在本环境里**，裸跑时那个 import 同样会成功，
-    于是 `main()` 里想「打印原因 + 退出码 3」的路径会变成 `pytest.skip()`
-    抛 `Skipped` 异常，直接糊在 traceback 上（本文件加 `--metric-naming-check`
-    时实测到了）。判据改用 `under_pytest()`（pytest 会把自身注入 sys.modules
-    且在**非 __main__** 的模块里执行用例）。
+    Implementation note (learned empirically): cannot judge the context by `import pytest` alone --
+    pytest **is installed in this environment**, so that import succeeds even when bare-running, and
+    then the `main()` path that wants "print reason + exit code 3" would become `pytest.skip()`
+    throwing a `Skipped` exception straight onto the traceback (encountered when adding
+    `--metric-naming-check` to this file). The criterion switches to `under_pytest()` (pytest injects
+    itself into sys.modules and runs tests in a module that is **not __main__**).
     """
     if under_pytest():
         import pytest  # noqa: PLC0415
@@ -592,7 +622,7 @@ def _pytest_skip(reason: str):
 
 
 def under_pytest() -> bool:
-    """当前是否由 pytest 驱动（而非 `python tests/e2e/test_e2e_30k.py` 裸跑）。"""
+    """Whether the current driver is pytest (rather than a bare `python tests/e2e/test_e2e_30k.py` run)."""
     return "pytest" in sys.modules and __name__ != "__main__"
 
 
@@ -611,45 +641,47 @@ def test_e2e_30k_landing() -> None:
 
 
 def dump_failure_logs() -> None:
-    """链路失败取证：抓 timescaledb / backend 两个关键容器的尾部日志。
+    """Chain-failure evidence: grab the tail logs of the timescaledb / backend key containers.
 
-    只在失败路径调用；`--tail` 限幅防刷屏。compose logs 对**已退出**的容器
-    同样有效（读 stdout 缓冲），故 DB init 中途崩掉（如 CAGG 建不出来）也抓得到。
-    2026-10-11 实测教训：仅凭「/healthz 180s 未到 db=up（快照 None）」无法区分
-    ①init.sql 建表失败 ②backend 容器启动即崩 ③backend 起了但连不上 DB ——
-    三者修法完全不同，必须让日志自己说话。
+    Only called on the failure path; `--tail` is capped to avoid flooding the screen. `compose logs`
+    also works on **already-exited** containers (reads the stdout buffer), so a DB init crash midway
+    (e.g. CAGG cannot be built) is still catchable. Lesson from 2026-10-11: relying only on
+    "/healthz not db=up within 180s (snapshot None)" cannot distinguish ①init.sql table creation
+    failed ②backend container crashed on startup ③backend started but cannot connect to DB -- the three
+    fixes are completely different, so the logs must speak for themselves.
     """
     for svc in ("timescaledb", "backend"):
         try:
             proc = compose("logs", "--tail=80", svc, timeout=30, check=False)
             print(f"\n===== compose logs {svc} (tail 80) =====", flush=True)
             print((proc.stdout or "")[-8000:] or "(no output)", flush=True)
-        except Exception as exc:  # 取证本身绝不允许改变退出码
-            print(f"(取证失败 {svc}: {exc})", flush=True)
+        except Exception as exc:  # evidence collection itself must never alter the exit code
+            print(f"(evidence collection failed {svc}: {exc})", flush=True)
 
 
 def main() -> int:
-    """无 pytest 时的入口：0=通过 1=断言失败 3=环境不具备（skip）。
+    """Entry point without pytest: 0=pass 1=assertion-fail 3=env-not-ready (skip).
 
-    另有 `--metric-naming-check`：**不**要求 docker，只对已在跑的栈做一次
-    订单 32 的命名反例断言。CI 里栈是 `docker compose up -d` 起来的
-    （不含 stress profile），用这个开关就能把命名门禁挂进已有 pipeline，
-    不必在 pytest 里重起一次栈。
+    There is also `--metric-naming-check`: does **not** require docker; it just runs Order 32's
+    naming anti-example assertion once against an already-running stack. In CI the stack is brought
+    up via `docker compose up -d` (without the stress profile), and this switch lets you hang the
+    naming gate into the existing pipeline without bringing up a stack again inside pytest.
     """
     if "--metric-naming-check" in sys.argv:
-        # 环境不具备 → 3（skip，CI 需转成 0 并打印原因）；断言失败 → 1（**必须 red**）。
+        # Env not ready -> 3 (skip; CI must convert to 0 and print the reason); assertion failed -> 1 (**must be red**).
         if not COMPOSE_FILE.is_file():
-            print(f"{PYTEST_SKIP_MARKER}: compose 文件不存在：{COMPOSE_FILE}", flush=True)
+            print(f"{PYTEST_SKIP_MARKER}: compose file does not exist: {COMPOSE_FILE}", flush=True)
             return 3
         try:
-            # allow_unemitted=True：本开关在**零流量**栈上跑（CI 的 up -d 之后、压测之前），
-            # 带 label 的 Counter 尚未诞生属正确行为。旧名残留 / 无 label 名缺失仍判红。
-            # 30k 落库路径（run_e2e 第 7 步，压测之后）用默认 False，要求全量在位。
+            # allow_unemitted=True: this switch runs on a **zero-traffic** stack (CI after `up -d`, before
+            # stress), where labeled Counters not yet born is correct behavior. Residual old names / missing
+            # unlabeled names still go red. The 30k landing path (run_e2e step 7, after stress) uses the
+            # default False, requiring the full set to be present.
             assert_metric_naming(METRICS_URL, METRICS_PREFIX, allow_unemitted=True)
         except AssertionError as exc:
-            print(f"[e2e] 指标命名门禁未通过：{exc}", flush=True)
+            print(f"[e2e] metric-naming gate not passed: {exc}", flush=True)
             return 1
-        except E2ESkip as exc:  # assert_metric_naming 内部走 _pytest_skip，这里兜底
+        except E2ESkip as exc:  # assert_metric_naming internally goes through _pytest_skip; catch here
             print(f"{PYTEST_SKIP_MARKER}: {exc}", flush=True)
             return 3
         return 0
@@ -663,7 +695,7 @@ def main() -> int:
     try:
         ev = run_e2e()
     except AssertionError as exc:
-        print(f"[e2e] 链路失败：{exc}", flush=True)
+        print(f"[e2e] chain failed: {exc}", flush=True)
         dump_failure_logs()
         teardown()
         return 1
@@ -671,8 +703,8 @@ def main() -> int:
     try:
         assert_e2e(ev)
     except AssertionError as exc:
-        print(f"[e2e] 断言未通过：{exc}", flush=True)
-        print("\n取证快照：\n" + render_report(ev), flush=True)
+        print(f"[e2e] assertion failed: {exc}", flush=True)
+        print("\nEvidence snapshot:\n" + render_report(ev), flush=True)
         teardown()
         return 1
 

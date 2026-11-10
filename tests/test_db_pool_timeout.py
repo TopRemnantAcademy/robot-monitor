@@ -1,46 +1,54 @@
-"""回归测试：DB 未就绪时，建池必须是**有界失败**，不能挂死。
+"""Regression test: when the DB is not ready, pool creation must be a **bounded failure**,
+not a hang.
 
-为什么需要这个测试
-------------------
-线上症状（CNB 流水线 `e2e-30k-landing`，构建 `cnb-05c-1k4k55gpd`）：
+Why this test is needed
+----------------------
+Production symptom (CNB pipeline `e2e-30k-landing`, build `cnb-05c-1k4k55gpd`):
 
-    [e2e] 栈已起（54.2s）
-    [e2e] 链路失败：后端 /healthz 在 180s 内未达到 db=up（最后快照：None）
+    [e2e] stack up (54.2s)
+    [e2e] link failed: backend /healthz did not reach db=up within 180s (last snapshot: None)
 
-`最后快照：None` 说明 /healthz **一次都没答上来**，而不是答了 `db=down`。
-根因不在 e2e，而在后端的探活路径：
+`last snapshot: None` means /healthz **never answered once**, rather than answering
+`db=down`. The root cause is not in e2e but in the backend's liveness-probe path:
 
-1. asyncpg 0.32 起 `init_size` 是「建池即预连」（`app/db/pool.py` 引的官方
-   ``.. versionchanged:: 0.32.0``），它把 `connection.connect()` 的默认
-   **`timeout=60`** 带进建池过程（`asyncpg/connection.py` 的 `connect(..., timeout=60)`）；
-2. `backend_ingestion/app/db/session.py:get_pool()` 用的正是 `init_size=min_size=2`
-   —— 建池即预连 2 条；
-3. 建池在**探活路径**上：`/healthz` → `_db_healthy()` → `ping()` → `get_pool()`。
+1. From asyncpg 0.32, `init_size` means "connect at pool-creation time" (the official
+   ``.. versionchanged:: 0.32.0`` referenced in `app/db/pool.py`), which brings
+   the default **`timeout=60`** of `connection.connect()` into the pool-creation process
+   (`asyncpg/connection.py`'s `connect(..., timeout=60)`);
+2. `backend_ingestion/app/db/session.py:get_pool()` uses exactly `init_size=min_size=2`
+   -- so pool creation pre-connects 2 connections;
+3. Pool creation sits **on the liveness-probe path**: `/healthz` -> `_db_healthy()` ->
+   `ping()` -> `get_pool()`.
 
-三者叠加：DB 未就绪时每次探测阻塞 60s；探针/编排器的超时一旦取消到那句
-`await create_pool(...)`，池没有建成、`_pool` 也没被赋值，下一次探测从头再等 60s
-—— `db=up` 永远不会到达。**加一个建池超时**即变成有界失败（8s 抛 TimeoutError
-→ `ping()` 返回 False → `/healthz` 老实报 `db=down` → 下个周期自愈）。
+Combined: each probe blocks 60s when the DB is not ready; once the probe/orchestrator's
+timeout cancels at the `await create_pool(...)` line, the pool is not built and `_pool`
+is not assigned, so the next probe waits another 60s from scratch -- `db=up` is never
+reached. **Adding a pool-creation timeout** turns it into a bounded failure (raise
+TimeoutError at 8s -> `ping()` returns False -> `/healthz` honestly reports `db=down`
+-> self-heals next cycle).
 
-本测试盯住的就是"这个护栏还在不在"，因为它是**静默**的：删掉 `timeout=` 后
-功能测试全绿，只有 DB 慢启动时才炸，且炸法（探针挂死）离因很远。
+What this test watches is "is that guardrail still there", because it is **silent**:
+after deleting `timeout=`, all functional tests stay green; it only blows up on slow DB
+startup, and the failure mode (probe hang) is far from the cause.
 
-依赖与口径
-----------
-- **不依赖 Docker / 真实 PostgreSQL**：用一个「连不上的地址」触发建池失败即可。
-  用**黑洞地址**（RFC 5737 TEST-NET）而不是 `127.0.0.1:1`，因为后者是
-  `ConnectionRefusedError` 立刻返回，**测不出 60s** 这个关键量。
-- 建池超时下限放得很宽（默认 25s）：CI 机器可能慢；只要"远小于 60s"就算护栏还在。
-  真正要区分的是 `0~10s`（有护栏）与 `60s`（无护栏），两者差 6 倍以上。
-- 反向验证过：删掉 `timeout=` 后本测试会因 60s > 25s 而 FAIL（见 PR 描述）。
+Dependencies and conventions
+----------------------------
+- **No Docker / real PostgreSQL needed**: just trigger pool-creation failure with an
+  "unreachable address". Use a **blackhole address** (RFC 5737 TEST-NET) instead of
+  `127.0.0.1:1`, because the latter returns `ConnectionRefusedError` immediately and
+  **cannot surface the critical 60s** value.
+- The pool-creation timeout upper bound is set generously (default 25s): CI machines may
+  be slow; as long as it is "far below 60s" the guardrail is considered present. What
+  truly matters is distinguishing `0~10s` (with guardrail) from `60s` (without), a >6x gap.
+- Verified in reverse: after deleting `timeout=`, this test FAILs because 60s > 25s (see PR).
 
-运行
-----
-    python -m pytest tests/test_db_pool_timeout.py -v      # 有 pytest 时
-    python tests/test_db_pool_timeout.py                   # 无 pytest 时（自带 main）
+Run
+---
+    python -m pytest tests/test_db_pool_timeout.py -v      # with pytest
+    python tests/test_db_pool_timeout.py                   # without pytest (has its own main)
 
-依赖：asyncpg（与运行期同版本）+ 标准库。**无 asyncpg 时 skip（退出码 3）**，
-不把"没装依赖"伪装成失败。
+Dependencies: asyncpg (same version as runtime) + standard library. **Skip when asyncpg is
+absent (exit code 3)** -- do not masquerade "deps not installed" as a failure.
 """
 
 from __future__ import annotations
@@ -59,45 +67,46 @@ ALERT_POOL_PY = ROOT / "alert_engine" / "app" / "pool.py"
 ALERT_DB_PY = ROOT / "alert_engine" / "app" / "db.py"
 ALERT_CONFIG_PY = ROOT / "alert_engine" / "app" / "config.py"
 
-# RFC 5737 TEST-NET-1：保证不可达、且**不是**立刻 refused（那会掩盖 60s 病征）。
+# RFC 5737 TEST-NET-1: guaranteed unreachable, and **not** immediately refused (that would mask the 60s symptom).
 BLACKHOLE_DSN = "postgresql://u:p@192.0.2.1:5432/robot_monitor"
-# 建池超时的上限。远低于 asyncpg 默认的 60s，也远高于本仓默认的 8s。
+# Upper bound of pool-creation timeout. Far below asyncpg's default 60s, yet far above this repo's default 8s.
 MAX_ACCEPTABLE_POOL_TIMEOUT_S = 25.0
-# 本仓默认建池超时（与 backend_ingestion/app/config.py 的 db_connect_timeout_s 对齐）
+# This repo's default pool-creation timeout (aligned with backend_ingestion/app/config.py's db_connect_timeout_s)
 EXPECTED_DEFAULT_TIMEOUT_S = 8.0
 
 
-# 环境不具备时的信号。**两套运行方式都要认**：
-#   - `python tests/<file>.py`（自带 main 的脚本 runner）：把 Skip 当作 skip，退出码 3；
-#   - `python -m pytest`：pytest 只认它自己的 `Skipped`，自定义异常会被记成 FAILED。
-#     所以这里让 Skip 直接继承 `pytest.skip.Exception`（pytest 可用时），
-#     使「缺依赖」在两种入口下都表现为 skip 而不是红。
-try:  # pragma: no cover - 取决于是否装了 pytest
+# Signal used when the environment is not available. **Both run modes must honor it**:
+#   - `python tests/<file>.py` (script runner with its own main): treats Skip as skip, exit code 3;
+#   - `python -m pytest`: pytest only honors its own `Skipped`; a custom exception is recorded as FAILED.
+#     So here Skip directly inherits `pytest.skip.Exception` (when pytest is available) so that
+#     "missing dependency" appears as skip rather than red under both entry points.
+try:  # pragma: no cover - depends on whether pytest is installed
     from _pytest.outcomes import Skipped as _PytestSkipped
 
     class Skip(_PytestSkipped):  # type: ignore[misc]
-        """环境不具备 —— 不是代码失败（pytest 下表现为 SKIPPED）。"""
-except Exception:  # noqa: BLE001 - 无 pytest 时退回普通异常，脚本 runner 仍可用
+        """Environment not available -- not a code failure (appears as SKIPPED under pytest)."""
+except Exception:  # noqa: BLE001 - fall back to a plain exception when pytest is absent; script runner still works
     class Skip(Exception):  # type: ignore[no-redef]
-        """环境不具备 —— 不是代码失败。"""
+        """Environment not available -- not a code failure."""
 
 
 def _asyncpg():
     try:
         import asyncpg  # noqa: PLC0415
-    except ModuleNotFoundError as exc:  # pragma: no cover - 取决于环境
+    except ModuleNotFoundError as exc:  # pragma: no cover - depends on environment
         raise Skip(
-            "未安装 asyncpg，无法实测建池阻塞时长。"
-            "需要：pip install asyncpg==0.32.0（与 backend_ingestion/requirements.txt 同版本）。"
+            "asyncpg not installed; cannot measure real pool-creation blocking time. "
+            "Need: pip install asyncpg==0.32.0 (same version as backend_ingestion/requirements.txt)."
         ) from exc
     return asyncpg
 
 
 def test_asyncpg_default_connect_timeout_is_60() -> None:
-    """把你我引用的那个「60」钉成可执行事实，防止 asyncpg 改了默认值后注释变谎话。
+    """Pin the referenced "60" as an executable fact, so a changed asyncpg default does not turn the comment into a lie.
 
-    仓库多处注释都写着「connection.connect() 的默认 timeout=60」。这条断言让
-    那句话有机器可证的落点：默认值变了，测试先红，人再去改注释。
+    Many repo comments say "connection.connect()'s default timeout=60". This assertion gives
+    that statement a machine-verifiable anchor: if the default changes, the test goes red first
+    and a human updates the comment.
     """
     asyncpg = _asyncpg()
     import inspect  # noqa: PLC0415
@@ -105,18 +114,19 @@ def test_asyncpg_default_connect_timeout_is_60() -> None:
     sig = inspect.signature(asyncpg.connection.connect)
     default = sig.parameters["timeout"].default
     assert default == 60, (
-        f"asyncpg.connection.connect 的 timeout 默认值已变成 {default!r}（不再是 60）。"
-        "请同步修正 app/db/session.py 与 app/db/pool.py 里关于「默认 60s」的注释，"
-        "并重新评估 db_connect_timeout_s 的取值。"
+        f"asyncpg.connection.connect's timeout default changed to {default!r} (no longer 60). "
+        "Please update the 'default 60s' comments in app/db/session.py and app/db/pool.py, "
+        "and re-evaluate the value of db_connect_timeout_s."
     )
-    assert asyncpg.__version__, "asyncpg.__version__ 为空，无法记录实测版本"
+    assert asyncpg.__version__, "asyncpg.__version__ is empty; cannot record the measured version"
 
 
 def test_backend_create_pool_passes_timeout() -> None:
-    """`backend_ingestion/app/db/session.py` 建池必须显式带 `timeout=`。
+    """`backend_ingestion/app/db/session.py`'s pool creation must explicitly pass `timeout=`.
 
-    这条是**静态**断言（AST 解析真实调用点），不依赖网络：即使 CI 里跑不到
-    黑洞地址也不会漏掉「有人把 timeout 删了」。
+    This is a **static** assertion (AST-parsing the real call site), independent of the
+    network: even if CI cannot reach the blackhole address, it will not miss "someone deleted
+    the timeout".
     """
     src = SESSION_PY.read_text(encoding="utf-8")
     tree = ast.parse(src)
@@ -126,38 +136,38 @@ def test_backend_create_pool_passes_timeout() -> None:
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "create_pool"
     ]
-    assert calls, f"{SESSION_PY} 里找不到 asyncpg.create_pool() 调用点"
+    assert calls, f"No asyncpg.create_pool() call site found in {SESSION_PY}"
     for call in calls:
         kwargs = {kw.arg for kw in call.keywords}
         assert "init_size" not in kwargs, (
-            "backend 的写路径建池用了 init_size —— 那是「建池即预连」，"
-            "会把 connection.connect() 的默认 timeout=60 带进来，"
-            "必须同时给出 timeout=（或改用 app/db/pool.py 的统一入口）。"
+            "backend's write-path pool creation uses init_size -- that is 'connect at pool creation', "
+            "which brings in connection.connect()'s default timeout=60. You must also pass timeout= "
+            "(or switch to app/db/pool.py's unified entry point)."
         )
         assert "timeout" in kwargs, (
-            f"{SESSION_PY}:{call.lineno} 的 create_pool() 没有 timeout= 参数。"
-            "asyncpg 0.32 下建池会走 connection.connect() 的默认 timeout=60："
-            "DB 未就绪时每次探测阻塞 60s，/healthz 会挂死而不是报 db=down。"
-            "请传 timeout=settings.db_connect_timeout_s。"
+            f"{SESSION_PY}:{call.lineno} create_pool() has no timeout= argument. "
+            "Under asyncpg 0.32, pool creation goes through connection.connect()'s default timeout=60: "
+            "each probe blocks 60s when the DB is not ready, and /healthz hangs instead of reporting db=down. "
+            "Pass timeout=settings.db_connect_timeout_s."
         )
 
 
 def test_backend_config_declares_connect_timeout() -> None:
-    """`db_connect_timeout_s` 必须真的存在于 Settings 上。
+    """`db_connect_timeout_s` must really exist on Settings.
 
-    本仓已有一次反面教材：`alert_engine/app/db.py` 引用了两个**从未声明**的
-    Settings 键（见下面 test_alert_settings_keys_declared），一碰就 AttributeError。
-    这里顺手把 backend 侧也钉住，不让同一类错误换个模块重演。
+    This repo already has a counterexample: `alert_engine/app/db.py` referenced two **never-declared**
+    Settings keys (see test_alert_settings_keys_declared below), which blow up with AttributeError on
+    first touch. Here we pin the backend side too, so the same class of error cannot reappear in another module.
     """
     src = BACKEND_CONFIG_PY.read_text(encoding="utf-8")
     assert re.search(r"^\s*db_connect_timeout_s\s*:\s*float\s*=", src, re.M), (
-        f"{BACKEND_CONFIG_PY} 未声明 db_connect_timeout_s —— "
-        "但 app/db/session.py 正引用它（缺声明会 AttributeError 起不来）。"
+        f"{BACKEND_CONFIG_PY} does not declare db_connect_timeout_s -- "
+        "but app/db/session.py references it (missing declaration => AttributeError on startup)."
     )
 
 
 def _declared_settings_keys(config_py: Path) -> set[str]:
-    """从 config.py 里抽出 BaseSettings 子类的已声明字段名（AST，不用正则硬凑）。"""
+    """Extract declared field names of the BaseSettings subclass from config.py (AST, not regex guessing)."""
     tree = ast.parse(config_py.read_text(encoding="utf-8"))
     keys: set[str] = set()
     for cls in ast.walk(tree):
@@ -169,7 +179,7 @@ def _declared_settings_keys(config_py: Path) -> set[str]:
             for b in cls.bases
         ):
             continue
-        # 有注解即为 pydantic 字段
+        # Any annotated field is a pydantic field.
         for stmt in cls.body:
             if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
                 keys.add(stmt.target.id)
@@ -177,36 +187,36 @@ def _declared_settings_keys(config_py: Path) -> set[str]:
 
 
 def test_alert_settings_keys_declared() -> None:
-    """`alert_engine/app/db.py` 引用的 settings 键必须都在 config.py 里声明过。
+    """Settings keys referenced by `alert_engine/app/db.py` must all be declared in config.py.
 
-    这是本仓**真实存在过**的缺陷（main 上就有，本测试连带修掉）：
-    `db.py:39-40` 读 `settings.db_pool_size` / `settings.db_command_timeout`，
-    而 `config.py` 里两个都没声明 → 本机实证：
+    This is a defect that **really existed** in this repo (present on main; this test fixes it too):
+    `db.py:39-40` reads `settings.db_pool_size` / `settings.db_command_timeout`, but neither is
+    declared in `config.py` -> local repro:
 
         asyncio.run(get_pool())
         AttributeError: 'Settings' object has no attribute 'db_pool_size'
 
-    单测发现不了，是因为 `alert_engine/tests/conftest.py` 把 `app.db` **整个 stub 掉**了。
-    所以这条必须用静态检查补上：它检验的是「引用与声明一致」这个契约。
+    Unit tests missed it because `alert_engine/tests/conftest.py` stubs out `app.db` **entirely**.
+    So this must be covered by static checking: what it verifies is the "references match declarations" contract.
     """
     declared = _declared_settings_keys(ALERT_CONFIG_PY)
-    assert declared, f"没能从 {ALERT_CONFIG_PY} 解析出任何 Settings 字段，检查解析逻辑"
+    assert declared, f"Could not parse any Settings fields from {ALERT_CONFIG_PY}; check the parsing logic"
 
     used = set(re.findall(r"settings\.([A-Za-z_][A-Za-z0-9_]*)", ALERT_DB_PY.read_text(encoding="utf-8")))
-    assert used, f"{ALERT_DB_PY} 里没找到 settings.<key> 引用点"
+    assert used, f"No settings.<key> reference points found in {ALERT_DB_PY}"
 
     missing = sorted(k for k in used if k not in declared)
     assert not missing, (
-        f"{ALERT_DB_PY} 引用了 {ALERT_CONFIG_PY} 未声明的 Settings 键：{missing}。"
-        "pydantic-settings 对缺声明字段不会给默认值，运行到就是 AttributeError。"
+        f"{ALERT_DB_PY} references Settings keys not declared in {ALERT_CONFIG_PY}: {missing}. "
+        "pydantic-settings gives no default for undeclared fields, so it is AttributeError at runtime."
     )
 
 
 def test_shared_pool_factory_has_connect_timeout_knob() -> None:
-    """`app/db/pool.py`（backend 与 alert_engine 各一份）必须暴露 connect_timeout 并透传。
+    """`app/db/pool.py` (one copy each in backend and alert_engine) must expose connect_timeout and forward it.
 
-    这两份 pool.py 是「建池唯一入口」的封装。护栏必须建在**入口**上：
-    只修某一个调用点，下一个调用方照样能踩进 60s。
+    These two pool.py files wrap the "single pool-creation entry point". The guardrail must be
+    built at the **entry point**: fixing only one call site still lets the next caller step into 60s.
     """
     for path in (BACKEND_POOL_PY, ALERT_POOL_PY):
         src = path.read_text(encoding="utf-8")
@@ -215,12 +225,13 @@ def test_shared_pool_factory_has_connect_timeout_knob() -> None:
             n for n in ast.walk(tree)
             if isinstance(n, ast.AsyncFunctionDef) and n.name == "create_pool"
         ]
-        assert fns, f"{path} 里找不到 async create_pool()"
+        assert fns, f"No async create_pool() found in {path}"
         fn = fns[0]
         params = {a.arg for a in fn.args.kwonlyargs} | {a.arg for a in fn.args.args}
         assert "connect_timeout" in params, (
-            f"{path}: create_pool() 未暴露 connect_timeout 参数 —— "
-            "调用方就没有办法给建池设上限，只能吃 connection.connect() 的默认 60s。"
+            f"{path}: create_pool() does not expose a connect_timeout parameter -- "
+            "the caller has no way to set an upper bound on pool creation and can only eat "
+            "connection.connect()'s default 60s."
         )
 
         call = next(
@@ -232,21 +243,21 @@ def test_shared_pool_factory_has_connect_timeout_knob() -> None:
             ),
             None,
         )
-        assert call is not None, f"{path}: create_pool() 内部没找到 asyncpg.create_pool() 调用"
+        assert call is not None, f"{path}: no asyncpg.create_pool() call found inside create_pool()"
         kwnames = {kw.arg for kw in call.keywords}
         assert "timeout" in kwnames, (
-            f"{path}: 内部 asyncpg.create_pool() 没有透传 timeout= —— "
-            "connect_timeout 形参成了摆设，60s 病征照旧。"
+            f"{path}: the inner asyncpg.create_pool() does not forward timeout= -- "
+            "the connect_timeout parameter becomes a no-op and the 60s symptom remains."
         )
 
 
 def test_pool_build_time_is_bounded() -> None:
-    """**实测**：对不可达地址建池必须在 MAX_ACCEPTABLE_POOL_TIMEOUT_S 内失败。
+    """**Empirical**: pool creation against an unreachable address must fail within MAX_ACCEPTABLE_POOL_TIMEOUT_S.
 
-    用法与 `backend_ingestion/app/db/session.py:get_pool()` 对齐
-    （`init_size=min_size=2`，即「建池即预连」那条路），只把地址换成黑洞地址。
-    这条是整套护栏的端到端证据：前面的静态断言只证明"参数写了"，
-    这条证明"写了确实管用"。
+    Usage aligned with `backend_ingestion/app/db/session.py:get_pool()`
+    (`init_size=min_size=2`, i.e. the "connect at pool creation" path), only the address is swapped
+    for the blackhole address. This is the end-to-end evidence for the whole guardrail: the static
+    assertions above only prove "the parameter is written", this one proves "writing it actually works".
     """
     asyncpg = _asyncpg()
     import asyncio  # noqa: PLC0415
@@ -261,50 +272,50 @@ def test_pool_build_time_is_bounded() -> None:
                 dsn=BLACKHOLE_DSN,
                 min_size=2,
                 max_size=10,
-                # 与 session.get_pool() 一致的写法（含 timeout）
+                # Same style as session.get_pool() (including timeout)
                 timeout=EXPECTED_DEFAULT_TIMEOUT_S,
             )
-            # 走到这里说明黑洞地址居然连上了（网络环境极不寻常），
-            # 不能算通过 —— 本测试的前提没成立。
+            # Reaching here means the blackhole address somehow connected (extremely unusual
+            # network env) -- this cannot count as passing, the test's premise is not met.
             await pool.close()
             observed["elapsed"] = time.monotonic() - started
             observed["result"] = "connected-unexpectedly"
-        except Exception as exc:  # noqa: BLE001 - 任何异常都算「有界失败」，类型不重要
+        except Exception as exc:  # noqa: BLE001 - any exception counts as "bounded failure"; type is irrelevant
             observed["elapsed"] = time.monotonic() - started
             observed["result"] = type(exc).__name__
 
     asyncio.run(probe())
     elapsed = float(observed["elapsed"])
     print(
-        f"  [实证] 对 {BLACKHOLE_DSN.split('@')[-1]} 建池："
-        f"{observed['result']}，耗时 {elapsed:.2f}s",
+        f"  [empirical] pool creation against {BLACKHOLE_DSN.split('@')[-1]}: "
+        f"{observed['result']}, took {elapsed:.2f}s",
         flush=True,
     )
 
     assert observed["result"] != "connected-unexpectedly", (
-        f"黑洞地址 {BLACKHOLE_DSN} 竟然连通了，本测试前提不成立。"
-        "请换一个确定不可达的地址（保持 RFC 5737 网段）。"
+        f"Blackhole address {BLACKHOLE_DSN} actually connected; the test premise is not met. "
+        "Pick a definitely-unreachable address (keep the RFC 5737 range)."
     )
     assert elapsed < MAX_ACCEPTABLE_POOL_TIMEOUT_S, (
-        f"建池耗时 {elapsed:.2f}s，超过上限 {MAX_ACCEPTABLE_POOL_TIMEOUT_S}s。\n"
-        f"这几乎就是 asyncpg `connection.connect()` 的默认 timeout=60 —— "
-        f"说明建池超时护栏失效了：DB 未就绪时 /healthz 会被拖死，"
-        f"报不出 db=down 也等不到 db=up。\n"
-        f"修法：create_pool(..., timeout=<小于 60 的值>)，见 "
-        f"{SESSION_PY.relative_to(ROOT)}。"
+        f"Pool creation took {elapsed:.2f}s, exceeding the upper bound {MAX_ACCEPTABLE_POOL_TIMEOUT_S}s.\n"
+        f"This is essentially asyncpg `connection.connect()`'s default timeout=60 -- "
+        f"meaning the pool-creation timeout guardrail is dead: when the DB is not ready, /healthz "
+        f"gets dragged down, cannot report db=down and never reaches db=up.\n"
+        f"Fix: create_pool(..., timeout=<value less than 60>), see "
+        f"{SESSION_PY.relative_to(ROOT)}."
     )
 
 
 def main() -> int:
     checks = [
-        ("asyncpg connect 默认 timeout 仍为 60（注释有据）",
+        ("asyncpg connect default timeout still 60 (comment-backed)",
          test_asyncpg_default_connect_timeout_is_60),
-        ("backend 建池显式带 timeout=", test_backend_create_pool_passes_timeout),
-        ("backend Settings 声明 db_connect_timeout_s", test_backend_config_declares_connect_timeout),
-        ("alert_engine 引用的 Settings 键都已声明", test_alert_settings_keys_declared),
-        ("两份 pool.py 都暴露并透传 connect_timeout",
+        ("backend pool creation explicitly passes timeout=", test_backend_create_pool_passes_timeout),
+        ("backend Settings declares db_connect_timeout_s", test_backend_config_declares_connect_timeout),
+        ("alert_engine's referenced Settings keys are all declared", test_alert_settings_keys_declared),
+        ("both pool.py expose and forward connect_timeout",
          test_shared_pool_factory_has_connect_timeout_knob),
-        ("实测：建池阻塞时长有界（< 25s）", test_pool_build_time_is_bounded),
+        ("empirical: pool-creation blocking time is bounded (< 25s)", test_pool_build_time_is_bounded),
     ]
     failed = 0
     skipped = 0
@@ -318,8 +329,8 @@ def main() -> int:
         except AssertionError as exc:
             failed += 1
             print(f"  FAIL  {name}\n        {exc}")
-    print(f"\n{len(checks) - failed - skipped}/{len(checks)} 通过"
-          f"{f'，{skipped} 跳过' if skipped else ''}")
+    print(f"\n{len(checks) - failed - skipped}/{len(checks)} passed"
+          f"{f', {skipped} skipped' if skipped else ''}")
     if failed:
         return 1
     return 3 if skipped == len(checks) else 0
