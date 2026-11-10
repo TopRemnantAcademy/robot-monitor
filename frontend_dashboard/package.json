@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "license": "AGPL-3.0",
   "type": "module",
-  "description": "100 台人形机器人工厂监控大屏（spec/03）",
+  "description": "100-robot humanoid factory monitoring dashboard (spec/03)",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
