@@ -1,13 +1,13 @@
-# 应用层叠加（overlay）—— 把后端与告警引擎**真正跑进容器网络**。
+# App-layer overlay — actually runs the backend and alert-engine inside the container network.
 #
-# 为什么这个文件是「连接」的关键：
-#   Prometheus 的抓取目标写的是 `backend:8000` / `alert-engine:8001`，
-#   这是 Docker 网络里的 service DNS。若应用跑在宿主机上（现状），
-#   这两个名字**根本解析不到**，两个 job 永远 up=0，
-#   规则文件里的 BackendDown / AlertEngineDown 会永久误报。
-#   所以「装了 exporter」不等于「接上了」—— 必须把应用也放进同一个网络。
+# Why this file is the key to "wiring things up":
+#   Prometheus scrape targets are written as `backend:8000` / `alert-engine:8001`,
+#   which are Docker-network service DNS names. If the app runs on the host (current setup),
+#   these names simply don't resolve, so both jobs stay up=0 forever,
+#   and the BackendDown / AlertEngineDown rules in the rules file will false-alarm permanently.
+#   So "installed the exporter" != "wired it up" — the app must also be in the same network.
 #
-# 用法（三层叠加）：
+# Usage (three-layer overlay):
 #   docker compose \
 #     -f infra/docker-compose.yml \
 #     -f infra/docker-compose.app.yml \
@@ -22,23 +22,24 @@ services:
     image: robot-monitor-backend:local
     container_name: robot-monitor-backend
     ports:
-      - "8000:8000"          # /healthz、/robots、/ws/robots
+      - "8000:8000"          # /healthz, /robots, /ws/robots
     environment:
-      # 服务名即 DNS：mqtt/redis/tsdb 三个组件来自基础 compose
+      # Service name is DNS: mqtt/redis/tsdb come from the base compose
       MQTT_BROKER: emqx
       MQTT_PORT: "1883"
       REDIS_URL: redis://redis:6379
       DATABASE_URL: postgresql://postgres:postgres@timescaledb:5432/robot_monitor
       BATCH_TRIGGER_COUNT: "500"
       BATCH_TRIGGER_SECONDS: "1.0"
-      # 认证密钥（订单 15）。**从宿主机 .env 透传，不写死在这** ——
-      # 写死等于把密钥烘焙进 compose 文件（AGENTS.md §5 禁止）。
-      # `${JWT_SECRET:?…}` 的 `:?` 让未设置时 compose 直接报错退出，
-      # 而不是起一个用空密钥签 token 的后端（那等于没有鉴权）。
-      JWT_SECRET: "${JWT_SECRET:?JWT_SECRET 未设置：请在宿主机 .env 里配置（openssl rand -hex 32）}"
+      # Auth secret (order 15). **Passed through from host .env, not hardcoded here** —
+      # Hardcoding bakes the secret into the compose file (forbidden by AGENTS.md §5).
+      # The `:?` in `${JWT_SECRET:?…}` makes compose fail and exit if it's unset,
+      # instead of starting a backend that signs tokens with an empty secret (i.e. no auth).
+      JWT_SECRET: "${JWT_SECRET:?JWT_SECRET not set: configure it in host .env (openssl rand -hex 32)}"
       JWT_LIFETIME_SECONDS: "${JWT_LIFETIME_SECONDS:-28800}"
-      # 本地开发：允许单独起的前端（Vite :5173）跨源访问后端（CORS_ALLOW_ORIGINS
-      # 对应 backend_ingestion/app/config.py。默认空 = 不挂 CORS 中间件，同源部署即可）。
+      # Local dev: allow a separately-started frontend (Vite :5173) cross-origin access to the backend
+      # (CORS_ALLOW_ORIGINS corresponds to backend_ingestion/app/config.py. Empty default = no CORS
+      # middleware mounted, same-origin deployment is fine).
       CORS_ALLOW_ORIGINS: "${CORS_ALLOW_ORIGINS:-}"
     depends_on:
       emqx:

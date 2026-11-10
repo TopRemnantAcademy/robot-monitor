@@ -1,28 +1,28 @@
-# backend_ingestion（订单 03）
+# backend_ingestion (Order 03)
 
-100 台人形机器人 10Hz 遥测的高并发采集与存储服务（FastAPI + aiomqtt + asyncpg + Redis）。
+High-concurrency ingestion and storage service for 10 Hz telemetry from 100 humanoid robots (FastAPI + aiomqtt + asyncpg + Redis).
 
-## 运行
+## Running
 
 ```bash
 pip install -r requirements.txt
-# 本地（需先起 infra/docker-compose.yml）
+# local (start infra/docker-compose.yml first)
 uvicorn app.main:app --host 0.0.0.0 --port 8000
-# Docker（CMD 与本地一致：WORKDIR /app/backend_ingestion + app.main:app）
+# Docker (CMD matches local: WORKDIR /app/backend_ingestion + app.main:app)
 docker build -t robot-monitor-backend ..
 ```
 
-## 接口契约
+## API contract
 
-| 类型 | 路径 | 说明 |
+| Type | Path | Description |
 | :--- | :--- | :--- |
-| WS | `/ws/robots` | 首帧 `type:"snapshot"`（100 台），之后 `type:"telemetry"` 增量 + `type:"alert"` 告警 |
-| GET | `/robots` | 100 台最新状态（WS 之外兜底） |
-| GET | `/robots/{id}/history?minutes=5&resolution=10s` | Drawer 折线 + 关节热力图数据 |
-| GET | `/healthz` | 健康检查：`status` 反映依赖可达性（`ok`/`degraded`），含 `db` / `retries` / `rejected` / 丢行三元组 `rows_submitted|rows_written|rows_skipped` |
-| GET | `/metrics` | Prometheus 文本格式（`text/plain; version=0.0.4`），供 `infra/observability/prometheus.yml` 的 `robot_backend` job 抓取 |
+| WS | `/ws/robots` | First frame `type:"snapshot"` (100 robots), then `type:"telemetry"` deltas + `type:"alert"` alerts |
+| GET | `/robots` | Latest state of 100 robots (fallback outside WS) |
+| GET | `/robots/{id}/history?minutes=5&resolution=10s` | Drawer line chart + joint heatmap data |
+| GET | `/healthz` | Health check: `status` reflects dependency reachability (`ok`/`degraded`), includes `db` / `retries` / `rejected` / dropped-row triple `rows_submitted|rows_written|rows_skipped` |
+| GET | `/metrics` | Prometheus text format (`text/plain; version=0.0.4`), scraped by the `robot_backend` job in `infra/observability/prometheus.yml` |
 
-### WS 信封（spec/00 §5.2，强制）
+### WS envelope (spec/00 §5.2, mandatory)
 
 ```jsonc
 {"type":"snapshot","data":{"robots":[/* RobotTelemetry */]}}
@@ -30,115 +30,80 @@ docker build -t robot-monitor-backend ..
 {"type":"alert","data":{"robot_id":"...","rule_id":"...","severity":3,"message":"..."}}
 ```
 
-> 后端**必须**订阅 Redis `robot:alerts` 并以 `type:"alert"` 转发，否则前端告警流永远为空。
+> The backend **must** subscribe to Redis `robot:alerts` and forward it as `type:"alert"`, otherwise the frontend alert stream will always be empty.
 
-## 性能护栏（不可违反）
+## Performance guardrails (non-negotiable)
 
-- **严禁逐条 INSERT**：`batch_writer` 用 `asyncio.Queue` 双重触发
-  （积压 ≥500 条 **或** 距上次刷盘 >1.0s）批量写入。
-- `asyncio.Lock` 保护刷盘临界区；`graceful_shutdown()` 关闭前强制刷完残留（靠 `_STOP` 哨兵
-  唤醒阻塞在 `queue.get()` 的 `run()`，**不能用 cancel**，否则最后一批在飞数据会丢）。
-- **刷盘必须有硬超时**：本机对 PostgreSQL 15.19 实测，表被另一会话
-  `LOCK TABLE ... ACCESS EXCLUSIVE` 占住时，批量写入会挂起且**无视** `command_timeout`
-  （连接级设 5s 也照样挂 >25s）。挂住的后果是采集链路静默停摆，
-  故刷批统一加 `asyncio.wait_for` 上限：宁可丢一批 + 打 error 日志，也不堵死消费循环。
-- 计数出口：`/healthz` 给瞬时快照，`/metrics` 给 Counter/Gauge（Prometheus 才能算 `rate()`）。
+- **Never INSERT row-by-row**: `batch_writer` uses an `asyncio.Queue` with dual triggers (backlog ≥500 rows **or** >1.0s since last flush) to batch writes.
+- `asyncio.Lock` protects the flush critical section; `graceful_shutdown()` force-flushes leftovers before closing (wakes the `run()` blocked on `queue.get()` via the `_STOP` sentinel; **do not use cancel**, otherwise the last in-flight batch is lost).
+- **Flush must have a hard timeout**: tested locally against PostgreSQL 15.19 — when a table is held by another session's `LOCK TABLE ... ACCESS EXCLUSIVE`, batch writes hang and **ignore** `command_timeout` (even a 5s connection-level timeout still hangs >25s). The consequence of hanging is a silently stalled ingestion pipeline, so all flush batches add an `asyncio.wait_for` cap: better to drop a batch + log an error than to block the consume loop.
+- Counting outputs: `/healthz` gives an instantaneous snapshot, `/metrics` gives Counters/Gauges (so Prometheus can compute `rate()`).
 
-### robot_metadata 心跳（G-6 / ISSUE #96）
+### robot_metadata heartbeat (G-6 / ISSUE #96)
 
-`robot_metadata.is_online / last_seen` 的批量写方是
-`app/services/metadata_writer.py`，从 `state_cache.write_and_publish()` 投递
-（与 `liveness.record()` 同一时点）。它遵守同一套护栏：
+The bulk writer for `robot_metadata.is_online / last_seen` is `app/services/metadata_writer.py`, fed from `state_cache.write_and_publish()` (same timing as `liveness.record()`). It follows the same guardrails:
 
-- **按 robot_id 折叠**：1000 msg/s（100 台 × 10Hz）在 1s 窗口内只折算成 ≤100 行；
-- **单语句批量**：`UPDATE ... FROM unnest($1::text[], $2::timestamptz[])`，
-  1000 条遥测 → **恰好 1 次**库往返（不是 executemany、更不是 for 循环）；
-- **`last_seen` 取服务端时钟**：不取 payload 的 `ts`（客户端时钟偏差 / 重放 / 离线缓发
-  会让同轮离线扫描把它刚写 TRUE 的行立刻翻回 FALSE —— 实测踩过）；
-- 开关 `METADATA_HEARTBEAT_ENABLED=false` 时 `run()` 直接退出、`flush()` 不发语句，
-  既有遥测写路径的语义与吞吐不受影响。
-- 计数出口：`/healthz` 的 `metadata` 字段（`flushes` / `rows_written` / `offline_marks` / `deduped`）。
+- **Fold by robot_id**: 1000 msg/s (100 robots × 10Hz) collapses to ≤100 rows within a 1s window;
+- **Single-statement batch**: `UPDATE ... FROM unnest($1::text[], $2::timestamptz[])`, 1000 telemetry rows → **exactly 1** round-trip (not executemany, and certainly not a for loop);
+- **`last_seen` uses the server clock**: not the payload's `ts` (client clock skew / replay / offline buffering would cause the same offline scan to flip a row it just wrote TRUE back to FALSE — hit in practice);
+- When the switch `METADATA_HEARTBEAT_ENABLED=false`, `run()` exits immediately and `flush()` issues no statement; the semantics and throughput of the existing telemetry write path are unaffected.
+- Counting output: the `metadata` field of `/healthz` (`flushes` / `rows_written` / `offline_marks` / `deduped`).
 
-## 写入降级链（写路径的核心设计）
+## Write degradation chain (core design of the write path)
 
-spec/01 §4.2 允许 `copy_records_to_table` **或** 批量 `execute`。本机实测两者吞吐都在
-70k~200k 行/s，相对 1000 行/s 峰值有两个数量级冗余 —— **吞吐不是选型依据，容错才是**。
-实测出的三个硬事实决定了实现必须分级：
+spec/01 §4.2 allows `copy_records_to_table` **or** a bulk `execute`. Locally tested, both achieve 70k~200k rows/s, two orders of magnitude over the 1000 rows/s peak — **throughput is not the selection criterion; fault tolerance is**.
 
-1. `copy_records_to_table` **不支持 `ON CONFLICT`**，重复批次抛 `UniqueViolationError`；
-   而重试恰恰会重复提交同一批 → 幂等必须靠临时表中转。
-2. COPY 传 `dict` 会 `TypeError: expected str, got dict` → JSONB 列必须传 JSON 文本。
-3. **单行坏数据连坐整批**（COPY / executemany 都是批级原子）。
+Three hard facts from testing force the implementation to be tiered:
 
-故实现三级降级链（见 `app/services/batch_writer.py`）：
+1. `copy_records_to_table` **does not support `ON CONFLICT`**; a repeated batch raises `UniqueViolationError`; but retries exactly re-submit the same batch → idempotency must go through a temp table.
+2. Passing a `dict` to COPY raises `TypeError: expected str, got dict` → JSONB columns must be passed as JSON text.
+3. **One bad row sinks the whole batch** (COPY / executemany are both batch-atomic).
 
-| 级 | 路径 | 特性 |
+So a three-tier degradation chain is implemented (see `app/services/batch_writer.py`):
+
+| Tier | Path | Characteristic |
 | :-- | :--- | :--- |
-| L1 | COPY → 临时表 → `INSERT ... SELECT ... ON CONFLICT DO NOTHING` | 快、**幂等**、批级原子 |
-| L2 | `executemany(INSERT ... ON CONFLICT DO NOTHING)` | 慢一档的兜底 |
-| L3 | 二分隔离坏行 | 坏行丢进 `rejected`，**好数据保住** |
+| L1 | COPY → temp table → `INSERT ... SELECT ... ON CONFLICT DO NOTHING` | fast, **idempotent**, batch-atomic |
+| L2 | `executemany(INSERT ... ON CONFLICT DO NOTHING)` | slower fallback |
+| L3 | binary-isolate bad rows | bad rows go to `rejected`, **good data is preserved** |
 
-> 为什么必须有 L3：一批 500 条时，一行脏 payload 若不隔离就等于每 0.5 秒丢 500 条遥测。
+> Why L3 is necessary: with a batch of 500, one dirty payload, if not isolated, means losing 500 telemetry rows every 0.5s.
 
-`/healthz` 与 `/metrics` 暴露的计数口径：
+`/healthz` and `/metrics` exposed accounting:
 
-| 字段 | 含义 | 口径注意 |
+| Field | Meaning | Accounting note |
 | :--- | :--- | :--- |
-| `retries` | 重试次数 | 持续增长说明 DB 不稳 |
-| `rejected` | 被 L3 判定不可写而丢弃的坏行数 | **非 0 就是丢数据** |
-| `rows_submitted` | 提交给落库的行数 | 三者的分子 |
-| `rows_written` | 真正入库的行数 | L1 走 `INSERT 0 N` 的 affected rows |
-| `rows_skipped` | 被 `ON CONFLICT DO NOTHING` 静默丢弃的行数 | = `submitted - written` |
+| `retries` | Retry count | steady growth means the DB is unstable |
+| `rejected` | count of bad rows dropped because L3 judged them unwritable | **non-zero means data loss** |
+| `rows_submitted` | rows handed to the storage layer | numerator of the three |
+| `rows_written` | rows actually stored | L1 uses `INSERT 0 N` affected rows |
+| `rows_skipped` | rows silently dropped by `ON CONFLICT DO NOTHING` | = `submitted - written` |
 
-> 注：`feat/order-08` / `fix/issue19-merge-safe` 的分支版本里有一个 `flush_failures`
-> 计数器，**main 版本没有，本次也没有新增**（未定义即不写，避免自造指标）。
+> Note: the `feat/order-08` / `fix/issue19-merge-safe` branch versions had a `flush_failures` counter, **the main version does not, and this round added none** (undefined means not written, to avoid inventing metrics).
 
-> `rows_skipped` 是「收到的数据没全部入库」的**直接证据**（ISSUE #19 G2）。
-> 此前 `written += len(rows)` 计的是**提交行数**，静默丢行完全不可见 —— 行数偏少时只能猜。
-> 本机实测（PostgreSQL 15.19）：10 行提交两次 → `submitted=20 / written=10 / skipped=10`，
-> 与库内真实 10 行一致。
+> `rows_skipped` is **direct evidence** that "received data did not all land" (ISSUE #19 G2). Previously `written += len(rows)` counted **submitted rows**, so silently dropped rows were completely invisible — when the count was low you could only guess. Local test (PostgreSQL 15.19): submit 10 rows twice → `submitted=20 / written=10 / skipped=10`, matching the real 10 rows in the DB.
 >
-> **已知口径缺口**：L2 路径的 `executemany` 不回传逐行 affected rows，
-> 故走 L2 时 `rows_skipped` 恒为 0。量化以 L1 为准；L2 只在 L1 连续失败后启用（罕见）。
-- MQTT 断线指数退避重连（上限 30s），**不改为固定间隔**；`aiomqtt.Client` 实例在重连循环外构造、循环内复用（官方 `reconnection.md`：Client 可复用但不可重入）。
-- 依赖 `aiomqtt==2.5.1`。此前写过「2.0.1 的 `Client.__aexit__` 吞异常导致重连不执行」，
-  **该结论已撤稿**（方向性错误）：实测 v2.0.1→v2.5.0 源码 diff，2.0.1 是 `raise exc`，
-  2.5.0 反而**删掉了**它。两个版本重连都能工作，真实差异是 2.0.1 会二次抛出并掩盖原始栈。
-  证据见 `external/ORDER12-VERIFICATION.md` §2。
-- 校验失败的消息**丢弃并计数**，不阻塞队列。
+> **Known accounting gap**: the L2 path's `executemany` does not return per-row affected rows, so `rows_skipped` is always 0 on L2. Quantify against L1; L2 is only enabled after L1 fails repeatedly (rare).
+- MQTT disconnect uses exponential-backoff reconnect (cap 30s), **not a fixed interval**; the `aiomqtt.Client` instance is constructed outside the reconnect loop and reused inside it (official `reconnection.md`: Client is reusable but not reentrant).
+- Depends on `aiomqtt==2.5.1`. Previously wrote that "2.0.1's `Client.__aexit__` swallowed the exception and prevented reconnect", **that conclusion is withdrawn** (directionally wrong): source diff v2.0.1→v2.5.0 shows 2.0.1 had `raise exc`, while 2.5.0 **removed** it. Both versions reconnect fine; the real difference is 2.0.1 re-raises and masks the original stack. Evidence in `external/ORDER12-VERIFICATION.md` §2.
+- Messages that fail validation are **dropped and counted**, not queued.
 
-## 连接池（`app/db/session.py`）
+## Connection pool (`app/db/session.py`)
 
-`asyncpg==0.32.0` 把 `min_size` 从「建池时预建几条」改成了「空闲时的**连接地板**」，
-原来的预建语义挪给新参数 `init_size`。本服务的读路径（`/healthz` 探活、`/history`）
-与写路径（`batch_writer`）并发到达，踩过两个坑，均已修并留护栏：
+`asyncpg==0.32.0` changed `min_size` from "pre-create a few at pool creation" to "idle-time **connection floor**", moving the pre-create semantics to the new param `init_size`. This service's read path (`/healthz` health probe, `/history`) and write path (`batch_writer`) arrive concurrently; two pitfalls were hit, both fixed and guarded:
 
-1. **`max_size` 不能等于 `min_size`。** 三值相等时池在并发下**不扩容**：
-   本机实测 40 个并发 `acquire()`，池大小恒为设定值，超出的协程全部阻塞在
-   `_queue.get()` —— 池退化成信号量。（反证：`min_size=2, max_size=10` 同场景涨到 10。）
-2. **建池必须串行化。** `get_pool()` 的 `if _pool is None` 是 check-then-act，
-   而 `create_pool()` 会 `await` 让出事件循环 —— 并发调用方会各建一个池。
-   告警引擎实测过：ticker 首轮 100 台机器人同时进来 → 建出 **100 个池** →
-   `TooManyConnectionsError` **332 次**。故加 `asyncio.Lock` + 二次检查。
-   （此坑服务侧对称存在，`alert_engine/app/db.py` 同样修了。）
+1. **`max_size` must not equal `min_size`.** When all three are equal the pool **does not scale** under concurrency: locally tested 40 concurrent `acquire()`, the pool size stayed at the set value and the excess coroutines all blocked on `_queue.get()` — the pool degraded into a semaphore. (Proof by contradiction: `min_size=2, max_size=10` grew to 10 in the same scenario.)
+2. **Pool creation must be serialized.** `get_pool()`'s `if _pool is None` is check-then-act, while `create_pool()` `await`s and yields the event loop — concurrent callers each build their own pool. The alert engine measured this: the ticker's first round with 100 robots arriving at once → **100 pools** built → `TooManyConnectionsError` **332 times**. Hence an `asyncio.Lock` + double-check was added. (This pit is symmetric on the service side; `alert_engine/app/db.py` fixed it too.)
 
-> 另注：`command_timeout` 只覆盖普通语句，**拦不住**被锁阻塞的批量写入（见上）。
+> Also note: `command_timeout` only covers ordinary statements, and **cannot stop** lock-blocked bulk writes (see above).
 
-## 关于 /history 的实现说明（ISSUE #76 修订）
+## Implementation notes on /history (ISSUE #76 revision)
 
-`spec/00 §4.3` 的 `robot_status_10s` **不含 JSONB 关节列**，而 Drawer 的热力图与
-第三条折线需要它们，故本端点此前一直直查 `robot_telemetry` 原始表并 `time_bucket`。
+`spec/00 §4.3`'s `robot_status_10s` **does not include JSONB joint columns**, but the Drawer's heatmap and third line chart need them, so this endpoint previously queried the raw `robot_telemetry` table directly and used `time_bucket`.
 
-ISSUE #76 新增了专用连续聚合 **`robot_history_10s`**（`infra/init.sql §5.1`，
-含 `joint_temperatures / joint_positions / joint_torques` 三列），`/history` 改为：
-**先查聚合 → 结果为空则回退原始表**。
+ISSUE #76 added a dedicated continuous aggregate **`robot_history_10s`** (`infra/init.sql §5.1`, with `joint_temperatures / joint_positions / joint_torques` columns); `/history` now does: **query the aggregate first → fall back to the raw table if empty**.
 
-- 为什么 JSONB 能进连续聚合：`last(value, time)` 首参是 **anyelement 多态**
-  （timescaledb `src/agg_bookend.c` 的 `ts_last_sfunc`），与 INTEGER 走同一路径；
-  内部 partialize 亦为 `ANYELEMENT`（`sql/partialize_finalize.sql`）。
-  原「缺列」是当初没写，不是能力不支持。
-- 为什么不复用 `robot_status_10s`：它已被 R-08 §A4 / `test_integration.sh` /
-  `tests/e2e` 三处断言，改列会动摇既有验收面；且两者消费方不同（看板最新态 vs 单机历史）。
-- 为什么保留回退：`WITH NO DATA` 的聚合在首次刷新前是空的，不回退则冷启动期曲线恒空。
-- 每条 SQL 列清单由 `tests/test_history_source.py` 逐字锁死（两分支不得漂移，
-  且三个关节列必须同时在），防「一侧加列另一侧漏列」的间歇故障。
+- Why JSONB can enter a continuous aggregate: the first arg of `last(value, time)` is **anyelement polymorphic** (timescaledb `src/agg_bookend.c`'s `ts_last_sfunc`), taking the same path as INTEGER; the internal partialize is also `ANYELEMENT` (`sql/partialize_finalize.sql`). The original "missing columns" was simply not written, not unsupported.
+- Why not reuse `robot_status_10s`: it is already asserted in three places — R-08 §A4 / `test_integration.sh` / `tests/e2e` — and changing columns would shake the existing acceptance surface; also the two serve different consumers (dashboard latest state vs single-robot history).
+- Why keep the fallback: a `WITH NO DATA` aggregate is empty before its first refresh; without fallback the cold-start period would always show an empty curve.
+- Each SQL column list is byte-locked by `tests/test_history_source.py` (both branches must not drift, and all three joint columns must appear together) to prevent intermittent failures from "one side adds a column, the other side misses it".

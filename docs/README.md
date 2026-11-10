@@ -1,11 +1,11 @@
 # RobotMonitor Documentation
 
 RobotMonitor is an international, open-source project. Documentation is kept in **English** as the
-lingua franca, with key entry points translated into **한국어** and **中文**.
+lingua franca, with key entry points translated into **Korean** and **Chinese**.
 
 ## Top-level entry points
 
-| Document | English | 한국어 | 中文 |
+| Document | English | Korean | Chinese |
 | :--- | :--- | :--- | :--- |
 | Project README (overview, quick start) | [README.md](../README.md) | [README.ko.md](../README.ko.md) | [README.zh.md](../README.zh.md) |
 | Contributor guide | [CONTRIBUTING.md](../CONTRIBUTING.md) | — | — |
@@ -21,7 +21,7 @@ The `spec/` directory holds six design specs that drive implementation:
 
 ## UI language support
 
-The dashboard supports **English (default) / 한국어 / 中文** via a live language switcher in the top
+The dashboard supports **English (default) / Korean / Chinese** via a live language switcher in the top
 header. Strings live in `frontend_dashboard/src/i18n/locales.ts`; resolve them with `useI18n()`.
 Server-supplied data (alert messages, robot names) is intentionally not translated.
 

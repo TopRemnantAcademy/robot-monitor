@@ -1,8 +1,8 @@
 fastapi==0.110.0
 uvicorn[standard]==0.28.0
-# ⚠️ pydantic / pydantic-settings 必须与 alert_engine/requirements.txt 完全一致：
-# CI 的 backend 作业把两份 requirements 装进**同一个 venv** 跑测试，分叉会导致
-# pip ResolutionImpossible（PR #25 / #20 曾因此红）。改这里必须同步改 alert_engine。
+# ⚠️ pydantic / pydantic-settings MUST stay exactly identical to alert_engine/requirements.txt:
+# CI's backend job installs both requirements files into **the same venv** to run tests; divergence causes
+# pip ResolutionImpossible (PR #25 / #20 went red for this reason). Changes here must be mirrored in alert_engine.
 pydantic==2.14.3
 pydantic-settings==2.16.2
 asyncpg==0.32.0
@@ -10,41 +10,42 @@ sqlalchemy[asyncio]==2.0.28
 redis[hiredis]==8.1.0
 aiomqtt==2.5.1
 websockets==17.4
-# prometheus-client 与 alert_engine 保持一致（0.26.0）；0.x 小版本间兼容。
-# ⚠️ 0.21.1 -> 0.26.0 把 /metrics 默认 exposition 从 version=0.0.4 改为 version=1.0.0
-# （并加 "; charset=utf-8" 后缀）。backend_ingestion/tests/test_auth.py 的 content-type
-# 断言已改为只校验 "text/plain" 前缀，跨版本不脆。保持与 alert_engine 一致可避免共享
-# venv 安装时的降/升版抖动（原本第二份 requirements 会把 0.26.0 再降到 0.21.1）。
+# prometheus-client kept in sync with alert_engine (0.26.0); 0.x minor versions are compatible.
+# ⚠️ 0.21.1 -> 0.26.0 changed the /metrics default exposition from version=0.0.4 to version=1.0.0
+# (and added the "; charset=utf-8" suffix). backend_ingestion/tests/test_auth.py's content-type
+# assertion now only checks the "text/plain" prefix, so it is not brittle across versions. Staying in sync with
+# alert_engine avoids down/up-grade churn when the shared venv is installed (the second requirements file used to
+# pull 0.26.0 back down to 0.21.1).
 prometheus-client==0.26.0
 
-# ---- 认证 / RBAC（订单 15）----
-# fastapi-users 12.1.3 是支持 pydantic v2 + fastapi 0.110 的版本线；
-# [sqlalchemy] extra 带入库适配器（SQLAlchemyUserDatabase）。
+# ---- Auth / RBAC (order 15) ----
+# fastapi-users 12.1.3 is the line that supports pydantic v2 + fastapi 0.110;
+# the [sqlalchemy] extra brings the DB adapter (SQLAlchemyUserDatabase).
 fastapi-users[sqlalchemy]==12.1.3
-# ⚠️ setuptools 必须钉 <81：passlib 1.7.4 在 `passlib/pwd.py:16` 无条件 `import pkg_resources`，
-# 而 **setuptools>=81 已移除 pkg_resources 模块**（官方原文：*"The pkg_resources package is
+# ⚠️ setuptools MUST be pinned <81: passlib 1.7.4 unconditionally does `import pkg_resources` at `passlib/pwd.py:16`,
+# while **setuptools>=81 has removed the pkg_resources module** (official wording: *"The pkg_resources package is
 # slated for removal as early as 2025-11-30. Refrain from using this package or pin to
-# Setuptools<81."*）。链式后果：`import fastapi_users` → `fastapi_users/password.py:3
+# Setuptools<81."*). Chain of failure: `import fastapi_users` → `fastapi_users/password.py:3
 # from passlib import pwd` → `passlib/pwd.py:16 import pkg_resources` →
-# ModuleNotFoundError → uvicorn 起不来。
-# 本机实测（Python 3.13.16 干净 venv）：setuptools 84.0.0 下上链必崩；80.9.0（<81）下
-# `import pkg_resources` 可用（仅 DeprecationWarning），`import fastapi_users` 返回 12.1.3。
-# 注意 python:3.11-slim 镜像虽自带 setuptools，但重建时会拉到最新版，故必须在此钉死。
-# 长期正解是移除 passlib（升级 fastapi-users>=13 走 pwdlib），见 orders/20-dispatch.md T4。
+# ModuleNotFoundError → uvicorn cannot start.
+# Local verification (Python 3.13.16 clean venv): under setuptools 84.0.0 the chain always crashes; under 80.9.0 (<81)
+# `import pkg_resources` works (only a DeprecationWarning), and `import fastapi_users` returns 12.1.3.
+# Note: although the python:3.11-slim image ships setuptools, a rebuild will pull the latest version, so it must be
+# pinned here. The long-term fix is to remove passlib (upgrade fastapi-users>=13 to use pwdlib); see orders/20-dispatch.md T4.
 setuptools<81
-# ⚠️ bcrypt 必须钉在 4.x：passlib 1.7.4（fastapi-users 的密码哈希后端）会读取
-# `bcrypt.__about__.__version__` 做后端探测，而 **bcrypt 5.0.0 删掉了 `__about__`**，
-# 于是 passlib 回退到 `detect_wrap_bug()` 探针，在探针里用 72+ 字节口令调 hashpw，
-# bcrypt 5.x 改为直接抛 ValueError → 注册/登录全部 500。
-# 本机实测：bcrypt 5.0.0 下 POST /auth/register 返回 500（ValueError: password
-# cannot be longer than 72 bytes）；降到 4.0.1 后 201。详见 PR 的「实测」章节。
+# ⚠️ bcrypt MUST be pinned to 4.x: passlib 1.7.4 (fastapi-users' password-hash backend) reads
+# `bcrypt.__about__.__version__` to probe the backend, but **bcrypt 5.0.0 removed `__about__`**,
+# so passlib falls back to the `detect_wrap_bug()` probe, which calls hashpw with a 72+ byte password,
+# and bcrypt 5.x instead raises ValueError directly → register/login all return 500.
+# Local verification: under bcrypt 5.0.0, POST /auth/register returns 500 (ValueError: password
+# cannot be longer than 72 bytes); after downgrading to 4.0.1 it returns 201. See the PR's "verification" section.
 bcrypt==4.0.1
 
-# ---- OpenTelemetry（订单 16 T3）----
-# 注意版本线：OTel Python 的 API/SDK 是 1.x，而 instrumentation 包是 0.x b 版。
-# `0.43b0` 是与 SDK `1.22.0` 配对的版本（instrumentation 包的元数据会钉住 SDK
-# 的 lower-bound；本机实测 4 个包同时安装、import 通过，见 PR「实测」章节）。
-# 走 OTLP/HTTP 而非 gRPC：4318 端口在多数内网放行，且不需要 grpcio 这棵依赖树。
+# ---- OpenTelemetry (order 16 T3) ----
+# Note the version lines: OTel Python's API/SDK is 1.x, while the instrumentation packages are 0.x beta.
+# `0.43b0` is the version paired with SDK `1.22.0` (the instrumentation package's metadata pins the SDK's
+# lower-bound; local verification confirmed all 4 packages install together and import fine, see PR "verification" section).
+# Use OTLP/HTTP rather than gRPC: port 4318 is allowed on most intranets, and it avoids the grpcio dependency tree.
 opentelemetry-sdk==1.22.0
 opentelemetry-exporter-otlp-proto-http==1.22.0
 opentelemetry-instrumentation-fastapi==0.43b0

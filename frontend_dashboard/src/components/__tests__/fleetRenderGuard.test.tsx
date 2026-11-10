@@ -1,6 +1,6 @@
 // Order 33 T2 —— fleet render guard regression test (100-card wall + health analytics strip).
 //
-// 【Which hole this test patches】
+// [Which hole this test patches]
 // AGENTS.md §3 frontend guardrail says "strictly forbid each WS message from triggering a React re-render; must throttle at 100ms".
 // Order 16 T2 already delivered the **online counter** (src/lib/observability.ts) —— but that's "run it and eyeball
 // the console" observation, with **no automated assertion at all**. So whoever someday changes the card's self-subscription back to subscribing to the whole Map,
@@ -8,7 +8,7 @@
 // and someone notices. This file nails that guardrail into a decidable red/green (Order 33's "conjecture: currently no test asserts
 // that the 100-card wall's render count doesn't explode linearly with fleet size" is confirmed true by this order; patched here).
 //
-// 【Choice of measurement instrument —— the part this file most needs to explain】
+// [Choice of measurement instrument —— the part this file most needs to explain]
 // Tried but **abandoned** Profiler: React.Profiler's onRender only reports "commits of the wrapped subtree",
 // measured "3 changed" and "100 changed" frames have **identical** Profiler callback counts (both 10,
 // once per frame) —— it can't count "how many cards re-rendered". Using it would make the threshold meaningless (self-deception).
@@ -21,7 +21,7 @@
 //      it self-increments in the **RobotGrid body** (FleetOverviewCards.tsx:116-118), counting "how many times the grid
 //      container re-rendered", decoupled from per-card rendering. The two complement each other, neither can be omitted.
 //
-// 【Threshold basis —— not pulled out of thin air】
+// [Threshold basis —— not pulled out of thin air]
 // 100 units × 10Hz = 1000 msg/s, compressed by useRobotWebSocket's 100ms throttle into 10 frames/s.
 // In one frame, "how many actually changed" (k) decides the **ideal** render ceiling, independent of fleet size N:
 //   · Idle frame (this frame's entries share references with state): applyTelemetryBatch detects no reference change,
@@ -34,7 +34,7 @@
 // If the implementation degenerates into subscribing to the whole Map: grid body cardRenders grows with frame count (== 1 + f), assertion 1 immediately red;
 // if it degenerates into no memo/no granularity: card render increment would be == N × f (1000), assertion k×f immediately red.
 //
-// 【Why not use vi.useFakeTimers】
+// [Why not use vi.useFakeTimers]
 // Order 33 prohibited item 5. Not needed here either —— what's under test is the causality of "store commit → React commit count",
 // independent of time. Just call applyTelemetryBatch directly to manufacture store-flush frames.
 

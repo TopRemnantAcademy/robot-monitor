@@ -1,58 +1,58 @@
-# 灾备叠加层（DR overlay）—— 与基础 compose 组合使用：
+# DR overlay (disaster recovery) — used in combination with the base compose:
 #
 #   docker compose \
 #     -f infra/docker-compose.yml \
 #     -f infra/ops/pgbackrest/docker-compose.dr.yml up -d
 #
-# 目标：给 timescaledb 做「定期全量 + 持续 WAL 归档」的物理备份，量化 RPO/RTO。
-# 完整论证与恢复步骤见 docs/DR-RUNBOOK.md。
+# Goal: give timescaledb physical backup of "periodic full + continuous WAL archiving", quantifying RPO/RTO.
+# Full rationale and recovery steps see docs/DR-RUNBOOK.md.
 #
-# ── 为什么是「替换 timescaledb 镜像 + 加一个 repo 边车」，而不是只加一个备份容器 ──
-# pgBackRest 的架构是**双端**的：PostgreSQL 主机与仓库(repository)主机**各自**都要有
-# pgbackrest 二进制与配置，且版本必须完全一致 —— 实证
+# ── Why "replace the timescaledb image + add a repo sidecar" rather than just adding a backup container ──
+# pgBackRest's architecture is **dual-host**: the PostgreSQL host and the repository host **each** need
+# pgbackrest binary and config, and versions must be exactly identical — verified:
 #   external/pgbackrest/doc/xml/user-guide.xml:2770
 #     "The pgBackRest version installed on the repository host must exactly match
 #      the version installed on the PostgreSQL host."
-# 而 PG 的 WAL 归档是通过 `archive_command = 'pgbackrest ... archive-push %p'` 触发的，
-# 这条命令**在 PG 主机本地执行** —— 所以 timescaledb 容器内必须有 pgbackrest 二进制。
-# 事实：基础 compose 用的 `timescale/timescaledb:2.13.1-pg16` 镜像**不含**它（见
-# `infra/ops/pgbackrest/README.md` 此前已记录）。故本 overlay 用派生镜像补上。
+# PG's WAL archiving is triggered via `archive_command = 'pgbackrest ... archive-push %p'`, and this command
+#   executes **locally on the PG host** — so the timescaledb container must have the pgbackrest binary.
+# Fact: the base compose's `timescale/timescaledb:2.13.1-pg16` image does **not** include it (recorded
+#   in `infra/ops/pgbackrest/README.md` earlier). Hence this overlay supplies it via a derived image.
 #
-# ── 凭证 ──
-# repo1-cipher-pass 从宿主机 .env 的 PGBACKREST_CIPHER_PASS 透传（AGENTS.md §5：禁止硬编码）。
-# 用 `${VAR:?msg}` 形式：未设置时 compose 直接报错退出，而不是起一个明文/空密钥的仓库。
+# ── Credentials ──
+# repo1-cipher-pass is passed through from the host .env's PGBACKREST_CIPHER_PASS (AGENTS.md §5: no hardcoding).
+# Use the `${VAR:?msg}` form: when unset, compose fails and exits, instead of starting a plaintext/empty-key repo.
 #
-# ⚠️ 本 overlay 目前**未在本仓端到端实跑**（本工作环境无 Docker），
-#    DR-RUNBOOK.md 有完整的「未验证」章节与所需条件。
+# ⚠️ This overlay is currently **not run end-to-end in this repo** (the work environment has no Docker);
+#    DR-RUNBOOK.md has a complete "unverified" section with the required conditions.
 
 version: "3.8"
 
 services:
-  # ── ① timescaledb 换成带 pgbackrest 的派生镜像（源码见本目录 Dockerfile.timescaledb）──
+  # ── ① Replace timescaledb with the pgbackrest-enabled derived image (source: Dockerfile.timescaledb in this dir) ──
   timescaledb:
     image: robot-monitor-timescaledb:p16-pgbackrest
     build:
       context: .
       dockerfile: Dockerfile.timescaledb
-    # 注意：此处不覆盖基础 compose 的 volumes/healthcheck —— overlay 语义是「合并」，
-    # 只声明新增项。tsdb-data 卷与 init.sql 挂载仍来自 infra/docker-compose.yml。
+    # Note: this does not override the base compose's volumes/healthcheck — the overlay semantics is "merge",
+    #   only new items are declared. The tsdb-data volume and init.sql mount still come from infra/docker-compose.yml.
     volumes:
-      # DB 侧 pgbackrest 配置（只读挂载，密钥不在这份文件里）
+      # DB-side pgbackrest config (read-only mount; secrets are not in this file)
       - ./ops/pgbackrest/pgbackrest-db.conf:/etc/pgbackrest/pgbackrest.conf:ro
-      # WAL 归档目标：与 repo 边车共享的仓库卷（pgbackrest 需要能写到 repo-path）
+      # WAL archive target: the repo volume shared with the repo sidecar (pgbackrest needs write access to repo-path)
       - pgbackrest-repo:/var/lib/pgbackrest
-      # PG 主配置片段：开启 archive_mode/archive_command（见 postgresql-dr.conf）
+      # PG main config snippet: enables archive_mode/archive_command (see postgresql-dr.conf)
       - ./ops/pgbackrest/postgresql-dr.conf:/etc/postgresql/conf.d/zz-dr.conf:ro
-      # pgbackrest 日志目录（DB 侧归档日志）
+      # pgbackrest log directory (DB-side archive logs)
       - pgbackrest-log:/var/log/pgbackrest
-      # 双端 TLS 证书（DB 侧作为 TLS 服务端，接受仓库边车连入）
+      # Mutual TLS certificates (DB side acts as TLS server, accepting the repo sidecar connection)
       - pgbackrest-certs:/etc/pgbackrest/cert:ro
-      # 备份状态监控 DDL（订单 31 §T3）：DB 侧 psql -f /opt/dr/monitor.sql 应用一次，
-      # 建 monitor.pgbackrest_info() 函数与 monitor.pgbackrest_backup_status 视图，
-      # 供 postgres-exporter 自定义查询消费。只读挂载，不烘焙进镜像。
+      # Backup-status monitoring DDL (order 31 §T3): apply once on the DB side via psql -f /opt/dr/monitor.sql,
+      #   creating the monitor.pgbackrest_info() function and the monitor.pgbackrest_backup_status view,
+      #   consumed by postgres-exporter's custom query. Read-only mount, not baked into the image.
       - ./ops/pgbackrest/monitor.sql:/opt/dr/monitor.sql:ro
-    # timescaledb 官方镜像的 postgres 与 PG 官方镜像同源，支持 conf.d 追加片段；
-    # command 追加 -c config_file 使其读取主配置。
+    # The timescaledb official image's postgres shares the same source as the PG official image and supports conf.d append snippets;
+    # command appends -c config_file so it reads the main config.
     command:
       - "postgres"
       - "-c"
@@ -60,12 +60,12 @@ services:
       - "-c"
       - "include_dir=/etc/postgresql/conf.d"
     environment:
-      # DB 侧不需要仓库加密口令（加密在仓库侧完成），但需要知道仓库主机地址。
-      # 这两个变量对应 pg1-host / pg1-host-user，由 db 侧 pgbackrest.conf 之外的
-      # 命令行给出（见 backup 脚本）；此处保留占位说明，不写死。
+      # DB side does not need the repository encryption passphrase (encryption happens on the repository side), but needs to know the repo host address.
+      # These two vars correspond to pg1-host / pg1-host-user, given on the db-side pgbackrest.conf via
+      #   the command line (see the backup scripts); kept here as a placeholder note, not hardcoded.
       PGBACKREST_STANZA: robot_monitor
 
-  # ── ② pgBackRest 仓库(repository)主机：备份数据的落点 ──
+  # ── ② pgBackRest repository host: where the backup data lands ──
   pgbackrest:
     build:
       context: .
@@ -73,37 +73,37 @@ services:
     image: robot-monitor-pgbackrest:local
     container_name: robot-monitor-pgbackrest
     volumes:
-      # 仓库卷：备份 + WAL 归档的实际存储位置（生产应指向独立磁盘或对象存储，见 RUNBOOK）
+      # Repo volume: actual storage location for backups + WAL archive (production should point to a dedicated disk or object storage; see RUNBOOK)
       - pgbackrest-repo:/var/lib/pgbackrest
-      # 仓库侧配置（含加密口令注入点，值来自 .env）
+      # Repository-side config (includes the encryption-passphrase injection point, value from .env)
       - ./ops/pgbackrest/pgbackrest.conf:/etc/pgbackrest/pgbackrest.conf:ro
       - pgbackrest-log:/var/log/pgbackrest
-      # 运维脚本以只读方式挂载到 /opt/dr（不烘焙进镜像，便于现场修订）。
-      # 订单 31 的 T2 三入口 backup/restore/verify（+ verify-restore 承载 L3 恢复比对）。
+      # Ops scripts mounted read-only into /opt/dr (not baked into the image, easy to revise on site).
+      # Order 31's T2 three entrypoints backup/restore/verify (+ verify-restore for L3 restore comparison).
       - ./ops/pgbackrest/backup.sh:/opt/dr/backup.sh:ro
       - ./ops/pgbackrest/restore.sh:/opt/dr/restore.sh:ro
       - ./ops/pgbackrest/verify.sh:/opt/dr/verify.sh:ro
       - ./ops/pgbackrest/verify-restore.sh:/opt/dr/verify-restore.sh:ro
-      # 订单 25 的旧入口保留（run-backup.sh 是 backup.sh 的前身，避免既有 runbook 失效）
+      # Order 25's old entrypoint retained (run-backup.sh is the predecessor of backup.sh, to avoid breaking existing runbooks)
       - ./ops/pgbackrest/run-backup.sh:/opt/dr/run-backup.sh:ro
-      # 双端 TLS 证书（仓库侧作为 TLS 服务端 + 连 DB 的客户端证书）
+      # Mutual TLS certificates (repository side acts as TLS server + client cert to connect to DB)
       - pgbackrest-certs:/etc/pgbackrest/cert:ro
     environment:
-      # 仓库加密口令：`${VAR:?msg}` 未设置时直接报错退出，杜绝空密钥仓库
-      PGBACKREST_CIPHER_PASS: "${PGBACKREST_CIPHER_PASS:?PGBACKREST_CIPHER_PASS 未设置：请在宿主机 .env 配置（openssl rand -base64 48）}"
-      # 覆盖配置里写的 pg1-path/host 语义：仓库侧要连 DB 主机（user-guide.xml:2762）
+      # Repository encryption passphrase: `${VAR:?msg}` fails and exits when unset, preventing an empty-key repo
+      PGBACKREST_CIPHER_PASS: "${PGBACKREST_CIPHER_PASS:?PGBACKREST_CIPHER_PASS not set: configure it in host .env (openssl rand -base64 48)}"
+      # Override the pg1-path/host semantics written in the config: the repository side connects to the DB host (user-guide.xml:2762)
       PGBACKREST_PG1_HOST: timescaledb
       PGBACKREST_PG1_PATH: /var/lib/postgresql/data
     depends_on:
       timescaledb:
         condition: service_healthy
-    # 默认空转等命令；由脚本/调度器 `docker compose exec` 或 `run` 触发具体动作
+    # Idle waiting for commands by default; specific actions triggered by scripts/scheduler via `docker compose exec` or `run`
     command: ["-c", "sleep infinity"]
     restart: unless-stopped
 
 volumes:
-  # 仓库卷 —— 备份与 WAL 的实际载体
+  # Repo volume — actual carrier of backups and WAL
   pgbackrest-repo:
   pgbackrest-log:
-  # TLS 证书卷：由 runbook §5「生产加固」的 openssl 步骤生成后放入
+  # TLS certificate volume: placed after being generated by the openssl steps in runbook §5 "production hardening"
   pgbackrest-certs:

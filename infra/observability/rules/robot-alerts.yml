@@ -1,54 +1,56 @@
-# 平台自身健康告警规则（PromQL）。
+# Platform self-health alert rules (PromQL).
 #
-# 边界声明：这里告警的是**平台**（broker/后端/落库拥堵），
-# 不是**机器人本体**。机器人本体的 motor_temp / battery_low / offline / joint_stuck
-# 四类告警由 alert_engine 在应用层判定，不经过 Prometheus。
-# 两者互补：robot_alert 表回答「哪台机器人坏了」，
-# 这里回答「监控系统自己是否还健康」—— 后者若失灵，前者的一切结论都不可信。
+# Boundary statement: the alerts here are for the **platform** (broker/backend/ingestion congestion),
+# not the **robot itself**. The robot's own four alert types — motor_temp / battery_low / offline /
+# joint_stuck — are judged by alert_engine at the application layer and do not go through Prometheus.
+# The two are complementary: the robot_alert table answers "which robot broke",
+# while here we answer "is the monitoring system itself still healthy" — if the latter fails,
+# none of the former's conclusions can be trusted.
 groups:
   - name: robot-monitor-platform
     rules:
-      # 队列积压持续增长 => 落库跟不上 1000 msg/s，CPU 或 IO 瓶颈
+      # Queue backlog keeps growing => ingestion can't keep up with 1000 msg/s, CPU or IO bottleneck
       - alert: IngestionQueueBacklog
         expr: robot_backend_queue_depth > 5000
         for: 30s
         labels:
           severity: warning
         annotations:
-          summary: "遥测写入队列积压 {{ $value }} 条"
-          description: "超过批量阈值 500 的 10 倍，疑似 TimescaleDB 写入受阻。"
+          summary: "Telemetry write queue backlog {{ $value }} items"
+          description: "Exceeds 10x the batch threshold of 500; TimescaleDB writes likely blocked."
 
-      # MQTT 丢弃非 0 说明 payload 校验失败，机器人端字段契约被破坏
+      # Non-zero MQTT drops indicate payload validation failure; the robot-side field contract is broken
       - alert: MqttMessagesDropped
         expr: increase(robot_backend_mqtt_dropped_total[1m]) > 0
         for: 0s
         labels:
           severity: critical
         annotations:
-          summary: "1 分钟内丢弃 {{ $value }} 条 MQTT 消息"
-          description: "payload 不符合 spec/01 telemetry schema，检查模拟器/固件版本。"
+          summary: "{{ $value }} MQTT messages dropped in the last 1 minute"
+          description: "payload does not match the spec/01 telemetry schema; check the simulator/firmware version."
 
-      # WS 合成探针（缺口 G-3「看板假的绿」）：`up=1` 只证明 /metrics 抓得到，
-      # 不证明实时流还能用。探针从**客户端**真连一次 /ws/robots 并等首帧 snapshot，
-      # 失败=网关卡升级 / snapshot 抛异常 / 广播断了 —— 这些情况下连接数可能仍非 0。
+      # Synthetic WS probe (gap G-3 "fake-green dashboard"): `up=1` only proves /metrics is scraped,
+      # not that the realtime stream still works. The probe truly connects to /ws/robots once from the
+      # **client** side and waits for the first snapshot frame; failure = gateway stuck on upgrade /
+      # snapshot threw / broadcast broke — in which cases the connection count may still be non-zero.
       - alert: WsStreamProbeFailing
         expr: robot_backend_ws_probe_alive == 0
         for: 2m
         labels:
           severity: critical
         annotations:
-          summary: "WS 合成探针连续失败（客户端视角的实时流已断）"
-          description: "探针目标 backend:8000/ws/robots。看板可能仍显示绿色，但已收不到 snapshot/telemetry/alert。"
+          summary: "WS synthetic probe continuously failing (realtime stream broken from client's view)"
+          description: "Probe target backend:8000/ws/robots. The dashboard may still show green, but no snapshot/telemetry/alert is being received."
 
-      # 探针累计失败在增长（偶发抖动），与上一条的「持续为 0」互补。
+      # Probe cumulative failures are growing (occasional flapping), complementary to the above "persistently 0".
       - alert: WsStreamProbeFlapping
         expr: increase(robot_backend_ws_probe_failures_total[5m]) > 2
         for: 0s
         labels:
           severity: warning
         annotations:
-          summary: "WS 合成探针 5 分钟内失败 {{ $value }} 次"
-          description: "实时流不稳定（网络抖动/后端过载），尚未到持续不可用，先于用户感知告警。"
+          summary: "WS synthetic probe failed {{ $value }} times in 5 minutes"
+          description: "Realtime stream is unstable (network jitter/backend overload), not yet persistently unavailable; alerts before users notice."
 
       - alert: BackendDown
         expr: up{job="robot_backend"} == 0
@@ -56,7 +58,7 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "后端采集服务 down"
+          summary: "Backend ingestion service down"
 
       - alert: AlertEngineDown
         expr: up{job="robot_alert_engine"} == 0
@@ -64,32 +66,35 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "告警引擎 down（此时机器人告警全部停摆）"
+          summary: "Alert engine down (all robot alerts are now stalled)"
 
-      # 告警的告警：判定出来了却没写进 robot_alert（G-4）。
-      # 为什么用 increase 而不是 > 0：Counter 单调，进程活着的整个生命周期
-      # `robot_alert_store_errors_total > 0` 一旦触发就永不复位，成了永远在响的
-      # 死警报；increase(...[5m]) 只看最近 5 分钟**又在失败**，故障恢复后自动静默。
-      # for: 0s —— 落库失败不是抖动，不需要"连续 N 秒"再确认。
+      # Alert-of-alerts: detected but not written into robot_alert (G-4).
+      # Why increase instead of > 0: Counters are monotonic, so `robot_alert_store_errors_total > 0`
+      # once triggered would never reset for the process's whole lifetime, becoming a permanently
+      # ringing dead alarm; increase(...[5m]) only looks at "failing again in the last 5 minutes",
+      # auto-silencing after recovery.
+      # for: 0s — a write failure is not jitter, no need to "confirm for N consecutive seconds".
       - alert: AlertStoreFailing
         expr: increase(robot_alert_store_errors_total[5m]) > 0
         for: 0s
         labels:
           severity: critical
         annotations:
-          summary: "5 分钟内 {{ $value }} 条告警写库失败"
+          summary: "{{ $value }} alerts failed to write to DB in 5 minutes"
           description: >-
-            robot_alert 落库异常（connection / permission / 磁盘）。
-            注意此时前端告警流可能照常滚动（PUBLISH 与 INSERT 解耦），
-            看板变绿不代表告警已被持久化 —— 以 DB 对账为准。
+            robot_alert write to DB is abnormal (connection / permission / disk).
+            Note the frontend alert stream may still scroll normally at this point (PUBLISH and INSERT
+            are decoupled); the dashboard turning green does not mean the alert was persisted —
+            trust DB reconciliation.
 
-      # ── 备份健康（订单 31 / G-5）─────────────────────────────────────
-      # 指标来源：postgres-exporter 自定义查询 pgbackrest_backup_status
-      #   ← 视图 monitor.pgbackrest_backup_status ← 官方 `pgbackrest --output=json info`。
-      # 复用既有通道：与 AlertStoreFailing 同属 platform 组，走同一个 Alertmanager → webhook。
+      # ── Backup health (order 31 / G-5) ─────────────────────────────────────
+      # Metric source: postgres-exporter custom query pgbackrest_backup_status
+      #   ← view monitor.pgbackrest_backup_status ← official `pgbackrest --output=json info`.
+      # Reuse existing channel: same platform group as AlertStoreFailing, same Alertmanager → webhook.
       #
-      # 备份**过期**：距离最近一次成功备份超过 26h（= 24h 全量周期 + 2h 容错）。
-      # 为什么不用 `> 0` 之类的瞬时判据：备份是**周期性**事件，正确的判据是"新鲜度"。
+      # Backup **stale**: more than 26h since the last successful backup (= 24h full cycle + 2h tolerance).
+      # Why not an instantaneous criterion like `> 0`: backup is a **periodic** event, the correct
+      # criterion is "freshness".
       - alert: BackupStale
         expr: |
           (time() - pgbackrest_backup_last_success_timestamp_seconds) > 93600
@@ -97,36 +102,40 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "pgBackRest 最近一次成功备份已过 {{ $value | humanizeDuration }}"
+          summary: "pgBackRest last successful backup was {{ $value | humanizeDuration }} ago"
           description: >-
-            超过 26h 没有新的成功备份（stanza={{ $labels.stanza }}）。
-            可能是备份任务未调度、仓库不可写、或备份持续失败。RPO 承诺已失效，
-            请立即执行 infra/ops/pgbackrest/backup.sh full 并检查仓库容量。
+            No new successful backup for over 26h (stanza={{ $labels.stanza }}).
+            The backup job may be unscheduled, the repo unwritable, or backups persistently failing.
+            The RPO commitment is already broken — immediately run infra/ops/pgbackrest/backup.sh full
+            and check repo capacity.
 
-      # 备份**不完整**：最近一次备份被标记 error=true（备份集缺文件/校验和不符）。
-      # 注意语义边界：这不等于"没有备份"，而是"最新那份不可用于恢复"。
+      # Backup **incomplete**: the latest backup is marked error=true (backup set missing files /
+      # checksum mismatch). Note the semantic boundary: this does not mean "no backup", but
+      # "the newest one is not usable for recovery".
       - alert: BackupErrored
         expr: pgbackrest_backup_last_errored > 0
         for: 0s
         labels:
           severity: critical
         annotations:
-          summary: "pgBackRest 最近一次备份不完整（stanza={{ $labels.stanza }}）"
+          summary: "pgBackRest latest backup incomplete (stanza={{ $labels.stanza }})"
           description: >-
-            官方 info 报告最新备份 error=true。该备份集不可用于恢复，
-            需跑 backup.sh full 重做，并用 backup.sh info / verify.sh 复核。
+            Official info reports the latest backup error=true. This backup set is not usable for
+            recovery; re-run backup.sh full and verify with backup.sh info / verify.sh.
 
-      # stanza 状态非 ok：仓库路径丢失/锁异常/配置错。此时 backup 命令本身会失败。
+      # stanza status not ok: repo path missing / lock anomaly / config error. At this point the
+      # backup command itself will fail.
       - alert: BackupStanzaUnhealthy
         expr: pgbackrest_stanza_status_code > 0
         for: 0s
         labels:
           severity: critical
         annotations:
-          summary: "pgBackRest stanza 状态异常（code={{ $value }}，stanza={{ $labels.stanza }}）"
+          summary: "pgBackRest stanza status abnormal (code={{ $value }}, stanza={{ $labels.stanza }})"
           description: >-
-            官方 info 的 status.code != 0（1=missing stanza path / 2=配置错 / 其他见文档）。
-            备份在此状态下不会成功，先按 DR-RUNBOOK §5.2 执行 stanza-create 与环境检查。
+            Official info status.code != 0 (1=missing stanza path / 2=config error / others see docs).
+            Backup will not succeed in this state; first follow DR-RUNBOOK §5.2 to run stanza-create
+            and environment checks.
 
       - alert: TimescaleDown
         expr: up{job="postgres"} == 0
@@ -134,7 +143,7 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "TimescaleDB 不可达"
+          summary: "TimescaleDB unreachable"
 
       - alert: MqttBrokerDown
         expr: up{job="emqx"} == 0
@@ -142,4 +151,4 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "EMQX broker 不可达（100 台机器人数据全部中断）"
+          summary: "EMQX broker unreachable (all 100 robots' data interrupted)"

@@ -1,51 +1,49 @@
-# pgBackRest 灾备边车（订单 25 / I-19 建契约；订单 31 / G-5 收口为「真能备份」）
+# pgBackRest disaster-recovery sidecar (Order 25 / I-19 establishes the contract; Order 31 / G-5 closes it as 'real backups')
 
-> 完整运行手册见 **`docs/DR-RUNBOOK.md`**。本文件是目录导航 + 设计要点。
+> Full runbook: **`docs/DR-RUNBOOK.md`**. This file is a directory map + design highlights.
 
-## 交付物
+## Deliverables
 
-| 文件 | 作用 |
+| File | Purpose |
 |---|---|
-| `Dockerfile` | 仓库(repository)主机的 pgBackRest 镜像（PGDG 包安装，v2.59.3，含 `jq`） |
-| `Dockerfile.timescaledb` | 派生 timescaledb 镜像：给基础镜像补 pgbackrest 二进制（`archive_command` 需要），含 `jq` |
-| `docker-compose.dr.yml` | overlay：派生 timescaledb + pgbackrest 仓库边车（挂载全部 `/opt/dr/*.sh`） |
-| `pgbackrest.conf` | **仓库侧**配置（含 `repo1-cipher-pass=${PGBACKREST_CIPHER_PASS}` 注入点） |
-| `pgbackrest-db.conf` | **数据库侧**配置（不含口令；只有 `pg1-path` 等本机信息） |
-| `postgresql-dr.conf` | PG 开关：`archive_mode=on` / `archive_command` / `archive_timeout`（经 `include_dir` 载入） |
-| **`backup.sh`** | **T2 备份入口**（`full`/`diff`/`incr`/`check`/`info`/`stanza-create`；幂等、非 0 退出） |
-| **`restore.sh`** | **T2 恢复入口**（`latest`/`set <name>`/`pitr '<ts>'`，带两级确认） |
-| **`verify.sh`** | **T2 校验入口**：L1 校验和 + L2 新鲜度 +（`--scratch`）L3 恢复比对，**真断言** |
-| **`verify-restore.sh`** | L3 承载：真实恢复 + 源库/恢复库 行数·时间戳比对 |
-| **`monitor.sql`** | **T3 可观测**：官方 `monitor.pgbackrest_info()` 范式 → `monitor.pgbackrest_backup_status` 视图 |
-| **`postgres-exporter-queries.yaml`** | **T3**：postgres-exporter 自定义查询，导出备份指标 |
-| `run-backup.sh` | 订单 25 旧入口（保留，避免既有 runbook 失效） |
-| `verify-drs.sh` | **静态**自检（YAML/结构/无明文密钥/脚本语法/无 `|| true` 兜底） |
+| `Dockerfile` | pgBackRest image for the repository host (PGDG package, v2.59.3, includes `jq`) |
+| `Dockerfile.timescaledb` | derived timescaledb image: adds the pgbackrest binary to the base image (needed by `archive_command`), includes `jq` |
+| `docker-compose.dr.yml` | overlay: derived timescaledb + pgbackrest repository sidecar (mounts all `/opt/dr/*.sh`) |
+| `pgbackrest.conf` | **repository-side** config (with `repo1-cipher-pass=${PGBACKREST_CIPHER_PASS}` injection point) |
+| `pgbackrest-db.conf` | **database-side** config (no password; only local info like `pg1-path`) |
+| `postgresql-dr.conf` | PG switches: `archive_mode=on` / `archive_command` / `archive_timeout` (loaded via `include_dir`) |
+| **`backup.sh`** | **T2 backup entry** (`full`/`diff`/`incr`/`check`/`info`/`stanza-create`; idempotent, non-zero exit on failure) |
+| **`restore.sh`** | **T2 restore entry** (`latest`/`set <name>`/`pitr '<ts>'`, with two-level confirmation) |
+| **`verify.sh`** | **T2 verification entry**: L1 checksum + L2 freshness + (`--scratch`) L3 restore comparison, with **real assertions** |
+| **`verify-restore.sh`** | L3 carrier: real restore + source/restore DB row-count · timestamp comparison |
+| **`monitor.sql`** | **T3 observability**: official `monitor.pgbackrest_info()` pattern → `monitor.pgbackrest_backup_status` view |
+| **`postgres-exporter-queries.yaml`** | **T3**: postgres-exporter custom queries exporting backup metrics |
+| `run-backup.sh` | Order 25 legacy entry (kept to avoid breaking the existing runbook) |
+| `verify-drs.sh` | **static** self-check (YAML/structure/no plaintext secrets/script syntax/no `|| true` fallback) |
 
-## 为什么不能「只挂一个容器」就完事
+## Why you can't just 'mount one container' and call it done
 
-pgBackRest 是双端架构，PG 主机与仓库主机**各自**都要有**同版本**二进制与配置：
+pgBackRest is a two-end architecture; the PG host and the repository host **each** need the **same-version** binary and config:
 
-- 实证 `external/pgbackrest/doc/xml/user-guide.xml:2770`
+- Evidence `external/pgbackrest/doc/xml/user-guide.xml:2770`
   > "The pgBackRest version installed on the repository host must **exactly match**
   > the version installed on the PostgreSQL host."
-- WAL 归档靠 PG 本地执行的 `archive_command`，故 DB 容器内必须有 pgbackrest。
+- WAL archiving relies on PG's locally-executed `archive_command`, so the DB container must contain pgbackrest.
 
-基础镜像 `timescale/timescaledb:2.13.1-pg16` **不含** pgbackrest —— 这正是本目录此前只交付
-「配置契约」的原因。本次通过 `Dockerfile.timescaledb` 补上，使方案可用。
+The base image `timescale/timescaledb:2.13.1-pg16` **does not include** pgbackrest — which is exactly why this directory previously only delivered a "config contract". This round adds it via `Dockerfile.timescaledb`, making the solution usable.
 
-## ⚠️ 纠正：官方没有 `pgbackrest/pgbackrest` 镜像
+## ⚠️ Correction: there is no official `pgbackrest/pgbackrest` image
 
-`external/SOURCES.md:325` 记的 `pgbackrest/pgbackrest` **不存在**。2026-10-11 实测：
+The `pgbackrest/pgbackrest` recorded in `external/SOURCES.md:325` **does not exist**. Measured on 2026-10-11:
 
 ```
 GET https://hub.docker.com/v2/repositories/pgbackrest/pgbackrest/tags
 → {"message":"object not found"}
 ```
 
-`pgbackrest/*` 下只有 `test` / `doc` 两个仓库。故本方案自建镜像，走官方推荐的
-PGDG 包仓库（`external/pgbackrest/doc/xml/user-guide.xml:586`）。
+Under `pgbackrest/*` there are only the `test` / `doc` repos. So this solution builds its own image following the officially recommended PGDG package repo (`external/pgbackrest/doc/xml/user-guide.xml:586`).
 
-## 快速开始
+## Quick start
 
 ```bash
 # 1) 在宿主机 .env 配好仓库加密口令（禁止明文入库）
@@ -67,7 +65,7 @@ $DC exec pgbackrest /opt/dr/run-backup.sh check
 $DC exec pgbackrest /opt/dr/run-backup.sh full
 ```
 
-## 校验怎么跑（两个层次，别混）
+## How to run verification (two levels, don't mix)
 
 ```bash
 # ① 静态：文件形态对不对（无需 Docker，秒级）
@@ -79,15 +77,11 @@ bash infra/ops/pgbackrest/verify-drs.sh
 /opt/dr/verify.sh --scratch    # 追加 L3：真恢复到临时目录并比对行数/时间戳
 ```
 
-① 只保证「配置不会因语法问题起不来」；**备份可用性只由 ② 判定**。
+① only guarantees "the config won't fail to start due to syntax problems"; **backup usability is judged only by ②**.
 
-## 状态（订单 31 更新）
+## Status (Order 31 update)
 
-- ✅ 配置、T2 三入口脚本、compose、RUNBOOK、T3 告警接线齐备；
-- ✅ 静态自检 + 指标接线自检通过：
-  `verify-drs.sh` / `infra/observability/verify_wiring.sh`；
-- ✅ **真实备份/恢复/校验已实跑**（本机 PG16 + pgBackRest 2.59.3，PGDG 官方包）：
-  全量备份 → `verify.sh` L1+L2+L3 全绿（含恢复后行数/时间戳比对）→
-  篡改文件后 `verify.sh` 正确变红（负向用例）。原文输出见 `docs/DR-RUNBOOK.md §6.2`；
-- ⚠️ **容器编排层仍未实跑**（本工作环境容器不可起）：镜像构建、三层合并起栈、
-  双端 TLS 握手、CAgg 恢复属未验证项，见 `docs/DR-RUNBOOK.md §6.3`。
+- ✅ config, the three T2 entry scripts, compose, RUNBOOK, and T3 alert wiring are all in place;
+- ✅ static self-check + metric-wiring self-check pass: `verify-drs.sh` / `infra/observability/verify_wiring.sh`;
+- ✅ **real backup/recovery/verification has been actually run** (local PG16 + pgBackRest 2.59.3, official PGDG package): full backup → `verify.sh` L1+L2+L3 all green (incl. post-restore row-count/timestamp comparison) → after tampering a file `verify.sh` correctly turns red (negative case). Raw output in `docs/DR-RUNBOOK.md §6.2`;
+- ⚠️ **the container orchestration layer has not yet been actually run** (containers cannot be started in this working environment): image build, three-layer merged stack-up, two-end TLS handshake, and CAgg recovery are unverified; see `docs/DR-RUNBOOK.md §6.3`.

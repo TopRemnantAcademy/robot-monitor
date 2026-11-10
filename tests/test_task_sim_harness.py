@@ -66,7 +66,7 @@ def test_pipeline_ge_10_agents_correlated(tmp_path: Path, stations: int):
         f"task_sim pipeline exit code {cp.returncode} (0=correlation threshold met)\n"
         f"stdout:\n{cp.stdout}\nstderr:\n{cp.stderr}"
     )
-    assert "通过" in cp.stdout, f"Did not see correlation-threshold output:\n{cp.stdout}"
+    assert "passed" in cp.stdout, f"Did not see correlation-threshold output:\n{cp.stdout}"
     series = json.loads(out.read_text(encoding="utf-8"))
     # Number of robots participating in scheduling = stations; each should have a sampled series.
     assert len(series) == stations, f"Participating robot count {len(series)} != {stations}"
@@ -81,7 +81,7 @@ def test_fault_scenario_positive_correlation(tmp_path: Path):
     out = tmp_path / "fault.json"
     cp = _run_task_sim("fault", stations=4, duration=16.0, out=out)
     assert cp.returncode == 0, f"task_sim fault did not pass threshold:\n{cp.stdout}\n{cp.stderr}"
-    assert "正相关" in cp.stdout, f"fault scenario should show positive correlation:\n{cp.stdout}"
+    assert "positive" in cp.stdout, f"fault scenario should show positive correlation:\n{cp.stdout}"
 
 
 def test_payload_contract_unchanged(tmp_path: Path):

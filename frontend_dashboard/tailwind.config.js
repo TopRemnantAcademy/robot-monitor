@@ -1,21 +1,21 @@
 /** @type {import('tailwindcss').Config} */
-// spec/03 §3 Design Tokens —— 单一事实来源是 src/theme/tokens.ts，
-// 此处仅为需要走 CSS 变量的场景（bg-surface / text-primary 等）提供同名映射，
-// 色值与 tokens.ts 逐字一致，禁止在别处写死颜色字面量。
+// spec/03 §3 Design Tokens —— the single source of truth is src/theme/tokens.ts;
+// this only provides same-name mappings for the cases that need CSS variables (bg-surface / text-primary, etc.),
+// color values match tokens.ts verbatim; forbid hardcoding color literals elsewhere.
 export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: {
     extend: {
       colors: {
-        // 背景
+        // background
         'bg-base': '#0B0E14',
         surface: '#121722',
         border: '#1A2230',
-        // 文字
+        // text
         primary: '#E6EDF3',
         secondary: '#8B98A9',
         accent: '#3B82F6',
-        // 状态（0 离线 / 1 正常 / 2 预警 / 3 故障）
+        // status (0 offline / 1 normal / 2 warning / 3 fault)
         offline: '#5A6472',
         normal: '#2ECC71',
         warning: '#F1C40F',

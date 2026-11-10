@@ -1,36 +1,37 @@
-// WS 收包率 / 首帧快照 的可判定断言（k6 + 官方内置 k6/ws 模块，**零新增依赖**）。
+// WS receive-rate / first-frame snapshot decidable assertions (k6 + the built-in k6/ws module,
+// **zero new dependencies**).
 //
-// 为什么单独一个脚本，而不是塞进 mqtt_pub.js
-// ------------------------------------------
-// 1) xk6-mqtt 是第三方扩展；`k6/ws` 是 k6 **内置**模块。混在一起写，会让
-//    「没有 xk6-mqtt 的机器」连 WS 那一半也跑不了。拆开以后 WS 探针在任何
-//    官方 k6 上都能跑。
-// 2) 断言对象不同：mqtt_pub.js 判「发布侧」（R-08 C1/C2），本脚本判「订阅侧」
-//    （R-08 C4/C5）。
+// Why a separate script instead of being folded into mqtt_pub.js
+// -------------------------------------------------------------
+// 1) xk6-mqtt is a third-party extension; `k6/ws` is a k6 **built-in** module. Mixing them means
+//    a machine without xk6-mqtt can't even run the WS half. Splitting out, the WS probe runs on any
+//    official k6.
+// 2) Different assertion objects: mqtt_pub.js judges the "publish side" (R-08 C1/C2), this script
+//    judges the "subscribe side" (R-08 C4/C5).
 //
-// ⚠️ 这里**不**断言「前端渲染 10 次/秒」（R-08 E4）—— 那是浏览器内行为，
-//    只能在真实前端里测。本脚本测的是**服务端到客户端的投递**。
+// Note: this script does **not** assert "frontend renders 10 times/sec" (R-08 E4) — that is
+// browser-internal behavior, only testable in a real frontend. This script tests **server-to-client
+// delivery**.
 //
-// 实证依据
-// --------
-// - WS 路径 `/ws/robots`，鉴权走 `?token=`（backend_ingestion/app/main.py:251）
-// - 信封三分支 snapshot / telemetry / alert（spec/00 §5.2；main.py:283/302/298）
-// - snapshot 的 data 形状 `{"robots": [...]}`（main.py:283）
-// - telemetry 的 data 是**单台**遥测对象、字段为数字（main.py:302；
-//   state_cache._decode 负责把 Redis Hash 的字符串还原成数字，
-//   见 services/state_cache.py:63-68）
-// - 鉴权失败以 close code 1008 拒绝（main.py:271-274，RFC 6455 §7.4.1）
+// Empirical basis
+// ---------------
+// - WS path `/ws/robots`, auth via `?token=` (backend_ingestion/app/main.py:251)
+// - Three-branch envelope: snapshot / telemetry / alert (spec/00 §5.2; main.py:283/302/298)
+// - snapshot data shape `{"robots": [...]}` (main.py:283)
+// - telemetry data is a **single-unit** telemetry object with numeric fields (main.py:302;
+//   state_cache._decode restores Redis Hash strings to numbers, see services/state_cache.py:63-68)
+// - auth failure rejected with close code 1008 (main.py:271-274, RFC 6455 §7.4.1)
 //
-// ⚠️ 关于「被拒 → 重连风暴」这一坑（本机实测，勿改回去）
-// ------------------------------------------------------
-// k6 的 `ws.connect()` 在**握手被拒（1008）时会自动重试**，且重试期间
-// `socket.on('error')` / `on('close')` 会**反复触发**。若把 check() 写在
-// error/close 里，失败数会随重试次数指数级膨胀（实测一次 2s 会话炸出 43647 条
-// fail），summary 完全失去意义。
-// 因此本脚本：
-//   1) 所有「收尾断言」只在 **首次** close 时结账一次（`settled` 标志）；
-//   2) 未带 token 时**直接判为「未验证」并提前退出**，不进入风暴 ——
-//      因为「被鉴权拒绝」既不是连通性故障，也不是本压测的判定对象。
+// Note: the "rejected -> reconnect storm" pitfall (measured locally, do not revert)
+// ----------------------------------------------------------------------------
+// k6's `ws.connect()` auto-retries on **handshake rejection (1008)**, and during retries
+// `socket.on('error')` / `on('close')` fire **repeatedly**. If check() is written inside
+// error/close, the failure count balloons exponentially with retries (measured: one 2s session
+// blew up to 43647 fails), making the summary meaningless.
+// So this script:
+//   1) all "final assertions" settle exactly once on the **first** close (`settled` flag);
+//   2) when no token is present, it **directly judges "unverified" and exits early**, avoiding the
+//      storm — because "auth rejected" is neither a connectivity failure nor this load test's object.
 
 import { check } from 'k6';
 import ws from 'k6/ws';
@@ -56,27 +57,27 @@ export const options = {
     },
   },
   thresholds: {
-    // ⚠️ 这一条是**必须**的，不是锦上添花。
-    // 反向验证（本机实测）：只把 check() 写进脚本、不接 `checks` 阈值，
-    // 则在「snapshot 只有 50 台 + 字段被字符串化」的坏服务端上，
-    // k6 仍打印 `ws_probe ✓` 并 **以退出码 0 结束** —— 断言红了却判通过。
-    // 接上之后，同一场景退出码变 99（k6 阈值失败码）。
+    // Note: this one is **mandatory**, not a nice-to-have.
+    // Reverse-verified (measured locally): writing only check() without hooking the `checks`
+    // threshold means that on a bad server ("snapshot only 50 units + fields stringified"),
+    // k6 still prints `ws_probe ✓` and **ends with exit code 0** — assertion red but judged pass.
+    // After hooking, the same scenario exits 99 (k6 threshold-failure code).
     checks: ['rate>=' + THRESHOLDS.conn_success_rate.toFixed(4)],
     ws_up: ['rate>=' + THRESHOLDS.conn_success_rate.toFixed(4)],
-    // R-08 C5：telemetry 字段必须是数字而非字符串。
+    // R-08 C5: telemetry fields must be numbers, not strings.
     ws_telemetry_fields_ok: ['rate>=' + THRESHOLDS.ws_telemetry_fields_rate.toFixed(4)],
-    // R-08 C4：snapshot 必须含全部机器人（默认 100 台）。
+    // R-08 C4: snapshot must contain all robots (default 100 units).
     ws_snapshot_robots: ['min>=' + THRESHOLDS.ws_snapshot_robots],
   },
 };
 
-/** 拼 WS URL，带 ?token=（main.py:251 的 query 约定）。 */
+/** Build the WS URL with ?token= (main.py:251 query convention). */
 function authedUrl() {
   if (!WS_TOKEN) return WS_URL;
   return WS_URL + (WS_URL.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(WS_TOKEN);
 }
 
-/** R-08 C5 的字段类型判定：数字而非字符串。 */
+/** R-08 C5 field-type judgment: numeric, not string. */
 function telemetryPayloadOk(data) {
   return (
     data !== null &&
@@ -89,17 +90,18 @@ function telemetryPayloadOk(data) {
 }
 
 export function setup() {
-  // ⚠️ 未配置 token 必须在 setup 里就中止（而不是在每个 VU 迭代里 return）：
-  // 放在 default 里会随迭代重复执行，把日志刷满同样的报错（本机实测一次 5s
-  // 会话打印数十条），判定信号被噪音淹没。setup 抛错 = k6 立刻以非 0 退出，
-  // run.sh 据此把它归到「未验证」而不是「判定失败」。
+  // Note: missing token must abort in setup (not return inside each VU iteration):
+  // putting it in default re-executes per iteration, flooding logs with the same error (measured:
+  // dozens of lines in one 5s session), drowning the judgment signal. setup throwing = k6 exits
+  // non-zero immediately; run.sh then classifies it as "unverified" instead of "judgment failed".
   if (!WS_TOKEN) {
     throw new Error(
-      'WS_TOKEN 未设置：订单 15 起 /ws/robots 要求 ?token=<JWT>（backend_ingestion/app/main.py:251），' +
-        '缺失时服务端以 close 1008 拒绝（main.py:271-274）。这是**预期鉴权行为**，不是连通性故障。 ' +
-        '取一个 JWT 后重跑：' +
+      'WS_TOKEN not set: from Order 15, /ws/robots requires ?token=<JWT> (backend_ingestion/app/main.py:251); ' +
+        'without it the server rejects with close 1008 (main.py:271-274). This is the **expected auth ' +
+        'behavior**, not a connectivity failure. ' +
+        'Get a JWT and rerun: ' +
         'curl -s -X POST localhost:8000/auth/jwt/login -d "username=<email>&password=<pwd>" ' +
-        '然后 WS_TOKEN=<access_token> bash tests/load/run.sh --ws-only'
+        'then WS_TOKEN=<access_token> bash tests/load/run.sh --ws-only'
     );
   }
   return { startedAt: Date.now() };
@@ -107,14 +109,14 @@ export function setup() {
 
 export default function (_data) {
   const res = ws.connect(authedUrl(), {}, function (socket) {
-    // 收尾只结账一次 —— 见文件头「被拒 → 重连风暴」的说明。
+    // Settle only once —— see the file-header "rejected -> reconnect storm" note.
     let settled = false;
     let sawSnapshot = false;
     let telemetryCount = 0;
 
     socket.on('open', function () {
       wsUp.add(1);
-      check(null, { 'WS 握手成功（status 101）': () => true });
+      check(null, { 'WS handshake succeeded (status 101)': () => true });
     });
 
     socket.on('message', function (raw) {
@@ -122,7 +124,7 @@ export default function (_data) {
       try {
         envelope = JSON.parse(raw);
       } catch (err) {
-        check(raw, { 'WS 帧是合法 JSON': () => false });
+        check(raw, { 'WS frame is valid JSON': () => false });
         return;
       }
       wsMessages.add(1);
@@ -132,28 +134,28 @@ export default function (_data) {
         const robots = envelope.data && envelope.data.robots;
         const n = Array.isArray(robots) ? robots.length : 0;
         wsSnapshotRobots.add(n);
-        // R-08 C4：首帧 snapshot 必须含全部机器人。用 >= 而非 ==（服务端
-        // 可能带附属字段），少于期望即 FAIL。
+        // R-08 C4: the first-frame snapshot must contain all robots. Use >= not == (server
+        // may carry extra fields); fewer than expected fails.
         check({ n: n, expected: THRESHOLDS.ws_snapshot_robots }, {
-          'snapshot 含全部机器人': (v) => v.n >= v.expected,
+          'snapshot contains all robots': (v) => v.n >= v.expected,
         });
       } else if (envelope.type === 'telemetry') {
         telemetryCount += 1;
         const ok = telemetryPayloadOk(envelope.data);
         wsTelemetryFieldsOk.add(ok);
-        // R-08 C5：字段必须是数字，不能是被字符串化的 "1"。
+        // R-08 C5: fields must be numbers, not stringified "1".
         check(envelope.data, {
-          'telemetry 字段为数字而非字符串': (d) => telemetryPayloadOk(d),
+          'telemetry fields are numbers not strings': (d) => telemetryPayloadOk(d),
         });
       } else if (envelope.type === 'alert') {
         check(envelope.data, {
-          'alert 帧含 rule_id': (d) => d !== null && typeof d === 'object' && typeof d.rule_id === 'string',
+          'alert frame contains rule_id': (d) => d !== null && typeof d === 'object' && typeof d.rule_id === 'string',
         });
       }
     });
 
     socket.on('error', function () {
-      // 只记账，不 check —— 重连时本回调会反复触发（见文件头说明）。
+      // Only tally, don't check —— this callback fires repeatedly on reconnect (see file-header note).
       wsUp.add(0);
     });
 
@@ -161,14 +163,14 @@ export default function (_data) {
       if (settled) return;
       settled = true;
 
-      // 1008 = policy violation（RFC 6455 §7.4.1；main.py:271 的鉴权拒绝）。
+      // 1008 = policy violation (RFC 6455 §7.4.1; main.py:271 auth rejection).
       check({ code: code }, {
-        'WS 不是因鉴权被拒（非 1008）': (v) => v.code !== 1008,
+        'WS not rejected due to auth (non-1008)': (v) => v.code !== 1008,
       });
 
       check({ sawSnapshot: sawSnapshot, telemetry: telemetryCount }, {
-        '收到 snapshot 首帧': (v) => v.sawSnapshot === true,
-        '收到 telemetry 增量': (v) => v.telemetry > 0,
+        'received snapshot first frame': (v) => v.sawSnapshot === true,
+        'received telemetry increments': (v) => v.telemetry > 0,
       });
     });
 
@@ -177,10 +179,11 @@ export default function (_data) {
     }, SESSION_TIMEOUT_MS);
   });
 
-  // 握手在连接层就失败（连不上 / 非 101）时，res 会是 undefined 或非 101。
+  // When the handshake fails at the connection layer (can't connect / not 101), res is undefined
+  // or not 101.
   if (!res || res.status !== 101) {
     wsUp.add(0);
-    check(res, { 'WS 升级到 101': (r) => r !== null && r !== undefined && r.status === 101 });
+    check(res, { 'WS upgraded to 101': (r) => r !== null && r !== undefined && r.status === 101 });
   }
 }
 
@@ -206,14 +209,15 @@ export function handleSummary(data) {
     snapshot_robots_max: robotsTrend.max !== undefined ? robotsTrend.max : null,
     telemetry_fields_number_rate: fieldsOk,
     note:
-      '本脚本只判「服务端→客户端投递」（R-08 C4/C5）。前端 100ms 节流' +
-      '（R-08 E4 的 ~10 次/秒）需在浏览器内验证，见 tests/load/README.md 的「未验证」章节。',
+      'This script only judges "server-to-client delivery" (R-08 C4/C5). The frontend 100ms ' +
+      'throttle (R-08 E4, ~10 times/sec) must be verified inside the browser; see the ' +
+      '"Unverified" section of tests/load/README.md.',
   };
 
   return {
     stdout:
-      '\n[ws] 判定摘要（checks rate=' + rate.toFixed(4) + '，pass=' +
-      pass + ' fail=' + failCount + '，messages=' + msgs + '）\n',
+      '\n[ws] judgment summary (checks rate=' + rate.toFixed(4) + ', pass=' +
+      pass + ' fail=' + failCount + ', messages=' + msgs + ')\n',
     'tests/load/last-ws-run.json': JSON.stringify(verdict, null, 2) + '\n',
   };
 }

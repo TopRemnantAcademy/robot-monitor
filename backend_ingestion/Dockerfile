@@ -1,4 +1,4 @@
-# 多阶段构建（spec/01 §5）。仓库根必须提供 .dockerignore 排除 .env。
+# Multi-stage build (spec/01 §5). Repo root must provide .dockerignore to exclude .env.
 FROM python:3.11-slim AS builder
 WORKDIR /app
 COPY backend_ingestion/requirements.txt .
@@ -8,11 +8,11 @@ FROM python:3.11-slim
 WORKDIR /app
 COPY --from=builder /install /usr/local
 COPY backend_ingestion /app/backend_ingestion
-# WORKDIR 必须指进 backend_ingestion/：代码内部全部是顶层 `from app import ...`
-# 风格（main.py:32 实录），与 pytest / README / test_integration.sh 一致。
-# 旧 CMD 用 `backend_ingestion.app.main:app` + WORKDIR /app，模块体执行到
-# `from app import metrics` 即 ModuleNotFoundError —— 容器从未成功启动过，
-# 2026-10-11 e2e 取证日志（dump_failure_logs）首次实证。
+# WORKDIR must point into backend_ingestion/: all code internally uses top-level `from app import ...`
+# style (verified at main.py:32), consistent with pytest / README / test_integration.sh.
+# The old CMD used `backend_ingestion.app.main:app` + WORKDIR /app; when the module body executed
+# `from app import metrics` it raised ModuleNotFoundError — the container never started successfully,
+# first empirically proven by the 2026-10-11 e2e forensic logs (dump_failure_logs).
 WORKDIR /app/backend_ingestion
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

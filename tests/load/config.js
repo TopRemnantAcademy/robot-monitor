@@ -1,8 +1,9 @@
-// 压测参数与「可判定断言」的集中定义。
+// Central definition of load parameters and "decidable assertions".
 //
-// 设计原则：**断言必须能被机器判 PASS/FAIL**，不接受「只吐数字」。
-// 全部阈值默认值都能用环境变量覆盖，方便在不同规模的机器上重跑，
-// 但默认值本身要有依据 —— 依据写在每个阈值旁边（R-07/R-08 的哪一条）。
+// Design principle: **assertions must be machine-judgable as PASS/FAIL**; "just emit numbers" is
+// rejected. All threshold defaults can be overridden via env vars, so the suite can be re-run at
+// different scales, but the default values themselves must have a basis — written next to each
+// threshold (which R-07/R-08 item).
 
 import { PUBLISH_INTERVAL_MS } from './payload.js';
 
@@ -10,82 +11,88 @@ const env = (name, fallback) => (__ENV[name] === undefined ? fallback : __ENV[na
 const envInt = (name, fallback) => parseInt(env(name, String(fallback)), 10);
 const envFloat = (name, fallback) => parseFloat(env(name, String(fallback)));
 
-/** N 台机器人。R-08 B1 的验收规模是 100 台（spec/00 §1）。 */
+/** Number of robots. R-08 B1 acceptance scale is 100 units (spec/00 §1). */
 export const ROBOT_COUNT = envInt('ROBOTS', 100);
 
-/** 每台每秒 10 条（spec/00 §1：10Hz）。 */
+/** 10 messages per unit per second (spec/00 §1: 10Hz). */
 export const PUBLISH_HZ = envInt('PUBLISH_HZ', 10);
 
-/** 稳态压测时长（秒）。R-07 §2 的落库真值校验用 30s。 */
+/** Steady-state load duration (seconds). R-07 §2 uses 30s for the landing truth check. */
 export const DURATION_S = envInt('DURATION_S', 30);
 
-/** 爬坡时长（秒）：给 VU 依次建连的时间，不计入稳态统计。 */
+/** Ramp-up duration (seconds): time for VUs to connect sequentially, not counted in steady-state stats. */
 export const RAMP_S = envInt('RAMP_S', 5);
 
-/** MQTT broker 地址（xk6-mqtt 的 connect 接受 mqtt:// URL，见 index.d.ts:303）。 */
+/** MQTT broker address (xk6-mqtt's connect accepts mqtt:// URL, see index.d.ts:303). */
 export const BROKER_URL = env('BROKER_URL', 'mqtt://localhost:1883');
 
-/** 后端 WS 端点与可选 JWT（订单 15 起，WS 需要 `?token=`，见 main.py:251）。 */
+/** Backend WS endpoint and optional JWT (from Order 15, WS requires `?token=`, see main.py:251). */
 export const WS_URL = env('WS_URL', 'ws://localhost:8000/ws/robots');
 export const WS_TOKEN = env('WS_TOKEN', '');
 
 /**
- * 每个 VU 承担多少台机器人的发布节奏。
- * 1 个 VU 用 setInterval 串行 publish —— 与 mock_fleet.py 的单 publisher 设计同源
- * （mock_fleet.py:150-166 注释：多协程并发写 aiomqtt 会堆积 pending publish）。
+ * How many robots' publish rhythm each VU handles.
+ * 1 VU uses setInterval to publish serially —— same origin as mock_fleet.py's single publisher
+ * design (mock_fleet.py:150-166 comment: multiple coroutines writing aiomqtt concurrently piles up
+ * pending publishes).
  */
 export const ROBOTS_PER_VU = envInt('ROBOTS_PER_VU', 1);
 
 /**
- * VU 数 = ceil(机器人台数 / 每 VU 台数)。
- * ⚠️ 这台机器的 k6 是单进程多 goroutine，**不等价于 mock_fleet 的单进程**：
- * 100 个 VU 就有 100 个 MQTT 连接。EMQX 的 max_connections 默认远大于此，
- * 但若把 ROBOTS 调到上千，先确认 broker 的连接数与 `emqx ctl` 指标。
+ * VU count = ceil(robot count / robots per VU).
+ * Note: this machine's k6 is single-process multi-goroutine, **not equivalent to mock_fleet's
+ * single process**: 100 VUs means 100 MQTT connections. EMQX's max_connections default is far above
+ * this, but if you dial ROBOTS into the thousands, first confirm the broker's connection count and
+ * the `emqx ctl` metrics.
  */
 export const VU_COUNT = Math.max(1, Math.ceil(ROBOT_COUNT / ROBOTS_PER_VU));
 
-// ---------------------------------------------------------------- 可判定阈值
+// ---------------------------------------------------------------- decidable thresholds
 
 /**
- * 判定阈值。键名与 `check()` 里的断言一一对应，改这里就是改判定标准。
- * 依据来源逐条标注，禁止无据放宽（R-07 §6.2「禁止为通过而放宽阈值」）。
+ * Judgment thresholds. Key names map one-to-one to the assertions in `check()`; changing here
+ * changes the judgment standard. Source cited per item; forbid loosening without basis
+ * (R-07 §6.2 "forbid loosening thresholds just to pass").
  */
 export const THRESHOLDS = {
-  // ① 连接成功率：R-07 §1 要求「就绪判据是真实探测，禁止裸 sleep」。
-  //    连接建不起来 = 环境未就绪，必须显式 FAIL 而不是把 0 条当成「跑得快」。
-  //    99% 而非 100%：允许个别 VU 在爬坡期撞上 broker 的瞬时 connect 限流。
+  // ① Connection success rate: R-07 §1 requires "readiness criterion is a real probe, no bare
+  //    sleep". Can't connect = environment not ready, must explicitly FAIL rather than treat 0
+  //    as "runs fast". 99% not 100%: allow an occasional VU to hit the broker's transient connect
+  //    rate-limit during ramp.
   conn_success_rate: envFloat('TH_CONN_SUCCESS_RATE', 0.99),
 
-  // ② 发布延迟：qos=0 下 publish() 是「写入 socket」的同步代价。
-  //    R-07 §3 的 P95 < 200ms 是**落库批耗时**，不是本项；本项是发布侧观测，
-  //    阈值取 50ms 量级（单条 publish 在本地 broker 上通常 < 1ms，留足抖动余量）。
+  // ② Publish latency: under qos=0, publish() is the synchronous cost of "writing to socket".
+  //    R-07 §3's P95 < 200ms is the **batch landing cost**, not this item; this item is the
+  //    publish-side observation, threshold on the order of 50ms (a single publish on a local
+  //    broker is usually < 1ms, leaving ample jitter margin).
   pub_p95_ms: envFloat('TH_PUB_P95_MS', 50.0),
   pub_p99_ms: envFloat('TH_PUB_P99_MS', 200.0),
 
-  // ③ WS 收包率：R-08 E4 的判据是「1000 msg/s 进浏览器、渲染 ≈10 次/秒」。
-  //    这里测的是**服务端到客户端的投递率**，不测前端渲染（渲染由前端单测覆盖）。
-  //    R-08 C4/C5 要求 snapshot 含 100 台、telemetry 字段是数字。
+  // ③ WS receive rate: R-08 E4's criterion is "1000 msg/s into the browser, renders ≈10 times/sec".
+  //    Here we test the **server-to-client delivery rate**, not frontend rendering (rendering is
+  //    covered by frontend unit tests). R-08 C4/C5 require snapshot to contain 100 units and
+  //    telemetry fields to be numeric.
   ws_snapshot_robots: envInt('TH_WS_SNAPSHOT_ROBOTS', ROBOT_COUNT),
-  /** R-08 C5：telemetry 字段为数字的比率。允许 1% 抖动。 */
+  /** R-08 C5: ratio of telemetry fields that are numbers. Allow 1% jitter. */
   ws_telemetry_fields_rate: envFloat('TH_WS_TELEMETRY_FIELDS_RATE', 0.99),
   ws_delivery_rate: envFloat('TH_WS_DELIVERY_RATE', 0.90),
 
-  // ④ 吞吐：R-07 §3「端到端吞吐 ≥ 1000 msg/s」。容差取目标值的 95%。
+  // ④ Throughput: R-07 §3 "end-to-end throughput ≥ 1000 msg/s". Tolerance is 95% of the target.
   throughput_ratio: envFloat('TH_THROUGHPUT_RATIO', 0.95),
 };
 
-/** 目标吞吐（msg/s），用于打印与吞吐判定。 */
+/** Target throughput (msg/s), for printing and throughput judgment. */
 export const TARGET_MSG_PER_SEC = ROBOT_COUNT * PUBLISH_HZ;
 
-/** 稳态阶段期望发布总条数。 */
+/** Expected total publishes during the steady-state phase. */
 export const EXPECTED_PUBLISHES = TARGET_MSG_PER_SEC * DURATION_S;
 
 /**
- * k6 的 options（含 scenarios 与 thresholds）。
+ * k6's options (scenarios + thresholds).
  *
- * scenarios 用 ramping-vus 而非 constant-vus：
- * 爬坡期让 VU 依次建连，避免 100 个 TCP 同时握手把 broker 的 SYN 队列打满，
- * 从而把「连接风暴」误读成「连接成功率低」。
+ * scenarios use ramping-vus rather than constant-vus:
+ * the ramp lets VUs connect sequentially, avoiding 100 simultaneous TCP handshakes filling the
+ * broker's SYN queue, which would misread a "connection storm" as "low connection success rate".
  */
 export function buildOptions() {
   return {
@@ -103,8 +110,9 @@ export function buildOptions() {
         tags: { scenario: 'mqtt_telemetry' },
       },
     },
-    // k6 原生 thresholds：把「check 失败率」「自定义 Trend 分位」直接接到退出码上。
-    // 与 check() 是两层保险 —— check() 给逐条证据，thresholds 给 CI 的 0/1 判定。
+    // Native k6 thresholds: hook "check failure rate" and "custom Trend quantiles" directly to the
+    // exit code. Two layers of insurance with check() —— check() gives per-item evidence, thresholds
+    // give CI's 0/1 judgment.
     thresholds: {
       checks: ['rate>=' + THRESHOLDS.conn_success_rate.toFixed(4)],
       pub_latency_ms: [
@@ -113,9 +121,9 @@ export function buildOptions() {
       ],
       mqtt_messages_sent: ['count>0'],
     },
-    // 每个 VU 独占一个 MQTT 连接，不共享（xk6-mqtt 的 Client 绑定 VU 事件循环）。
+    // Each VU owns one MQTT connection, not shared (xk6-mqtt's Client binds the VU event loop).
     noConnectionReuse: false,
-    // 关掉 k6 的默认 http 指标噪音（本脚本不发 HTTP；WS 走独立探针）。
+    // Turn off k6's default http metric noise (this script sends no HTTP; WS has its own probe).
     summaryTrendStats: ['avg', 'min', 'med', 'p(90)', 'p(95)', 'p(99)', 'max'],
   };
 }

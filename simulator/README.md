@@ -1,52 +1,46 @@
-# RobotMonitor 遥测模拟器（订单 02）
+# RobotMonitor telemetry simulator (Order 02)
 
-在没有 100 台真实机器人时，用本脚本跑满系统性能上限（100 台 × 10Hz ≈ 1000 msg/s），
-验证 MQTT 接入、数据库写入压力与告警触发。
+When there are no 100 real robots, use this script to drive the system to its performance ceiling (100 robots × 10Hz ≈ 1000 msg/s), validating MQTT ingestion, DB write pressure, and alert triggering.
 
-## 运行
+## Running
 
 ```bash
 pip install -r requirements.txt
 python mock_fleet.py --robots 100 --broker localhost --port 1883 --fault-rate 0.02
 ```
 
-## 参数
+## Parameters
 
-| 参数 | 默认 | 说明 |
+| Parameter | Default | Description |
 | :--- | :--- | :--- |
-| `--robots` | 100 | 机器人台数（`humanoid-001` ~ `humanoid-100`） |
-| `--broker` | localhost | MQTT Broker 地址 |
-| `--port` | 1883 | MQTT 端口 |
-| `--fault-rate` | 0.02 | 过热注入比例（约 2% 机器人） |
+| `--robots` | 100 | number of robots (`humanoid-001` ~ `humanoid-100`) |
+| `--broker` | localhost | MQTT broker address |
+| `--port` | 1883 | MQTT port |
+| `--fault-rate` | 0.02 | overheat injection ratio (~2% of robots) |
 
-## 三类异常注入
+## Three kinds of fault injection
 
-| 类型 | 行为 | 触发的告警规则 |
+| Type | Behavior | Alert rule triggered |
 | :--- | :--- | :--- |
-| 电机过热 | 运行 30s 后目标关节以 ≤0.6°C/周期 爬升至 **82°C+** | `motor_temp`（>75°C） |
-| 电池耗尽 | 电量按 **0.05%/s** 下降，跌破 **15%** | `battery_low` |
-| 随机掉线 | 随机切断某台若干秒（8~20s 间隔） | `offline`（>10s） |
+| Motor overheat | after 30s of running, the target joint climbs at ≤0.6°C/cycle to **82°C+** | `motor_temp` (>75°C) |
+| Battery drain | battery drops at **0.05%/s**, falling below **15%** | `battery_low` |
+| Random disconnect | randomly cut a robot off for several seconds (8~20s interval) | `offline` (>10s) |
 
-## 契约要点
+## Contract highlights
 
-- **24 个关节键名**严格采用 `spec/00 §5.5` 全名，
-  `joint_temperatures` / `joint_positions` / `joint_torques` 共用同一套键。
-- payload 与 `spec/01 §3` 对齐，含预计算列 **`max_joint_temp`**（= 最高关节温度）。
-- `robot_id` 格式 `humanoid-NNN`。
+- The **24 joint key names** strictly follow `spec/00 §5.5` full names; `joint_temperatures` / `joint_positions` / `joint_torques` share the same key set.
+- The payload aligns with `spec/01 §3`, including the precomputed column **`max_joint_temp`** (= highest joint temperature).
+- `robot_id` format `humanoid-NNN`.
 
-## 实现说明
+## Implementation notes
 
-- 100 个机器人协程只生成 payload 并投递到 `asyncio.Queue`；
-  **由单个 publisher 协程串行 publish** —— `aiomqtt.Client` 不适合多协程并发写，
-  并发直接 publish 会产生 "pending publish calls" 堆积。
-- 面板用 `rich.live.Live` **每秒刷新一次**，不逐条 print。
-- MQTT 断线指数退避重连（1s 起，上限 30s）。
+- The 100 robot coroutines only generate payload and deliver it to `asyncio.Queue`; **a single publisher coroutine publishes serially** — `aiomqtt.Client` is not suited to concurrent writes from many coroutines; concurrent publish leads to a pile-up of "pending publish calls".
+- The panel uses `rich.live.Live` to **refresh once per second**, not printing per row.
+- MQTT disconnect uses exponential-backoff reconnect (starts at 1s, cap 30s).
 
-## 任务级协同仿真（Issue #63 / G-7）
+## Task-level coordinated simulation (Issue #63 / G-7)
 
-`mock_fleet.py` 只产独立波形；`task_sim.py` 在其 payload 构造器与 MQTT 发布器之上
-叠加**任务调度器**，让多台机器人遥测在时间上相关（流水线工位轮转 / 故障传播），
-相关性完全来自调度逻辑，**不硬编码相关系数**。
+`mock_fleet.py` only produces independent waveforms; `task_sim.py` layers a **task scheduler** on top of its payload constructor and MQTT publisher, making multiple robots' telemetry temporally correlated (assembly-line station rotation / fault propagation). The correlation comes entirely from the scheduling logic, **with no hardcoded correlation coefficients**.
 
 ```bash
 # 流水线场景：纯仿真 + 相关性断言（无需 broker，用于验收）
@@ -56,24 +50,19 @@ python simulator/task_sim.py --scenario pipeline --stations 3 --cycle 12 --no-br
 python simulator/task_sim.py --scenario fault --robots 12 --broker localhost --port 1883
 ```
 
-| 参数 | 默认 | 说明 |
+| Parameter | Default | Description |
 | :--- | :--- | :--- |
-| `--scenario` | pipeline | `pipeline`（流水线工位轮转）/ `fault`（中枢故障→邻居队列积压） |
-| `--stations` | 3 | 流水线工位数（pipeline） |
-| `--cycle` | 12 | 流水线/故障周期（秒） |
-| `--no-broker` | false | 纯仿真 + 相关性断言，不连 MQTT |
-| `--out` | task_sim_series.json | 60s 遥测样本导出路径（供绘图/复核） |
+| `--scenario` | pipeline | `pipeline` (assembly-line station rotation) / `fault` (hub fault → neighbor queue backlog) |
+| `--stations` | 3 | number of assembly-line stations (pipeline) |
+| `--cycle` | 12 | assembly-line/fault period (seconds) |
+| `--no-broker` | false | pure simulation + correlation assertion, no MQTT connection |
+| `--out` | task_sim_series.json | 60s telemetry sample export path (for plotting/review) |
 
-验收证据：`--no-broker` 模式导出 60s 遥测并计算 Pearson 相关，断言至少一对机器人
-指标序列显著相关（|r| ≥ 0.3），退出码 0=通过 / 2=未达标。实测：pipeline r≈−0.54（相邻工位反相关），
-fault r≈+0.99（中枢-邻居正相关）。输出仍走 MQTT（topic/payload 与 mock_fleet 完全一致）。
+Acceptance evidence: the `--no-broker` mode exports 60s of telemetry and computes the Pearson correlation, asserting that at least one pair of robot metric series is significantly correlated (|r| ≥ 0.3); exit code 0=pass / 2=fail. Measured: pipeline r≈−0.54 (adjacent-station anti-correlation), fault r≈+0.99 (hub-neighbor positive correlation). Output still goes over MQTT (topic/payload identical to mock_fleet).
 
+## AgentVerse drive-capability probe (Issue #114 / G-7)
 
-## AgentVerse 驱动能力探针（Issue #114 / G-7）
-
-G-7 曾计划用 AgentVerse 驱动本模拟器跑 100 台任务级仿真。**实测判定不可行**：
-AgentVerse 是 LLM 文本对话框架，`step()` 返回自然语言 `Message`，不产出遥测数值。
-探针脚本保留在此，供复现与后续复核：
+G-7 once planned to use AgentVerse to drive this simulator for a 100-robot task-level simulation. **Measured verdict: not feasible**: AgentVerse is an LLM text-dialog framework; its `step()` returns natural-language `Message`s and produces no telemetry values. The probe script is kept here for reproduction and future review:
 
 ```bash
 # 前置：clone AgentVerse（物料不随本仓交付）+ 装依赖（aliyun 镜像）
@@ -89,5 +78,5 @@ python simulator/agentverse_probe/verify_agentverse.py --av-root /tmp/agentverse
 bash simulator/agentverse_probe/verify_with_local_llm.sh
 ```
 
-完整实证报告见 [`../docs/agentverse-verification/README.md`](../docs/agentverse-verification/README.md)。
-任务级仿真由 `task_sim.py` 承担，其验收测试为 `tests/test_task_sim_harness.py`。
+Full empirical report: [`../docs/agentverse-verification/README.md`](../docs/agentverse-verification/README.md).
+The task-level simulation is handled by `task_sim.py`; its acceptance test is `tests/test_task_sim_harness.py`.

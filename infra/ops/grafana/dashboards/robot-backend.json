@@ -24,8 +24,8 @@
     {
       "id": 1,
       "type": "stat",
-      "title": "落库吞吐（行/秒）",
-      "description": "rate(robot_backend_telemetry_written_total[1m])：BatchWriter 每秒写入 TimescaleDB 的行数。100 台 × 10Hz 稳态应为 ~1000 rows/s。指标源 backend_ingestion/app/metrics.py:62",
+      "title": "Ingestion throughput (rows/s)",
+      "description": "rate(robot_backend_telemetry_written_total[1m]): rows BatchWriter writes to TimescaleDB per second. Steady state for 100 units × 10Hz should be ~1000 rows/s. Metric source backend_ingestion/app/metrics.py:62",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -79,8 +79,8 @@
     {
       "id": 2,
       "type": "stat",
-      "title": "队列积压（条）",
-      "description": "robot_backend_queue_depth：asyncio.Queue 当前积压。持续增长=落库跟不上 1000 msg/s。告警线沿用 R-09 §2 的 >5000（rules/robot-alerts.yml:13）。指标源 metrics.py:84",
+      "title": "Queue backlog (items)",
+      "description": "robot_backend_queue_depth: current backlog in the asyncio.Queue. Steady growth = ingestion can't keep up with 1000 msg/s. Alert line reuses R-09 §2's >5000 (rules/robot-alerts.yml:13). Metric source metrics.py:84",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -142,8 +142,8 @@
     {
       "id": 3,
       "type": "stat",
-      "title": "WS 连接数",
-      "description": "robot_backend_ws_connections：当前活跃 /ws/robots 连接数。只增不减=连接泄漏。指标源 metrics.py:123",
+      "title": "WS connections",
+      "description": "robot_backend_ws_connections: current active /ws/robots connections. Only grows = connection leak. Metric source metrics.py:123",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -197,8 +197,8 @@
     {
       "id": 4,
       "type": "stat",
-      "title": "在线机器人数",
-      "description": "robot_backend_robots_online：now-last_seen<=阈值 的机器人数（停报者不计入）。指标源 metrics.py:132",
+      "title": "Online robots",
+      "description": "robot_backend_robots_online: robots with now-last_seen<=threshold (those that stopped reporting are excluded). Metric source metrics.py:132",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -252,7 +252,7 @@
     {
       "id": null,
       "type": "row",
-      "title": "落库健康",
+      "title": "Ingestion health",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -265,8 +265,8 @@
     {
       "id": 10,
       "type": "timeseries",
-      "title": "落库吞吐（rows/s）",
-      "description": "rate(robot_backend_telemetry_written_total[1m])，稳态应贴合 1000 rows/s。指标源 backend_ingestion/app/metrics.py:62",
+      "title": "Ingestion throughput (rows/s)",
+      "description": "rate(robot_backend_telemetry_written_total[1m]), steady state should track ~1000 rows/s. Metric source backend_ingestion/app/metrics.py:62",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -316,8 +316,8 @@
     {
       "id": 11,
       "type": "timeseries",
-      "title": "队列积压 robot_backend_queue_depth",
-      "description": "Gauge 瞬时积压。持续 >5000（红）说明写入被拖住。指标源 metrics.py:84；告警线见 rules/robot-alerts.yml:13",
+      "title": "Queue backlog robot_backend_queue_depth",
+      "description": "Gauge instantaneous backlog. Persistently >5000 (red) means writes are stalled. Metric source metrics.py:84; alert line see rules/robot-alerts.yml:13",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -367,8 +367,8 @@
     {
       "id": 12,
       "type": "timeseries",
-      "title": "批刷新次数（按 reason）",
-      "description": "rate(robot_backend_batch_flushes_total[1m])，by reason。count=攒满 500 条触发（高吞吐），timeout=满 1s 兜底（低吞吐）。指标源 metrics.py:78",
+      "title": "Batch flush count (by reason)",
+      "description": "rate(robot_backend_batch_flushes_total[1m]), by reason. count=fired after accumulating 500 rows (high throughput), timeout=fired after full 1s (low throughput). Metric source metrics.py:78",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -418,8 +418,8 @@
     {
       "id": 13,
       "type": "timeseries",
-      "title": "MQTT 接收",
-      "description": "rate(robot_backend_mqtt_received_total[1m])：MQTT 收到的遥测消息数。指标源 metrics.py:89",
+      "title": "MQTT received",
+      "description": "rate(robot_backend_mqtt_received_total[1m]): telemetry messages received via MQTT. Metric source metrics.py:89",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -469,8 +469,8 @@
     {
       "id": 14,
       "type": "timeseries",
-      "title": "MQTT 丢弃（非 0 即契约破坏）",
-      "description": "increase(robot_backend_mqtt_dropped_total[1m])：校验失败被丢弃的消息。>0 触发 MqttDropped（rules/robot-alerts.yml:23）。指标源 metrics.py:94",
+      "title": "MQTT dropped (non-zero = contract broken)",
+      "description": "increase(robot_backend_mqtt_dropped_total[1m]): messages dropped due to validation failure. >0 triggers MqttDropped (rules/robot-alerts.yml:23). Metric source metrics.py:94",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -520,7 +520,7 @@
     {
       "id": null,
       "type": "row",
-      "title": "WS 实时性 / 背压",
+      "title": "WS realtime / backpressure",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -533,8 +533,8 @@
     {
       "id": 20,
       "type": "timeseries",
-      "title": "WS 连接数 robot_backend_ws_connections",
-      "description": "服务端当前活跃连接数。指标源 metrics.py:123",
+      "title": "WS connections robot_backend_ws_connections",
+      "description": "Current active server-side connections. Metric source metrics.py:123",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -584,8 +584,8 @@
     {
       "id": 21,
       "type": "timeseries",
-      "title": "出站队列积压 robot_backend_ws_outbound_queue_depth",
-      "description": "所有连接出站队列积压帧合计，持续 >0=有慢客户端。指标源 metrics.py:210",
+      "title": "Outbound queue backlog robot_backend_ws_outbound_queue_depth",
+      "description": "Sum of outbound queue backlog frames across all connections; persistent >0 = slow clients. Metric source metrics.py:210",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -635,8 +635,8 @@
     {
       "id": 22,
       "type": "timeseries",
-      "title": "丢帧 / 慢客户端摘除 / 告警顺延",
-      "description": "丢帧 telemetry_frames_dropped_total（设计内背压）、slow_client_evicted_total（踢连接）、alerts_deferred_total（告警应恒 0）。指标源 metrics.py:219/235/227",
+      "title": "Frame drops / slow client eviction / alert deferral",
+      "description": "Frame drops telemetry_frames_dropped_total (in-design backpressure), slow_client_evicted_total (kicked connections), alerts_deferred_total (should stay 0). Metric source metrics.py:219/235/227",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -706,8 +706,8 @@
     {
       "id": 23,
       "type": "timeseries",
-      "title": "WS 中枢扇出帧数（按 kind）",
-      "description": "rate(robot_backend_ws_hub_frames_total[1m]) by kind。telemetry=合并后每机器人一帧，alert=逐条不合并。指标源 metrics.py:255",
+      "title": "WS hub fan-out frames (by kind)",
+      "description": "rate(robot_backend_ws_hub_frames_total[1m]) by kind. telemetry=one frame per robot after coalescing, alert=per-item, not coalesced. Metric source metrics.py:255",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -757,8 +757,8 @@
     {
       "id": 24,
       "type": "timeseries",
-      "title": "中枢合并条数（合并收益）",
-      "description": "rate(robot_backend_ws_hub_coalesced_total[1m])：被节拍合并掉的遥测帧。>0 才证明「每机器人只留最新一帧」生效。指标源 metrics.py:261",
+      "title": "Hub coalesced count (coalescing benefit)",
+      "description": "rate(robot_backend_ws_hub_coalesced_total[1m]): telemetry frames merged away by the tick. >0 proves 'keep only the latest frame per robot' is effective. Metric source metrics.py:261",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -808,8 +808,8 @@
     {
       "id": 25,
       "type": "timeseries",
-      "title": "WS 探针存活 / 失败",
-      "description": "ws_probe_alive（1=握手并收到 snapshot 首帧）、increase(ws_probe_failures_total[5m])（>2 触发 WsProbeFailing，rules/robot-alerts.yml:45）。指标源 metrics.py:103/108",
+      "title": "WS probe alive / failures",
+      "description": "ws_probe_alive (1=handshake done and first snapshot frame received), increase(ws_probe_failures_total[5m]) (>2 triggers WsProbeFailing, rules/robot-alerts.yml:45). Metric source metrics.py:103/108",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -869,7 +869,7 @@
     {
       "id": null,
       "type": "row",
-      "title": "在线态与查询延迟",
+      "title": "Online state and query latency",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -882,8 +882,8 @@
     {
       "id": 30,
       "type": "timeseries",
-      "title": "在线台数（后端口径）",
-      "description": "robot_backend_robots_online：now-last_seen<=阈值。指标源 metrics.py:132",
+      "title": "Online robots (backend gauge)",
+      "description": "robot_backend_robots_online: now-last_seen<=threshold. Metric source metrics.py:132",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -933,8 +933,8 @@
     {
       "id": 31,
       "type": "timeseries",
-      "title": "/history p95 延迟",
-      "description": "histogram_quantile(0.95, rate(robot_backend_history_latency_seconds_bucket[5m]))，分位。桶边界见 metrics.py:141。",
+      "title": "/history p95 latency",
+      "description": "histogram_quantile(0.95, rate(robot_backend_history_latency_seconds_bucket[5m])), quantile. Bucket boundaries see metrics.py:141.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -994,8 +994,8 @@
     {
       "id": 32,
       "type": "timeseries",
-      "title": "/history 数据源占比（cagg vs raw）",
-      "description": "rate(robot_backend_history_source_total[1m]) by source。p95 下降 + cagg 占比上升必须同时成立。指标源 metrics.py:156",
+      "title": "/history data source share (cagg vs raw)",
+      "description": "rate(robot_backend_history_source_total[1m]) by source. Both p95 dropping AND cagg share rising must hold together. Metric source metrics.py:156",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1060,7 +1060,7 @@
         },
         "hide": 0,
         "includeAll": false,
-        "label": "数据源",
+        "label": "Datasource",
         "multi": false,
         "name": "datasource",
         "options": [],
@@ -1078,7 +1078,7 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "RobotMonitor · 后端业务指标",
+  "title": "RobotMonitor - Backend business metrics",
   "uid": "robot-backend",
   "version": 1,
   "weekStart": ""

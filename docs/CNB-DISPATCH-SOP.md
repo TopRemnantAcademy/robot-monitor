@@ -1,298 +1,272 @@
-# CNB NPC 派单标准作业程序（SOP）
+# CNB NPC Dispatch Standard Operating Procedure (SOP)
 
-> 本文规定**如何给 CNB 的 @codebuddy 指派任务**，以及**如何判别它到底做没做完**。
-> 全部条目均来自本项目实测（2026-10-09 ~ 10），非推测。未经实证的标「未验证」。
+> This document specifies **how to assign tasks to CNB's @codebuddy**, and **how to tell whether it actually finished**.
+> All items come from this project's own verification (2026-10-09 ~ 10), not speculation. Items not empirically verified are marked "unverified".
 
 ---
 
-## 0. 三条派单通道
+## 0. Three Dispatch Channels
 
-| 通道 | 触发方式 | 适用场景 | 是否注入 `CNB_NPC_TRIGGER_CONTENT` |
+| Channel | Trigger Method | Applicable Scenario | Injects `CNB_NPC_TRIGGER_CONTENT`? |
 |---|---|---|---|
-| **A. Issue/PR 评论**（主用） | 评论里出现 `@codebuddy` | 单次具体任务 | ✅ 是 |
-| **B. crontab 定时** | `.cnb.yml` 的 `crontab` 阶段 | 周期性巡检 | ❌ 否 |
-| **C. 指定角色** | `@flow.237/RobotMonitor(角色名)` | 需要特定专家视角 | ✅ 是 |
+| **A. Issue/PR comment** (primary) | A comment containing `@codebuddy` | A single concrete task | ✅ Yes |
+| **B. crontab schedule** | The `crontab` stage in `.cnb.yml` | Periodic inspection | ❌ No |
+| **C. Designated role** | `@flow.237/RobotMonitor(role name)` | Needs a specific expert perspective | ✅ Yes |
 
-**本项目只用通道 A。** 通道 B 的坑见 §5.3。
+**This project only uses Channel A.** See §5.3 for the pitfalls of Channel B.
 
 ---
 
-## 1. 标准派单流程（7 步）
+## 1. Standard Dispatch Flow (7 steps)
 
-### 步骤 1 — 确认基线提交
+### Step 1 — Confirm Baseline Commit
 ```bash
-git log --oneline -1          # 记下 sha，写进派单正文
+git log --oneline -1          # note the sha, write it into the dispatch body
 ```
-派单正文必须写明「基于 `main @ <sha>`」，否则 NPC 可能基于旧代码开工。
+The dispatch body must state "based on `main @ <sha>`", otherwise the NPC may start from old code.
 
-### 步骤 2 — 先把需求写成文件
-**禁止**把长需求直接塞进 `--body`。一律写成 `orders/NN-dispatch.md` 再 `--body-file`。
-理由：可入库留档、可复用、可 diff，且避免 shell 转义问题。
+### Step 2 — Write the Requirement as a File First
+**Forbidden** to stuff long requirements directly into `--body`. Always write `orders/NN-dispatch.md` first then use `--body-file`. Reason: archivable, reusable, diffable, and avoids shell escaping issues.
 
-### 步骤 3 — 创建 Issue（**正文不要放触发词**）
+### Step 3 — Create Issue (**body must not contain the trigger word**)
 ```bash
 cnb issues create-issue \
   --repo flow.237/RobotMonitor \
-  --title "NN — <一句话任务>" \
+  --title "NN — <one-line task>" \
   --body-file orders/NN-dispatch.md
 ```
 
-> ⚠️ **实测陷阱**：如果 `create-issue` 的正文里含 `@codebuddy`，
-> CNB 会**立即触发一次构建**；随后再 `post-issue-comment` 又会触发第二次
-> → 两个 NPC 同时改同一批文件，产生冲突与重复提交。
-> （本项目订单 07 实际发生过，已用 `stop-build` 停掉一个。）
+> ⚠️ **Verified trap**: If the `create-issue` body contains `@codebuddy`, CNB will **immediately trigger a build**; then a later `post-issue-comment` triggers a second one → two NPCs editing the same batch of files, causing conflicts and duplicate submissions. (This actually happened in this project's Order 07; one was stopped with `stop-build`.)
 >
-> **规则：create-issue 正文不含触发词，触发只在步骤 4 做一次。**
+> **Rule: the create-issue body must not contain the trigger word; triggering happens only once at Step 4.**
 
-### 步骤 4 — 用评论触发 NPC（**必须带 `--work-mode`**）
+### Step 4 — Trigger NPC via Comment (**must include `--work-mode`**)
 ```bash
 cnb issues post-issue-comment \
   --repo flow.237/RobotMonitor \
-  --number <issue号> \
+  --number <issue number> \
   --work-mode \
-  --body "@codebuddy 请接单执行订单 NN。<一句话要点>。完整需求见 orders/NN-dispatch.md。"
+  --body "@codebuddy please pick up and execute Order NN. <one-line key point>. Full requirements in orders/NN-dispatch.md."
 ```
 
-`--work-mode` **不可省略**。实测：没有它时 NPC 得到 `CNB_NPC_ENABLE_WORKMODE=false`，
-无法写仓库，最终只产出分析不落地。
+`--work-mode` **cannot be omitted**. Verified: without it the NPC gets `CNB_NPC_ENABLE_WORKMODE=false`, cannot write to the repo, and ultimately only produces analysis without landing anything.
 
-> ⚠️ **实测陷阱（2026-10-11 订单 19）**：`--body` 里**必须真的写上 `@codebuddy`**。
-> 只带 `--work-mode` 但正文没写触发词时，API 照常返回 `201`、评论也正常出现在 issue 里，
-> **但一个构建都不会被拉起** —— 从返回码完全看不出失败。
-> 派单后必须立即执行步骤 5（查 `get-build-logs`），而不是等到想起来才查。
+> ⚠️ **Verified trap (2026-10-11 Order 19)**: `--body` **must actually contain the written `@codebuddy`**. When only `--work-mode` is present but the body lacks the trigger word, the API still returns `201` and the comment appears normally in the issue, **but no build is ever launched** — the failure is completely invisible from the return code. After dispatching, you must immediately run Step 5 (check `get-build-logs`), not wait until you remember.
 
-### 步骤 5 — 立刻核验 `workMode`
+### Step 5 — Immediately Verify `workMode`
 ```bash
 cnb build get-build-status --repo flow.237/RobotMonitor --sn <sn>
 ```
-确认输出含：
+Confirm the output contains:
 ```
 npc:
   name: CodeBuddy
   match: @codebuddy
-  workMode: true          # ← 必须是 true
+  workMode: true          # ← must be true
 ```
-`workMode: false` 说明步骤 4 漏了参数，白跑一场。
+`workMode: false` means Step 4 missed a parameter — a wasted run.
 
-### 步骤 6 — 等构建结束，查状态
+### Step 6 — Wait for Build to Finish, Check Status
 ```bash
 cnb build get-build-status --repo flow.237/RobotMonitor --sn <sn>
 # status: pending → success / error
 ```
-单次 NPC 阶段实测耗时 **约 12 分钟**（订单 05：716 秒）。
+A single NPC stage took **about 12 minutes** in practice (Order 05: 716 seconds).
 
-### 步骤 7 — ⭐ 判别「真完成」（**最关键，别信 status**）
+### Step 7 — ⭐ Determine "Truly Done" (**most critical, don't trust status**)
 
-`status: success` **不等于**代码已进 main。实测订单 05 就是 success 但 `main` 纹丝不动。
+`status: success` **does not equal** code merged into main. In practice Order 05 was success but `main` did not move at all.
 
-必须走这个判据：
+You must apply this criterion:
 
 ```bash
-# 7-1 看远端有没有新分支（NPC 推不动 main，只能推分支）
+# 7-1 see if there is a new branch remotely (NPC cannot push main, only branches)
 git -c http.extraHeader="Authorization: Bearer ${TOKEN}" ls-remote --heads cnb
 
-# 7-2 有新分支 → fetch + 合并
+# 7-2 new branch → fetch + merge
 git -c http.extraHeader="Authorization: Bearer ${TOKEN}" fetch cnb <branch>
 git merge <sha>
 
-# 7-3 再看 main 是否真的前进了
+# 7-3 then check if main actually advanced
 git log --oneline -3
 ```
 
-> **口诀：success 但没有新 commit = 产出在分支上。**
+> **Rule of thumb: success but no new commit = output is on a branch.**
 
 ---
 
-## 2. 派单正文必须包含的 8 个要素
+## 2. 8 Elements the Dispatch Body Must Contain
 
-缺一项就容易被 NPC 自由发挥或假通过：
+Missing any one makes it easy for the NPC to freelance or falsely pass:
 
-| # | 要素 | 作用 |
+| # | Element | Role |
 |---|---|---|
-| 1 | **基线提交 sha** | 防止基于旧代码开工 |
-| 2 | **必读文件清单**（带路径） | 防止跳读导致契约不符 |
-| 3 | **任务分解**（T1/T2…） | 可逐条验收 |
-| 4 | **验收标准**（可判定的 `- [ ]`） | 防止"我觉得做完了" |
-| 5 | **禁止项** | 防止顺手改坏别处 |
-| 6 | **交付方式**（分支名 / 是否开 PR） | 便于回收 |
-| 7 | **失败上报要求**（禁止用"已推送"掩盖 403） | 防止静默失败 |
-| 8 | **定位一句话**（如"你是验收方，证据优先"） | 约束角色行为 |
+| 1 | **Baseline commit sha** | Prevent starting from old code |
+| 2 | **Required-reading file list** (with paths) | Prevent contract mismatch from skipped reading |
+| 3 | **Task breakdown** (T1/T2…) | Acceptable item by item |
+| 4 | **Acceptance criteria** (judgeable `- [ ]`) | Prevent "I think it's done" |
+| 5 | **Prohibited items** | Prevent accidentally breaking other places |
+| 6 | **Delivery method** (branch name / open PR or not) | Easy to recover |
+| 7 | **Failure-reporting requirement** (forbid masking 403 with "already pushed") | Prevent silent failure |
+| 8 | **One-line role positioning** (e.g. "you are the acceptor, evidence first") | Constrain role behavior |
 
-### 最小可用模板
+### Minimal Usable Template
 
 ```markdown
-@codebuddy 请接单执行订单 NN（<任务名>）。
+@codebuddy please pick up and execute Order NN (<task name>).
 
-## 0. 当前状态
-基线提交：main @ <sha>
-已完成：<列出前置订单>
+## 0. Current Status
+Baseline commit: main @ <sha>
+Completed: <list prerequisite orders>
 
-## 1. 必读文件
-| 顺序 | 文件 | 目的 |
+## 1. Required Reading
+| Order | File | Purpose |
 
-## 2. 任务分解
+## 2. Task Breakdown
 ### T1 — ...
 
-## 3. 验收标准
+## 3. Acceptance Criteria
 - [ ] ...
 
-## 4. 禁止项
-1. 禁止用「日志无报错」代替通过判定
-2. 禁止伪造数字；跑不出来写「未验证 + 所需条件」
-3. 禁止只推分支就宣称完成；push 失败必须原文报告
+## 4. Prohibited Items
+1. Forbidden to use "no log errors" instead of a pass criterion
+2. Forbidden to fabricate numbers; if it can't run, write "unverified + required conditions"
+3. Forbidden to claim done just by pushing a branch; push failure must be reported verbatim
 
-## 5. 交付方式
-1. 分支 feat/order-NN-<slug>
-2. 尝试 push + 开 PR
-3. push 失败 → 把 diff 与结论写进 issue 评论
+## 5. Delivery Method
+1. Branch feat/order-NN-<slug>
+2. Attempt push + open PR
+3. If push fails → write the diff and conclusion into the issue comment
 ```
 
 ---
 
-## 3. 令牌与推送（CNB 特殊要求）
+## 3. Token and Push (CNB Special Requirements)
 
-### 取令牌
+### Get Token
 ```bash
 TOKEN=$(python -c "import json,os;\
 p=os.path.expanduser('~/.cnb/token');\
 print(json.load(open(p))['auths']['cnb.cool']['access_token'])")
 ```
 
-### 推送（**必须用 Bearer 头**）
+### Push (**must use Bearer header**)
 ```bash
 git -c http.extraHeader="Authorization: Bearer ${TOKEN}" push cnb main
 ```
 
-> ⚠️ **实测**：以下两种写法都会**无限挂起**（不是慢，是 hang）：
-> - URL 内嵌令牌 `https://user:TOKEN@cnb.cool/...`
-> - `cnb git-credential` helper（返回 `unknown host: cnb.cool`，exit 2）
+> ⚠️ **Verified**: The following two forms both **hang indefinitely** (not slow, but hang):
+> - URL-embedded token `https://user:TOKEN@cnb.cool/...`
+> - `cnb git-credential` helper (returns `unknown host: cnb.cool`, exit 2)
 >
-> 另注：`git ls-remote`（GET）正常，`git push`（POST git-receive-pack）才 hang ——
-> 很容易误判成"权限问题"，其实是协议问题。
+> Also note: `git ls-remote` (GET) works normally, but `git push` (POST git-receive-pack) hangs — easily misjudged as "permission issue", but it is actually a protocol issue.
 
 ---
 
-## 4. 失败诊断表
+## 4. Failure Diagnosis Table
 
-| 现象 | 根因 | 处理 |
+| Symptom | Root Cause | Handling |
 |---|---|---|
-| 构建日志 `403 ... repo-code:rw` | NPC 令牌无写仓库 scope | NPC 推不进 main → **主代理手工合并分支** |
-| `402 [EXCEEDING_LIMIT] AI 积分已用尽` | 账号级别额度耗尽 | 需用户充值，非代码问题 |
-| `workMode: false` | 派单漏了 `--work-mode` | 重新派单并带上参数 |
-| 一次派单出现 **2 个构建** | create-issue 正文含触发词 | `cnb build stop-build --sn <重复sn>` |
-| 评论返回 `201` 但**没有任何构建** | 触发评论里**漏写了触发词** | 补发一条含 `@codebuddy` 的评论（2026-10-11 订单 19 实测踩过） |
-| `status: success` 但 main 没动 | NPC 只推了分支 | 走 §1 步骤 7 |
-| crontab 阶段秒退 `process.exit(1)` | crontab 不注入触发内容，`system_prompt` 或 `user_prompt` 为空 | 两个 prompt 都要**内联非空** |
-| `[CONFIG_YAML_EMPTY]` | CI 配置放错位置 | 必须在**仓库根** `.cnb.yml`，不是 `.cnb/.yml` |
+| Build log `403 ... repo-code:rw` | NPC token lacks write-repo scope | NPC cannot push to main → **main agent merges branch manually** |
+| `402 [EXCEEDING_LIMIT] AI credits exhausted` | Account-level quota depleted | Needs user to top up, not a code issue |
+| `workMode: false` | Dispatch missed `--work-mode` | Re-dispatch with the parameter |
+| **2 builds** from one dispatch | create-issue body contained the trigger word | `cnb build stop-build --sn <duplicate sn>` |
+| Comment returns `201` but **no build at all** | Trigger comment **missed the trigger word** | Post another comment containing `@codebuddy` (stepped on in 2026-10-11 Order 19) |
+| `status: success` but main didn't move | NPC only pushed a branch | Follow §1 Step 7 |
+| crontab stage exits instantly `process.exit(1)` | crontab injects no trigger content, `system_prompt` or `user_prompt` empty | Both prompts must be **inline and non-empty** |
+| `[CONFIG_YAML_EMPTY]` | CI config placed in wrong location | Must be `.cnb.yml` at the **repo root**, not `.cnb/.yml` |
 
 ---
 
-## 5. 派单纪律（违反即返工）
+## 5. Dispatch Discipline (violation = rework)
 
-1. **一次一单**：不在同一个 issue 里追加第二个任务，避免上下文污染
-2. **不重复触发**：create-issue 不放触发词（见 §1 步骤 3）
-3. **冲突预判**：若两单改同一文件（如都改 `requirements.txt`），
-   在后一单里写明「以同时包含两项为准」，见 `orders/08-dispatch.md` §6
-4. **不为通过而放宽阈值**：如 30,000 行不得改成 300
-5. **区分环境错误与代码错误**：见 `docs/requirements/R-07-integration-and-stress.md` §4
-6. **NPC 产出必须主代理验收**：合并后至少做一次编译/导入验证
-7. **派单前必须复验派工单本身**（2026-10-11 订单 15 实测）：
-   派工单写完后若隔了几轮才派，里面的 `file:line`、依赖订单号、列名都会腐烂。
-   本次复验发现 4 处过期 —— 行号整体后移（`/metrics` 接线后）、
-   引用了换号前的订单号（13→17）、审计列名写成不存在的 `operator`、
-   以及**漏掉 `/metrics` 免鉴权**（照原稿做会把 Prometheus 拉取挡在门外，
-   刚接线的可观测性整套失效）。
-   → **复验清单**：①行号 ②订单号/换号表 ③列名是否存在 ④有无"派单后才新增的端点"
-     需要纳入约束（尤其是免鉴权白名单）。
+1. **One order per dispatch**: Do not append a second task in the same issue, to avoid context pollution.
+2. **No duplicate triggering**: create-issue must not contain the trigger word (see §1 Step 3).
+3. **Conflict prediction**: If two orders change the same file (e.g. both change `requirements.txt`), state in the later order "the one that includes both is authoritative", see `orders/08-dispatch.md` §6.
+4. **Do not relax thresholds just to pass**: e.g. 30,000 rows must not be changed to 300.
+5. **Distinguish environment errors from code errors**: see `docs/requirements/R-07-integration-and-stress.md` §4.
+6. **NPC output must be accepted by the main agent**: after merging, run at least one compile/import verification.
+7. **Must re-verify the dispatch order itself before dispatching** (verified 2026-10-11 Order 15): If the dispatch order was written and then dispatched several rounds later, the `file:line`, dependent order numbers, and column names inside will rot. This re-verification found 4 stale entries — line numbers shifted overall (after `/metrics` wiring), referenced a pre-renumber order number (13→17), wrote an audit column name that doesn't exist (`operator`), and **missed `/metrics` auth exemption** (following the original would block Prometheus scraping at the door, breaking the just-wired observability entirely). → **Re-verification checklist**: ① line numbers ② order number / renumber table ③ whether column names exist ④ whether there are "endpoints added only after dispatch" that need to be included in constraints (especially the auth-exemption allowlist).
 
 ---
 
-## 6. 本项目派单台账
+## 6. This Project's Dispatch Ledger
 
-| 订单 | Issue | 构建 sn | 状态 | 备注 |
+| Order | Issue | Build sn | Status | Notes |
 |---|---|---|---|---|
-| 05 前端大屏 | #5 | `cnb-ft3-1k4hf69oe` | ✅ success → 已手工合并 | 34 文件/6696 行；`tsc` 0 错误、`vite build` 通过 |
-| 06 联调压测 | #6 | `cnb-q81-1k4hgt1ee` | ⏳ pending | 收口单 |
-| 07 aiomqtt 契约（I-1/I-2/I-3） | #8 | `cnb-s51-1k4hhvjem` | ⏳ pending | 另有一个重复构建已 stop |
-| 08 asyncpg 升级（I-6） | #9 | `cnb-ijj-1k4himq2k` | ⏳ pending | 与 07 同改 `requirements.txt`，已注明冲突处理 |
-| 09 前端 bundle 瘦身 | #10 | `cnb-ua1-1k4hj5d3h` | ✅ 已回收验证 | 1209.34→671.23 kB（gzip 401.05→224.79） |
-| 10 告警抑制（I-5） | #13 | — | ✅ 已回收验证 | `alert_engine` 11/11 tests passed |
-| 12 CNB 自行下载上游源 | #15 | — | ✅ 已回收 | 推翻了我的 I-1 结论，见 `external/ORDER12-VERIFICATION.md` |
-| 13 可观测性接线 + 6 分支收敛 | #33 | `cnb-f0b-1k4j8osuu` | ✅ 已回收验证 | 产出 `feat/order-13` @ `911b667`；按路径回收，其 alert `main.py`/`config.py` 判为回退已弃；补了 NPC 漏掉的 `alerts_suppressed` |
-| 19 `robot_alert` 身份 + ack 字段 | #34 | `cnb-38h-1k4jdbsm4` | ✅ 已回收并反向验证 | 产出 `auto/alert-identity-759f` @ `d27b972`；测试 25→29；NPC 发现 SQLAlchemy 会把 BIGSERIAL 排到复合 PK 最前，已用 `PrimaryKeyConstraint` 显式定序 |
-| 15 认证与 RBAC（fastapi-users） | #36 | `cnb-e2k-1k4jf5tfo` | ⏳ pending | 基线 `main@58bafb5`；workMode=true 已核验。**派前修正**：原稿行号过期、订单号未换号、审计列名写错（`operator`→实际 `ack_by`）、漏了 `/metrics` 免鉴权 |
+| 05 Frontend large screen | #5 | `cnb-ft3-1k4hf69oe` | ✅ success → manually merged | 34 files/6696 lines; `tsc` 0 errors, `vite build` passes |
+| 06 Integration/stress test | #6 | `cnb-q81-1k4hgt1ee` | ⏳ pending | Closure order |
+| 07 aiomqtt contract (I-1/I-2/I-3) | #8 | `cnb-s51-1k4hhvjem` | ⏳ pending | One duplicate build already stopped |
+| 08 asyncpg upgrade (I-6) | #9 | `cnb-ijj-1k4himq2k` | ⏳ pending | Changes `requirements.txt` same as 07, conflict handling noted |
+| 09 Frontend bundle slimming | #10 | `cnb-ua1-1k4hj5d3h` | ✅ recovered & verified | 1209.34→671.23 kB (gzip 401.05→224.79) |
+| 10 Alert inhibition (I-5) | #13 | — | ✅ recovered & verified | `alert_engine` 11/11 tests passed |
+| 12 CNB self-downloads upstream sources | #15 | — | ✅ recovered | Overturned my I-1 conclusion, see `external/ORDER12-VERIFICATION.md` |
+| 13 Observability wiring + 6-branch convergence | #33 | `cnb-f0b-1k4j8osuu` | ✅ recovered & verified | Produced `feat/order-13` @ `911b667`; recovered by path; its alert `main.py`/`config.py` judged as regression and discarded; added the `alerts_suppressed` the NPC missed |
+| 19 `robot_alert` identity + ack field | #34 | `cnb-38h-1k4jdbsm4` | ✅ recovered & reverse-verified | Produced `auto/alert-identity-759f` @ `d27b972`; tests 25→29; NPC found SQLAlchemy puts BIGSERIAL first in the composite PK, fixed with explicit `PrimaryKeyConstraint` |
+| 15 Auth and RBAC (fastapi-users) | #36 | `cnb-e2k-1k4jf5tfo` | ⏳ pending | Baseline `main@58bafb5`; workMode=true verified. **Pre-dispatch fix**: original line numbers stale, order number not renumbered, audit column name wrong (`operator`→actual `ack_by`), missed `/metrics` auth exemption |
 
-> ⚠️ **Issue 号与订单号不对齐，且跳跃极大**：#6=06、**#8=07、#9=08、#10=09、#13=10、
-> #15=12、#33=13、#34=19**。中间号被其他 issue 占用。**派单后务必记录实际号**，
-> 后续回收分支与追加情报都靠它。
+> ⚠️ **Issue numbers and order numbers are misaligned and jump wildly**: #6=06, **#8=07, #9=08, #10=09, #13=10, #15=12, #33=13, #34=19**. Intermediate numbers were taken by other issues. **Be sure to record the actual number after dispatch**, as all later branch recovery and added intelligence depend on it.
 
-### 2026-10-11 批量回收台账（远端曾累积到 19 个分支）
+### 2026-10-11 Batch Recovery Ledger (remote once accumulated to 19 branches)
 
-一次性回收 12 个分支，主代理在**本机实测**后分批落地：
+Recovered 12 branches at once; the main agent landed them in batches after **local verification**:
 
-| 分支 | 处置 | 依据 |
+| Branch | Disposition | Basis |
 |---|---|---|
-| `feat/order-06-integration` | ✅ 全取（仅 `reports/`） | 纯证据文件，零代码 |
-| `auto/upstream-sources-3ec1`、`codebuddy/external-sources-download` | ✅ 全取 | 纯文档 |
-| `auto/ui-alert-render-997e` | ✅ 全取 | 前端告警行增量渲染；`tsc` 0 错误 |
-| `feat/ops-observability-layer` | ✅ 全取 | +13448 行是 9 个 Grafana 看板 JSON，非垃圾 |
-| `feat/order-10-alert-inhibition` | ✅ 全取 | 自有订单，11/11 测试通过 |
-| `auto/db-integration-copy` | ✅ 全取 | 引入 JSONB 类型修正与三级降级链 |
-| `fix/infra-image-facts-and-contract-drift` | ⚠️ 部分取 | 取其 EMQX 撤稿与 `init.sql` 契约洞察；**`db/models.py` 拒取**（用 `sqlalchemy.JSON` 会回退 JSONB 修复） |
-| `fix/issue19-merge-safe` | ⚠️ 只取新增文件 | 其 `batch_writer.py` **会删除整条三级降级链** |
-| `codebuddy/observability-direct-wiring` | ⚠️ 只取新增文件 | 其 `main.py` 会回退 `/healthz` 语义 |
-| `feat/order-08-asyncpg-upgrade` | ⚠️ 只取 `pool.py` + 单行依赖 | 其 `requirements.txt` 会把 aiomqtt 从 2.5.1 退回 2.0.1 |
-| `cb/issue19-github-rescan`、`docs/detail-gap-reassessment`、`feat/enterprise-gap-analysis-issue19` | ⏳ 移交订单 13 | 三方同时追加 `STATUS.md`/`external/*.md`，需并集合并 |
+| `feat/order-06-integration` | ✅ take all (only `reports/`) | Pure evidence files, zero code |
+| `auto/upstream-sources-3ec1`, `codebuddy/external-sources-download` | ✅ take all | Pure docs |
+| `auto/ui-alert-render-997e` | ✅ take all | Frontend alert row incremental render; `tsc` 0 errors |
+| `feat/ops-observability-layer` | ✅ take all | +13448 lines are 9 Grafana dashboard JSON, not junk |
+| `feat/order-10-alert-inhibition` | ✅ take all | Own order, 11/11 tests pass |
+| `auto/db-integration-copy` | ✅ take all | Introduced JSONB type fix and three-tier degradation chain |
+| `fix/infra-image-facts-and-contract-drift` | ⚠️ partial | Take its EMQX retraction and `init.sql` contract insight; **reject `db/models.py`** (using `sqlalchemy.JSON` would regress the JSONB fix) |
+| `fix/issue19-merge-safe` | ⚠️ only added files | Its `batch_writer.py` **would delete the entire three-tier degradation chain** |
+| `codebuddy/observability-direct-wiring` | ⚠️ only added files | Its `main.py` would regress `/healthz` semantics |
+| `feat/order-08-asyncpg-upgrade` | ⚠️ only take `pool.py` + single-line dependency | Its `requirements.txt` would roll aiomqtt back from 2.5.1 to 2.0.1 |
+| `cb/issue19-github-rescan`, `docs/detail-gap-reassessment`, `feat/enterprise-gap-analysis-issue19` | ⏳ handed to Order 13 | Three parties simultaneously appending `STATUS.md`/`external/*.md`, need union merge |
 
-### 追加情报的正确姿势
+### The Right Way to Add Follow-up Intelligence
 
-已派单后又发现关键事实，可**追加评论**补充 —— 但正文**不得含 `@codebuddy`**，
-否则会再触发一次构建。实测：订单 09 派单后追加了一条 echarts 引用范围的情报
-（不含触发词），构建数保持 1 个。
+After dispatching, if you discover a key fact, you can **append a comment** to supplement — but the body **must not contain `@codebuddy`**, otherwise it triggers another build. Verified: after Order 09 was dispatched, a comment about echarts reference scope was appended (no trigger word), and the build count stayed at 1.
 
 ---
 
-## 6.5 批量回收纪律（2026-10-11，一次回收 12 个分支的实测总结）
+## 6.5 Batch Recovery Discipline (2026-10-11, summary of recovering 12 branches at once)
 
-并行派单会让远端在几小时内堆积十几个分支。回收时**禁止一次性 merge**，
-必须按下列顺序处置。
+Parallel dispatching makes the remote accumulate a dozen branches within hours. When recovering, **merging all at once is forbidden**; you must dispose in the following order.
 
-### 步骤 1：先测每个分支的「基线世代」
+### Step 1: Test each branch's "baseline generation"
 
 ```bash
 for b in <branch>...; do
   base=$(git merge-base main cnb/$b)
-  echo "$b : 含order07=$(git merge-base --is-ancestor <sha7> cnb/$b && echo Y||echo N) \
-        含order09=$(git merge-base --is-ancestor <sha9> cnb/$b && echo Y||echo N)"
+  echo "$b : contains order07=$(git merge-base --is-ancestor <sha7> cnb/$b && echo Y||echo N) \
+        contains order09=$(git merge-base --is-ancestor <sha9> cnb/$b && echo Y||echo N)"
 done
 ```
 
-**基于旧世代的分支，其"未改动"的文件里藏着已被修好的旧 bug。**
-实测：`feat/order-08` 的 `batch_writer.py` 不含 `_STOP` 哨兵、
-`requirements.txt` 写着 `aiomqtt==2.0.1` —— 直接 checkout 会静默回退订单 07。
+**Branches based on an old generation hide already-fixed old bugs in their "unchanged" files.** Verified: `feat/order-08`'s `batch_writer.py` lacks the `_STOP` sentinel, and `requirements.txt` says `aiomqtt==2.0.1` — a direct checkout would silently regress Order 07.
 
-### 步骤 2：区分「新增文件」与「修改文件」
+### Step 2: Distinguish "added files" from "modified files"
 
 ```bash
-git diff --name-status --diff-filter=A $base cnb/$b   # 新增 → 可直接取
-git diff --name-status --diff-filter=M $base cnb/$b   # 修改 → 必须逐个审
+git diff --name-status --diff-filter=A $base cnb/$b   # added → can take directly
+git diff --name-status --diff-filter=M $base cnb/$b   # modified → must review each
 ```
 
-**新增文件零回归风险，可批量 `git checkout cnb/$b -- <path>`。
-修改文件是全部风险所在。**
+**Added files have zero regression risk and can be batch-checked-out `git checkout cnb/$b -- <path>`. Modified files are where all the risk lies.**
 
-### 步骤 3：修改文件逐条做「是回退还是改进」判定
+### Step 3: For each modified file, judge "regression or improvement"
 
-判定标准：**对方版本相对 `main` 删掉了什么**。删除比新增危险得多。
-实测三个真实案例：
+Judgment standard: **what did the other side delete relative to `main`**. Deletion is far more dangerous than addition. Three real cases verified:
 
-| 分支改动 | 判定 | 依据 |
+| Branch change | Judgment | Basis |
 |---|---|---|
-| 删掉三级降级链（L1/L2/L3） | ❌ 拒取 | 是 `spec/01 §4.2` 的容错核心 |
-| `/healthz` 从依赖可达性退化成硬编码 `status:ok` | ❌ 拒取 | 丢掉 `db`/`retries`/`rejected` |
-| `primary_key=True` → 完全无主键 | ❌ 拒取（且**跑不通**） | SQLAlchemy 抛 `ArgumentError` |
+| Deleted the three-tier degradation chain (L1/L2/L3) | ❌ reject | It is the fault-tolerance core of `spec/01 §4.2` |
+| `/healthz` degraded from reachability-dependent to hardcoded `status:ok` | ❌ reject | Loses `db`/`retries`/`rejected` |
+| `primary_key=True` → completely no primary key | ❌ reject (and **won't run**) | SQLAlchemy throws `ArgumentError` |
 
-### 步骤 4：合并演练，量化冲突面
+### Step 4: Merge dry-run, quantify conflict surface
 
 ```bash
 git checkout -b tmp/probe main
@@ -304,48 +278,39 @@ for b in ...; do
 done
 ```
 
-⚠️ **演练前务必确认当前不在 `tmp/probe` 上**，否则最后 `git branch -D tmp/probe`
- 会失败，后续 commit 全部落进临时分支（本次实际踩中，导致一次空推送）。
+⚠️ **Before the dry-run, make sure you are not on `tmp/probe`**, otherwise the final `git branch -D tmp/probe` fails and subsequent commits all land in the temp branch (this actually happened this time, causing an empty push).
 
-### 步骤 5：无法自动合并的，把「判定」和「执行」分开
+### Step 5: For unautomatable merges, separate "judgment" from "execution"
 
-主代理负责**判定**（哪些该留、哪些会回退、为什么），
-把判定结果写成派单里的**显式保留规则表**，交给 CNB 去**执行**合并与验证。
-不要自己手搓十几个冲突文件 —— 易错且不可复现。
+The main agent is responsible for **judgment** (what to keep, what will regress, why), writes the judgment result as an **explicit retention-rule table** in the dispatch order, and hands it to CNB to **execute** the merge and verification. Don't hand-craft a dozen conflict files yourself — error-prone and not reproducible.
 
-### 步骤 6：找「分支独有贡献」要用**三点** diff，不是两点
+### Step 6: To find "branch-unique contribution" use a **three-dot** diff, not two-dot
 
 ```bash
-git diff main...cnb/$b        # ← 正确：merge-base → 分支，即分支自己的改动
-git diff main      cnb/$b     # ← 错误：会把 main 后加的内容也算成"分支删掉的"
+git diff main...cnb/$b        # ← correct: merge-base → branch, i.e. the branch's own changes
+git diff main      cnb/$b     # ← wrong: treats things main has but branch doesn't as "branch deleted"
 ```
 
-两点 diff 显示的 `D` 大多是「main 有、分支没有」，不是分支真删了东西。
-用三点 diff 才能拿到该分支**真正新增的东西**（2026-10-11 第二轮实测：
-22 个分支里真正有价值的独有贡献只有 5 处）。
+The two-dot diff's `D` mostly shows "main has it, branch doesn't", not that the branch really deleted something. Only the three-dot diff gets the branch's **truly added** content (verified second round 2026-10-11: of 22 branches, only 5 had truly valuable unique contributions).
 
-### 步骤 7：即使是"纯新增"，也要先校验它相对 main 是不是超集
+### Step 7: Even for "pure additions", first verify it is a superset relative to main
 
-三点 diff 显示 `+N -0` **不等于** 可以整文件 checkout。分支往往是旧版：
+A three-dot diff showing `+N -0` **does not mean** you can check out the whole file. Branches are often old versions:
 
 ```bash
-git diff --numstat main cnb/$b -- <file>     # 看删除数；不是 0 就不能整取
+git diff --numstat main cnb/$b -- <file>     # look at deletion count; if not 0, can't take whole file
 ```
 
-实测：`cb/issue19-github-rescan` 的 `external/SOURCES.md` 三点看是 `+138 -0`，
-但两点看是 `+143 -101` —— 整取会删掉 main 后加的「§1.1 撤稿」纠正段。
-正解是**只抽取该分支独有的段落**追加。
+Verified: `cb/issue19-github-rescan`'s `external/SOURCES.md` looks like `+138 -0` in three-dot, but `+143 -101` in two-dot — taking the whole file would delete the "§1.1 retraction" correction added after main. The correct approach is to **extract only the branch-unique paragraphs** and append them.
 
-⚠️ **顺带检查章节编号冲突**：两边都有 `## 5.` 但内容不同
-（main 的 §5=第四批、分支的 §5=第五批），直接追加会产生两个 §5。
-抽取时按目标文件的实际编号**重编号**再追加。
+⚠️ **Incidentally check for section-number conflicts**: both sides have `## 5.` but with different content (main's §5 = fourth batch, branch's §5 = fifth batch); appending directly would produce two §5s. When extracting, **renumber** according to the target file's actual numbering before appending.
 
-### 步骤 8：回收后固定跑两种全仓扫描
+### Step 8: After recovery, always run two repo-wide scans
 
 ```bash
-# ① 假覆盖扫描：test_*.py 里没有 test_* 函数 = pytest 收集 0 却静默"通过"
-#    （本仓已踩两次：alert_engine/tests/test_notifier.py、
-#     backend_ingestion/tests/test_db_integration.py）
+# ① fake-coverage scan: test_*.py with no test_* function = pytest collects 0 but silently "passes"
+#    (this repo has stepped on this twice: alert_engine/tests/test_notifier.py,
+#     backend_ingestion/tests/test_db_integration.py)
 python - <<'PY'
 import pathlib, re
 for p in pathlib.Path(".").rglob("test_*.py"):
@@ -355,38 +320,37 @@ for p in pathlib.Path(".").rglob("test_*.py"):
         print("FAKE-COVERAGE:", p)
 PY
 
-# ② 确认仓库有 pytest 配置，否则根跑 pytest 会去收集 external/ 的第三方源码
-#    （本仓此前实测 61 个 collection error 并中断，本仓自身结果完全看不见）
-python -m pytest -q        # 有 pytest.ini 后：29 passed
+# ② ensure repo has pytest config, otherwise root pytest collects external/ third-party sources
+#    (this repo previously measured 61 collection errors and aborted, its own results completely invisible)
+python -m pytest -q        # after adding pytest.ini: 29 passed
 
-# ③ 外部源"下载完了吗"不能靠仓库断言 —— external/* 被 .gitignore 排除，
-#    源码根本不入库，"已下载 22 个"这种结论在仓库里查不出来。
-#    必须拿 fetch-sources.sh 的声明清单与磁盘实存比对：
+# ③ "downloads done?" cannot be asserted from the repo —— external/* excluded by .gitignore,
+#    sources are not committed, so "22 downloaded" cannot be found in the repo.
+#    must compare fetch-sources.sh's declared list against disk reality:
 python - <<'PY'
 import re, pathlib
 block = re.search(r'SOURCES=\((.*?)\)',
     pathlib.Path("external/fetch-sources.sh").read_text(encoding="utf-8"), re.S).group(1)
 declared = set(re.findall(r'^\s*"([A-Za-z0-9._-]+)\|', block, re.M)) | {"alertmanager"}
 actual = {p.name for p in pathlib.Path("external").iterdir() if (p/".git").exists()}
-print("缺失:", sorted(declared - actual), " 多余:", sorted(actual - declared))
+print("missing:", sorted(declared - actual), " extra:", sorted(actual - declared))
 PY
-#    实测（2026-10-11）：声明 22 / 实存 14，缺 8 个 —— 此前"已下载 22 个"的说法是错的。
+#    verified (2026-10-11): declared 22 / actual 14, missing 8 —— earlier "22 downloaded" was wrong.
 ```
 
-⚠️ **正则陷阱**：用 `"([^|]+)\|` 会把前一条的结尾引号一起吃进去，
-产出 `'\n  "aiomqtt'` 这种脏名字。必须用 `^\s*"([A-Za-z0-9._-]+)\|` 加 `re.M`。
+⚠️ **Regex trap**: using `"([^|]+)\|` would swallow the closing quote of the previous line, producing dirty names like `'\n  "aiomqtt'`. You must use `^\s*"([A-Za-z0-9._-]+)\|` with `re.M`.
 
 ---
 
-## 7. 相关文件索引
+## 7. Related File Index
 
-| 文件 | 内容 |
+| File | Content |
 |---|---|
-| `.cnb.yml` | CI/NPC 流水线定义（**必须在仓库根**） |
-| `.cnb/settings.yml` | 10 个 NPC 角色定义 |
-| `AGENTS.md` | NPC 每次运行都会自动注入的工程纪律 |
-| `orders/NN-dispatch.md` | 各单派工正文 |
-| `orders/NN-<name>.md` | 各单原始任务定义 |
-| `docs/requirements/R-*.md` | 验收规格 |
-| `external/INTEGRATION-PLAN.md` | 上游开源源套用计划 |
-| `external/SOURCES.md` | 下载源 provenance |
+| `.cnb.yml` | CI/NPC pipeline definition (**must be at repo root**) |
+| `.cnb/settings.yml` | 10 NPC role definitions |
+| `AGENTS.md` | Engineering discipline auto-injected into every NPC run |
+| `orders/NN-dispatch.md` | Each order's dispatch body |
+| `orders/NN-<name>.md` | Each order's original task definition |
+| `docs/requirements/R-*.md` | Acceptance specs |
+| `external/INTEGRATION-PLAN.md` | Upstream OSS integration plan |
+| `external/SOURCES.md` | Download-source provenance |

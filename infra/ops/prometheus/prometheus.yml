@@ -1,21 +1,21 @@
-# Prometheus 抓取配置（RobotMonitor 运维层）
+# Prometheus scrape config (RobotMonitor ops layer)
 #
-# 来源（逐项对照，非臆造）：
-#   - external/emqx-exporter/README.md:82-124                  EMQX 5 两段 job 的 metrics_path / honor_labels
-#     （emqx-exporter 自抓 EMQX Prometheus API）
+# Source (item-by-item against, not fabricated):
+#   - external/emqx-exporter/README.md:82-124                  EMQX 5 two-job metrics_path / honor_labels
+#     (emqx-exporter scrapes the EMQX Prometheus API itself)
 #   - external/emqx-exporter/examples/docker-compose/prometheus-emqx5.yaml
-#                                                              job 命名、cluster/from 标签约定、mqtt-probe 段
-#   - external/prometheus/config/config.go                      scrape_configs / static_configs / relabel_configs 字段语义
+#                                                              job naming, cluster/from label convention, mqtt-probe section
+#   - external/prometheus/config/config.go                      scrape_configs / static_configs / relabel_configs field semantics
 #
-# 三个 from 标签是 emqx-exporter 看板的硬约定（README.md:82-124 注释 "fix value, don't modify"）：
+# The three from labels are a hard convention of the emqx-exporter dashboard (README.md:82-124 note "fix value, don't modify"):
 #   from: emqx | exporter | probe
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
 scrape_configs:
-  # ---- ① EMQX 自身指标：EMQX 内置的 /api/v5/prometheus/stats ----
-  # metrics_path 实证：external/emqx-prometheus-sparse/apps/emqx_prometheus/src/
+  # ---- ① EMQX's own metrics: EMQX's built-in /api/v5/prometheus/stats ----
+  # metrics_path verified: external/emqx-prometheus-sparse/apps/emqx_prometheus/src/
   #                    emqx_prometheus_api.erl:63  ("/prometheus/stats" => ?SCOPE_MONITORING)
   - job_name: 'emqx-self-metrics'
     metrics_path: /api/v5/prometheus/stats
@@ -27,8 +27,8 @@ scrape_configs:
           cluster: robot-monitor
           from: emqx
 
-  # ---- ② emqx-exporter：EMQX Prometheus API 不覆盖的那些指标 ----
-  # 端口 8085 实证：external/emqx-exporter/README.md:"listens on HTTP port 8085 by default"
+  # ---- ② emqx-exporter: the metrics EMQX's Prometheus API does not cover ----
+  # Port 8085 verified: external/emqx-exporter/README.md: "listens on HTTP port 8085 by default"
   - job_name: 'exporter-metrics'
     metrics_path: /metrics
     scrape_interval: 5s
@@ -38,9 +38,9 @@ scrape_configs:
           cluster: robot-monitor
           from: exporter
 
-  # ---- ③ MQTT 探活：真的连一次 1883 并握手 ----
-  # 这是本项目「看板明明绿的、机器人其实全掉线」这类事故的第一道探针：
-  # EMQX 自己报的指标是「服务端视角」，探针是「客户端视角」，两者背离即说明 broker 侧有问题。
+  # ---- ③ MQTT liveness probe: really connects once to 1883 and handshakes ----
+  # This is the first probe for incidents like "the dashboard is clearly green but the robots are all offline":
+  # EMQX's own reported metrics are the "server-side view"; the probe is the "client-side view" — divergence means a broker-side problem.
   - job_name: 'mqtt-probe'
     metrics_path: /probe
     params:
@@ -52,28 +52,28 @@ scrape_configs:
           cluster: robot-monitor
           from: probe
 
-  # ---- ④ 时序库：postgres_exporter（TimescaleDB 就是 PG 16）----
-  # DATA_SOURCE_NAME / 指标口径实证：external/postgres_exporter/README.md:252,316-325
-  # 本仓库的初始化建表见 infra/init.sql；连续聚合刷新滞后需要 pg_stat 侧的观测，
-  # 而 `/healthz` 的 written/flushes 只能证明「后端认为写了」。
+  # ---- ④ Time-series DB: postgres_exporter (TimescaleDB is PG 16) ----
+  # DATA_SOURCE_NAME / metric semantics verified: external/postgres_exporter/README.md:252,316-325
+  # This repo's initialization/table creation see infra/init.sql; continuous-aggregate refresh lag needs pg_stat-side
+  #   observation, while /healthz's written/flushes can only prove "the backend thinks it wrote".
   - job_name: 'timescaledb'
     scrape_interval: 15s
     static_configs:
       - targets: ['postgres-exporter:9187']
 
-  # ---- ⑤ 状态缓存：redis_exporter ----
-  # 镜像与端口实证：external/redis_exporter/README.md:292 ("-p 9121:9121")
+  # ---- ⑤ State cache: redis_exporter ----
+  # Image and port verified: external/redis_exporter/README.md:292 ("-p 9121:9121")
   - job_name: 'redis'
     scrape_interval: 15s
     static_configs:
       - targets: ['redis-exporter:9121']
 
-  # ---- ⑥ 后端：目前 *没有* /metrics 端点，故不配置 ----
-  # 事实：backend_ingestion/app/main.py:66-75 的 /healthz 只有 JSON
-  #   {status, written, flushes, queue_depth, mqtt_received, mqtt_dropped}。
-  # 判断：要把它变成时间序列需要引入 prometheus/client_python（已下载 14 项源之一）
-  #   并在 main.py 挂 /metrics。本次**不做**——AGENTS.md 禁止生产代码里写没验证过的东西，
-  #   且这属于订单层面的改动，应由 NPC 走 PR。此处只留探针：
+  # ---- ⑥ Backend: currently *no* /metrics endpoint, so not configured ----
+  # Fact: the /healthz in backend_ingestion/app/main.py:66-75 only returns JSON
+  #   {status, written, flushes, queue_depth, mqtt_received, mqtt_dropped}.
+  # Judgment: turning it into a time series would require introducing prometheus/client_python (one of the 14 downloaded sources)
+  #   and mounting /metrics in main.py. This time we do **not** do it — AGENTS.md forbids writing unverified things in production code,
+  #   and this is an order-level change that should go through a PR by the NPC. Here we only leave the probe:
   - job_name: 'backend-healthz'
     metrics_path: /probe
     params:

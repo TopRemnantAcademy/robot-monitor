@@ -1,33 +1,30 @@
-# .e2e — 前端集成验证（不参与生产构建）
+# .e2e — frontend integration verification (not part of the production build)
 
-用真实产品代码（`src/hooks/useRobotWebSocket.ts`、`src/store/robotStore.ts`、
-`src/components/*`）跑在 jsdom / headless Chromium 上，验证 spec/03 的硬性契约。
+Runs real product code (`src/hooks/useRobotWebSocket.ts`, `src/store/robotStore.ts`, `src/components/*`) on jsdom / headless Chromium to verify the hard contracts of spec/03.
 
-## 运行
+## Running
 
 ```bash
 cd frontend_dashboard
 npm install
-bash .e2e/run_all.sh        # 一键全跑（5 项）
+bash .e2e/run_all.sh        # one-click full run (5 items)
 ```
 
-单独跑：
+Run individually:
 
 ```bash
-E2E_WS_PORT=8123 node .e2e/build.mjs   # 先把 src 打成 Node CJS
-node .e2e/run.mjs                       # WS 洪流 + type 三分支 + 100ms 节流
-node .e2e/run_reconnect.mjs             # 指数退避 1s→2s→4s→8s
+E2E_WS_PORT=8123 node .e2e/build.mjs   # first bundle src into Node CJS
+node .e2e/run.mjs                       # WS flood + type three branches + 100ms throttle
+node .e2e/run_reconnect.mjs             # exponential backoff 1s→2s→4s→8s
 E2E_API_BASE=http://localhost:8201 node .e2e/build.mjs
 node .e2e/run_drawer.mjs                # REST history → ECharts
-node .e2e/run_offline.mjs               # 无数据 → 100 张离线占位卡（需 vite preview 在 4173）
-node .e2e/screenshot.mjs                # 真实浏览器截图（含假后端）
+node .e2e/run_offline.mjs               # no data → 100 offline placeholder cards (needs vite preview on 4173)
+node .e2e/screenshot.mjs                # real-browser screenshot (with fake backend)
 ```
 
-## 说明
+## Notes
 
-- `entry.tsx` / `entry_drawer.tsx`：把产品组件挂到 jsdom 的最小入口。
-- `build.mjs`：用 esbuild 注入 `import.meta.env.*` 并打成 CJS。
-- `run_drawer.mjs` 里对 `echarts-for-react` 做了一次 require 解包：该包是 CJS 单一
-  `default` 导出，在 Node 下 require 得到 `{ default: fn }`，不还原会导致 React 收到 object。
-  这是 **Node 测试环境**的互操作需要，Vite 构建产物不受影响。
-- `screenshot.mjs` 需要 `npm run preview` 已在 4173 端口运行，且依赖 puppeteer。
+- `entry.tsx` / `entry_drawer.tsx`: minimal entry points that mount the product components onto jsdom.
+- `build.mjs`: uses esbuild to inject `import.meta.env.*` and bundle to CJS.
+- `run_drawer.mjs` does a one-time require unwrap of `echarts-for-react`: the package is a CJS single `default` export, and under Node `require` yields `{ default: fn }`; without restoring it React would receive an object. This is an **interop need of the Node test environment**; the Vite build output is unaffected.
+- `screenshot.mjs` requires `npm run preview` already running on port 4173, and depends on puppeteer.

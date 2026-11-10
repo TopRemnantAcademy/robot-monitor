@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
-# external/fetch-sources.sh —— 可复现地拉取所有上游参考源。
+# external/fetch-sources.sh — reproducibly fetch all upstream reference sources.
 #
-# 为什么需要这个脚本（Issue #19 审计 G-20）：
-#   `external/*` 被 .gitignore 排除，源码不入库。此前"已下载 22 个仓库"的结论
-#   在任意新工作区都无法复现/核对。本脚本把"下载"变成一条可重复执行的命令，
-#   并把每个仓库钉到明确的 tag/commit，避免上游 HEAD 漂移导致结论失效
-#   （这个坑已经踩过一次：aiomqtt 裸 clone 漂到 3.0.0-alpha.1）。
+# Why this script exists (Issue #19 audit G-20):
+#   `external/*` is excluded by .gitignore; third-party source is not committed.
+#   The earlier claim "downloaded 22 repos" could not be reproduced/verified in
+#   any fresh workspace. This script turns "download" into a single repeatable
+#   command, and pins each repo to an explicit tag/commit to avoid conclusions
+#   going stale due to upstream HEAD drift (this pit was hit once: a bare
+#   aiomqtt clone drifted to 3.0.0-alpha.1).
 #
-# 用法：
-#   bash external/fetch-sources.sh            # 全量拉取
-#   bash external/fetch-sources.sh aiomqtt    # 只拉某一个（按名字匹配）
+# Usage:
+#   bash external/fetch-sources.sh            # fetch everything
+#   bash external/fetch-sources.sh aiomqtt    # fetch only one (matched by name)
 #
-# 注意：本脚本**不**校验 SHA256（会随上游 force-push 变化而误报）；
-#       它只保证"钉到同一个 ref"。要更强的可复现性请自行加 checksum。
+# Note: this script does NOT verify SHA256 (it changes with upstream force-push
+#       and would cause false alarms); it only guarantees "pinned to the same
+#       ref". For stronger reproducibility add a checksum yourself.
 
 set -euo pipefail
 
@@ -21,8 +24,8 @@ cd "$ROOT"
 
 only="${1:-}"
 
-# 格式：<本地名> <仓库 URL> <ref（tag/分支/commit）>
-# ref 为 HEAD 表示跟随默认分支（仅用于"拿文档/契约"这类不敏感来源）。
+# Format: <local name> <repo URL> <ref (tag/branch/commit)>
+# ref of HEAD means follow the default branch (used only for insensitive sources like "docs/contracts").
 SOURCES=(
   "mqtt-to-timescaledb|https://github.com/emqx/mqtt-to-timescaledb.git|HEAD"
   "tsbs|https://github.com/timescale/tsbs.git|HEAD"
@@ -51,7 +54,7 @@ fetch_one() {
   local name="$1" url="$2" ref="$3"
   local dir="$ROOT/$name"
   if [[ -d "$dir/.git" ]]; then
-    echo "== $name 已存在，校验 ref"
+    echo "== $name exists, verifying ref"
     ( cd "$dir" && git fetch --depth 1 origin "$ref" >/dev/null 2>&1 || true
       git checkout --quiet "$ref" 2>/dev/null || true )
   else
@@ -62,12 +65,12 @@ fetch_one() {
       git clone --depth 1 --branch "$ref" "$url" "$dir"
     fi
   fi
-  # 记录实证：本地 HEAD commit
+  # Record evidence: local HEAD commit
   ( cd "$dir" && printf '%-26s %s  %s\n' "$name" "$(git rev-parse --short HEAD)" "$ref" ) \
     >> "$ROOT/.fetch-log"
 }
 
-# alertmanager 用 sparse（全量 57MB，只用 docs）
+# alertmanager uses sparse (full size 57MB, only docs needed)
 fetch_alertmanager() {
   local dir="$ROOT/alertmanager"
   if [[ ! -d "$dir/.git" ]]; then
@@ -94,5 +97,5 @@ if [[ -z "$only" || "alertmanager" == *"$only"* ]]; then
 fi
 
 echo
-echo "完成。实证已写入 $ROOT/.fetch-log："
+echo "Done. Evidence written to $ROOT/.fetch-log:"
 cat "$ROOT/.fetch-log"

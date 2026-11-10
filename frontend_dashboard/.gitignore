@@ -6,11 +6,11 @@ dist/
 .e2e/order26.cjs
 *.log
 
-# 本地环境变量（.env.example 是模板，必须入库）
+# Local environment files (.env.example is a template and must be committed)
 .env
 .env.local
 .env.*.local
 
-# vitest 缓存与覆盖率产物（订单 24）
+# vitest cache and coverage artifacts (order 24)
 coverage/
 .vitest/

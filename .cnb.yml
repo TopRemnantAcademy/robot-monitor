@@ -1,8 +1,8 @@
-# RobotMonitor CNB NPC 配置
-# 两种触发：
-#  A) Issue/PR 评论 @mention（NPC 模式）：在 Issue 评论里写 @flow.237/RobotMonitor(开发工程师) 派工
-#  B) crontab 自主流水线 —— **2026-10-20 已删除**（按用户指令移除所有自动触发的 NPC 设置；
-#     原 7 段 agent 巡检因 402 配额长期不可用，详见文件末尾 tombstone）
+# RobotMonitor CNB NPC configuration
+# Two triggers:
+#  A) Issue/PR comment @mention (NPC mode): write @flow.237/RobotMonitor(developer) in an Issue comment to dispatch work
+#  B) crontab autonomous pipeline -- **deleted 2026-10-20** (removed all auto-triggered NPC settings per user instruction;
+#     the original 7-stage agent inspection was long-unusable due to 402 quota; see the tombstone at the end of the file)
 include:
   - https://cnb.cool/Bring/Agents/Agent/-/blob/main/npc.yml
 
@@ -21,21 +21,21 @@ $:
         workspace_preflight: on
 
     # -----------------------------------------------------------------------
-    # 订单 18 T2 —— 契约门禁（契约即代码）
+    # Order 18 T2 -- contract gate (contract-as-code)
     #
-    # **刻意不做 `|| true` / `continue-on-error` 兜底**：门禁能被吞掉就等于不存在。
-    # 两步判定都必须让构建变红：
-    #   ① generated-types-must-be-committed —— api.gen.ts 与 openapi.snapshot.json 不同步
-    #   ② contract-snapshot-check           —— 后端删字段/改类型但没同步快照（breaking）
-    # 依据：本仓已真实翻车过一次（STATUS.md §六第 2 条 —— `/history` 漏 `joint_positions`
-    # 导致 Drawer 第三条折线恒空）。那次是"人眼比对通过"的，机器一跑就现形。
+    # **Deliberately no `|| true` / `continue-on-error` fallback**: a gate that can be swallowed is as good as no gate.
+    # Both checks must turn the build red:
+    #   1) generated-types-must-be-committed -- api.gen.ts and openapi.snapshot.json out of sync
+    #   2) contract-snapshot-check           -- backend removed a field/changed a type but did not sync the snapshot (breaking)
+    # Basis: this repo already truly broke once (STATUS.md section six, item 2 -- `/history` missed `joint_positions`
+    # causing the Drawer's third line chart to be permanently empty). That time it "passed manual comparison" but the machine exposed it on first run.
     #
-    # 用对象形式声明（`contract-gate:` 是流水线标识），与 NPC 的 `comment@npc:` 平级；
-    # 依据：语法手册「也支持通过对象的形式声明多个流水线」。
+    # Declared in object form (`contract-gate:` is the pipeline id), on the same level as NPC's `comment@npc:`;
+    # basis: the syntax manual "also supports declaring multiple pipelines via object form".
     #
-    # 镜像用 `ci/contract-gate.Dockerfile` 而非裸 node:20 —— 实测 node:20 的 python3
-    # **没有 pip 也没有 ensurepip**（见该 Dockerfile 顶部记录），依赖必须在镜像构建期装好。
-    # 全部逻辑收进 `ci/contract-gate.sh`（POSIX sh），避免几十行内联脚本难维护。
+    # The image uses `ci/contract-gate.Dockerfile` instead of bare node:20 -- in practice node:20's python3
+    # has neither pip nor ensurepip (see the top note in that Dockerfile), so deps must be installed at image build time.
+    # All logic is folded into `ci/contract-gate.sh` (POSIX sh) to avoid dozens of hard-to-maintain inline script lines.
     # -----------------------------------------------------------------------
     contract-gate:
       docker:
@@ -44,32 +44,32 @@ $:
           by:
             - ci/contract-gate.Dockerfile
             - backend_ingestion/requirements.txt
-            # `by` 是 Dockerfile 可 COPY 文件的**白名单**，未列出的文件不进构建上下文
-            # （官方 grammar.md 明确警告）。这 3 个文件必须与 ci/contract-gate.Dockerfile
-            # 里的 COPY 严格对应，少列一个 → 构建直接
+            # `by` is the **whitelist** of files the Dockerfile may COPY; files not listed do not enter the build context
+            # (the official grammar.md warns explicitly about this). These 3 files must strictly match the COPY directives in
+            # ci/contract-gate.Dockerfile; missing one -> the build fails immediately with
             # `failed to calculate checksum ... not found`
-            # （实测：缺 package.json 时构建 cnb-jgf-1k4k4c9db 死在这一步）。
+            # (verified: when package.json was missing, build cnb-jgf-1k4k4c9db died at this step).
             - frontend_dashboard/package.json
             - frontend_dashboard/package-lock.json
       env:
-        # 只为让 `Settings()` 在 import 期实例化成功（jwt_secret 无默认值）。
-        # 是占位串，不参与任何签名；真实密钥绝不入仓（AGENTS.md §5）。
+        # Only so `Settings()` can be instantiated at import time (jwt_secret has no default).
+        # It is a placeholder string, participates in no signing; real secrets never enter the repo (AGENTS.md §5).
         JWT_SECRET: ci-openapi-export-placeholder
       stages:
         - name: contract-gate
           script: sh ci/contract-gate.sh
 
 main:
-  # ── 订单 24 T3：测试门禁 ─────────────────────────────────────────────
-  # 目的：把 STATUS.md 里手写的「11/11」「20/20」「25 passed」变成 CI 可复现数字。
-  # 失败即红：任何一步非 0 退出都会中断 stages 并置流水线为 error ——
-  # 全程**禁止** `|| true` / `continue-on-error`（订单 24 §4.2）。
+  # -- Order 24 T3: test gate -------------------------------------------------
+  # Purpose: turn the hand-written "11/11" / "20/20" / "25 passed" in STATUS.md into CI-reproducible numbers.
+  # Any failure turns red: any step exiting non-zero aborts the stages and sets the pipeline to error --
+  # never use `|| true` / `continue-on-error` throughout (Order 24 §4.2).
   #
-  # ⚠️ 关于 stage 的 shell（本文件曾因此 CI 红）：CNB 用 `sh`（dash）执行 script，
-  #   dash **不支持** `set -o pipefail`；用 `set -eu` 即可。
-  # ⚠️ 关于 `pytest` 的 testpaths（pytest.ini，订单 24 §4.1 禁止修改）：
-  #   `pytest`（裸跑）走 testpaths = tests + alert_engine/tests；
-  #   `backend_ingestion/tests` 刻意**不在**其内，故单独一条命令跑。
+  # WARNING: about the stage shell (this file once went red for it): CNB runs script with `sh` (dash),
+  #   dash does NOT support `set -o pipefail`; use `set -eu` instead.
+  # WARNING: about `pytest` testpaths (pytest.ini, Order 24 §4.1 forbids changing it):
+  #   bare `pytest` uses testpaths = tests + alert_engine/tests;
+  #   `backend_ingestion/tests` is deliberately NOT in it, so it runs as a separate command.
   push:
     - name: test
       docker:
@@ -78,69 +78,69 @@ main:
         - name: pytest
           script: |
             set -eu
-            # tests/load/test_payload_contract.py 需要 node 实跑 payload.js 取样例报文
-            # （订单 23 契约：payload 复用 mock_fleet 真实 24 关节结构，漏跑=契约裸奔）。
-            # python:3.11 镜像无 node；Debian bookworm 的 nodejs 18 支持 --input-type=module。
-            # 2026-10-11 首次实跑（CI 修复后）实证：3 failed, 68 passed —— 失败全因缺 node。
+            # tests/load/test_payload_contract.py needs node to actually run payload.js to sample example messages
+            # (Order 23 contract: payload reuses mock_fleet's real 24-joint structure; skipping = contract runs naked).
+            # python:3.11 image has no node; Debian bookworm's nodejs 18 supports --input-type=module.
+            # First real run 2026-10-11 (after CI fix) evidence: 3 failed, 68 passed -- all failures were due to missing node.
             apt-get update -qq && apt-get install -y -qq --no-install-recommends nodejs >/dev/null
             node --version
             python -m pip install --no-cache-dir -r alert_engine/requirements.txt
             python -m pip install --no-cache-dir -r backend_ingestion/requirements.txt
-            # fakeredis 是**测试期**依赖：订单 04 的验收用例要验去重器的 SET NX 幂等
-            # 与 TTL，进程内 dict 替身测不出 Redis 服务端语义。
+            # fakeredis is a **test-time** dependency: Order 04's acceptance case must verify the deduper's SET NX idempotence
+            # and TTL; an in-process dict stub cannot exercise Redis server-side semantics.
             python -m pip install --no-cache-dir pytest pytest-timeout 'httpx<0.28' fakeredis
-            # rich 是 tests/test_ts_sampling.py 间接需要的**测试期**依赖：该文件要 exec
-            # simulator/mock_fleet.py，而后者在 :41 `from rich.console import Console`。
-            # 上面两个 requirements 都**不含** rich（simulator 的依赖不入 CI）。
+            # rich is an indirect **test-time** dependency of tests/test_ts_sampling.py: that file execs
+            # simulator/mock_fleet.py, which at :41 does `from rich.console import Console`.
+            # Neither of the two requirements above contains rich (simulator deps are not in CI).
             #
-            # 测试侧已能把「缺依赖」判为 SKIP（见 tests/test_ts_sampling.py 的
-            # Skip/_PytestSkipped），所以**不装也不会红**。这里仍然补装，是因为
-            # 「跳过」和「跑过」不是一回事：这 3 个用例盯的是 PK (time, robot_id)
-            # 的毫秒时间戳唯一性（ON CONFLICT DO NOTHING 会静默丢行），
-            # 长年 SKIP 等于门禁不存在。补装后它们在 CI 真跑。
-            # 版本与 simulator/requirements.txt 对齐，避免「本机能跑、CI 不能跑」。
+            # The test side can already judge "missing dependency" as SKIP (see tests/test_ts_sampling.py's
+            # Skip/_PytestSkipped), so NOT installing it would not turn red either. We still install it because
+            # "skipped" and "run" are not the same: these 3 cases watch the millisecond-timestamp uniqueness of PK (time, robot_id)
+            # (ON CONFLICT DO NOTHING silently drops rows),
+            # a perpetual SKIP equals a non-existent gate. After installing, they truly run in CI.
+            # Versions are aligned with simulator/requirements.txt to avoid "works locally, fails in CI".
             python -m pip install --no-cache-dir rich==13.7.1
-            echo "── pytest（仓库根，testpaths = tests + alert_engine/tests）──"
+            echo "── pytest (repo root, testpaths = tests + alert_engine/tests) ──"
             python -m pytest -q
-            echo "── pytest backend_ingestion/tests（顶层 app 包冲突，单独跑）──"
-            # 2026-10-11 实测：backend 套件一例 F 后整体挂死 10.8m 被 runner SIGKILL，
-            # F 的名字与栈都没打出来。加 pytest-timeout（单测 60s 封顶，超时打栈）
-            # 与 -v（挂死时日志至少留有「最后一个开跑的用例」），一次跑出可定位现场。
+            echo "── pytest backend_ingestion/tests (top-level app package conflict, run separately) ──"
+            # Verified 2026-10-11: after one F in the backend suite the whole run hung for 10.8m and was SIGKILLed by the runner,
+            # with neither the F's name nor stack printed. Add pytest-timeout (60s cap per test, prints stack on timeout)
+            # and -v (at least logs "the last test that started" when it hangs) to surface a locatable scene in one run.
             python -m pytest backend_ingestion/tests/ -v --timeout=60
 
-            # ── 2026-11-10 新增：bridge 作业（ROS2 / ISO 21423，独立包无 app 冲突）──
-            # bridge 只硬依赖 websockets；aiomqtt 是 lazy 可选 import，不在此装。
-            echo "── pytest bridge/tests（ROS2 / ISO 21423 桥接，独立包）──"
+            # -- 2026-11-10 added: bridge job (ROS2 / ISO 21423, standalone package, no app conflict) --
+            # bridge only hard-depends on websockets; aiomqtt is a lazy optional import, not installed here.
+            echo "── pytest bridge/tests (ROS2 / ISO 21423 bridge, standalone package) ──"
             python -m pip install --no-cache-dir -r bridge/requirements.txt
             python -m pip install --no-cache-dir pytest pytest-timeout
             python -m pytest bridge/tests/ -v --timeout=60
 
-            # ── 2026-10-13 追加三道门禁（此前只在主代理本机手验，现已固化）──
-            # ① 全量语法编译：抓「测试收集不到、因此从没人发现」的语法错。
-            #    本机实测 rc=0（backend_ingestion/app + alert_engine/app + simulator + tests）。
-            echo "── python 全量语法编译 ──"
+            # -- 2026-10-13 added three more gates (previously only hand-verified on the main agent's local machine, now solidified) --
+            # 1) Full syntax compile: catch syntax errors "never collected by tests, so never found by anyone".
+            #    Local run verified rc=0 (backend_ingestion/app + alert_engine/app + simulator + tests).
+            echo "── python full syntax compile ──"
             python -m compileall -q backend_ingestion/app alert_engine/app simulator tests bridge
 
-            # ② 测试文件健全性：STATUS.md §五曾手工扫过一次「假覆盖测试文件」，
-            #    这里把它变成机器门禁 —— 任何 test_*.py 不含真实 def test_ 即红。
-            echo "── 测试文件健全性（每个 test_*.py 至少一个真实 test 函数）──"
+            # 2) Test-file sanity: STATUS.md section five once hand-scanned for "fake-coverage test files",
+            #    here it becomes a machine gate -- any test_*.py without a real def test_ turns red.
+            echo "── test-file sanity (each test_*.py has at least one real test function) ──"
             missing=0
             for f in $(find tests alert_engine/tests backend_ingestion/tests bridge/tests -name 'test_*.py'); do
               if ! grep -qE '^[[:space:]]*def test_' "$f"; then
-                echo "无真实测试函数: $f"
+                echo "No real test function: $f"
                 missing=1
               fi
             done
             if [ "$missing" != "0" ]; then
-              echo "发现假覆盖测试文件 —— 门禁拒绝"
+              echo "Found fake-coverage test file -- gate rejected"
               exit 1
             fi
 
-            # ③ 后端 import 冒烟：LEDGER §8.3 第 5 条长期挂着的未验项。
-            #    本机 Win-ARM64 装不了 pydantic-core 轮子（需 Rust 编译），故只能由 CI 承证；
-            #    python:3.11 镜像有现成轮子。JWT_SECRET 只占位让 Settings() 实例化成功，
-            #    不参与签名，真实密钥绝不入仓（AGENTS.md §5）。
-            echo "── 后端 import 冒烟 ──"
+            # 3) Backend import smoke: the long-pending unverified item from LEDGER §8.3 item 5.
+            #    Local Win-ARM64 cannot install the pydantic-core wheel (needs Rust compilation), so only CI can prove it;
+            #    the python:3.11 image has a ready wheel. JWT_SECRET is only a placeholder to let Settings() instantiate,
+            #    not used for signing; real secrets never enter the repo (AGENTS.md §5).
+            echo "── backend import smoke ──"
             (cd backend_ingestion && JWT_SECRET=ci-import-smoke-placeholder python -c "import app.main; print('backend app.main import OK')")
             (cd alert_engine && JWT_SECRET=ci-import-smoke-placeholder python -c "import app.main; print('alert_engine app.main import OK')")
 
@@ -149,66 +149,66 @@ main:
           script: |
             set -eu
             cd frontend_dashboard
-            # npm 10 实测（2026-10-11 两个 CI 轮次）：lockfile 在 Windows 生成时只写
-            # win32 的 rollup 原生可选依赖条目；无论 npm ci 还是 npm install，
-            # 只要 lockfile 存在就不据 rollup 的 optionalDependencies 元数据补装
-            # linux-x64 变体 → vitest 启动即崩（npm/cli#4828）。
-            # 解法：测试门禁内删 lockfile 让 npm 在 linux 全新 resolve
-            # （错误信息自身推荐的做法）；代价是传递依赖浮动，门禁可接受。
+            # npm 10 verified (2026-10-11, two CI rounds): when the lockfile is generated on Windows it only writes
+            # win32's rollup native optional-dependency entries; whether npm ci or npm install,
+            # as long as the lockfile exists it does not reinstall the linux-x64 variant from rollup's optionalDependencies metadata
+            # -> vitest crashes on startup (npm/cli#4828).
+            # Fix: delete the lockfile inside the test gate so npm does a fresh linux resolve
+            # (the approach the error message itself recommends); the cost is floating transitive deps, acceptable for the gate.
             rm -f package-lock.json
             npm install
             npm test
-            # ISSUE #62 补的两道防线（此前 npm-test 只有 `npm test`，所以没人发现
-            # tsc 已经红了 3 个错）：
-            #   ① typecheck —— `npm run build` 是 `tsc --noEmit && vite build`，
-            #      第一步失败 = 生产构建脚本实际是坏的，而 main 一直显示全绿。
-            #   ② bundle 体积 + 裸 ECharts 引入守卫（scripts/report-bundle-size.mjs），
-            #      阈值 gzip < 320 kB（issue #62 验收口径）。
+            # Two extra guardrails added for ISSUE #62 (before this, npm-test only had `npm test`, so nobody noticed
+            # tsc had already gone red with 3 errors):
+            #   1) typecheck -- `npm run build` is `tsc --noEmit && vite build`,
+            #      a failed first step = the production build script is actually broken, yet main kept showing all green.
+            #   2) bundle size + bare-ECharts import guard (scripts/report-bundle-size.mjs),
+            #      threshold gzip < 320 kB (ISSUE #62 acceptance criterion).
             npm run typecheck
             npx vite build
             node scripts/report-bundle-size.mjs
     # ============================================================
-    # ⛔ sync-to-github 已移除（2026-11-09，按用户指令「CNB에서 하지 말고」本地优先）：
-    # 原 CNB CI 单向同步（tencentcom/git-sync）因本仓 PUBLIC + 本账户 CNB token 缺
-    # group-resource:rw（建密钥仓 403）从未真正生效——GitHub main 长期落后 CNB main 46+ 提交。
-    # 现改为【本地直接 push】：`git push origin main`（GitHub 远程 = TopRemnantAcademy/robot-monitor，
-    # PRIVATE），SHA 已对齐（3072f7c）。CNB 仅作被动 git 远程，不再承载任何同步/自动化。
+    # sync-to-github removed (2026-11-09, per user instruction "don't do it on CNB, local-first"):
+    # the original CNB CI one-way sync (tencentcom/git-sync) never actually worked because this repo is PUBLIC and this
+    # account's CNB token lacks group-resource:rw (403 when creating the secret repo) -- GitHub main long lagged CNB main by 46+ commits.
+    # Now changed to [local direct push]: `git push origin main` (GitHub remote = TopRemnantAcademy/robot-monitor,
+    # PRIVATE), SHA already aligned (3072f7c). CNB is only a passive git remote, hosting no sync/automation.
     # ============================================================
-    # e2e：端到端 30,000 行落库验证（ISSUE #60）—— 锚点定义处（&e2e-image / &e2e-env / &e2e-stages）
+    # e2e: end-to-end 30,000-row landing validation (ISSUE #60) -- anchor definition site (&e2e-image / &e2e-env / &e2e-stages)
     #
-    # 为什么单独一条 pipeline：它需要 **Docker-in-Docker**（services: [docker]）
-    # 才能起 emqx + timescaledb:2.13.1 + redis + backend + mock_fleet。
-    # 判定与产出：起栈前先探 docker、再探 python；缺任一则打印【E2E SKIP】原因并以 0 退出。
-    # （2026-10-11 修复：本 pipeline 原先被写成了第二个顶层 push:/pull_request: 键，
-    #  YAML 重复键导致整条 main 的 push/PR 流水线在 prepare 阶段就 error —— duration 0、无日志。
-    #  现并入唯一 push:/pull_request: 键下；锚点定义在 push（文档序最先），pull_request/crontab 用别名引用。）
+    # Why a separate pipeline: it needs **Docker-in-Docker** (services: [docker])
+    # to bring up emqx + timescaledb:2.13.1 + redis + backend + mock_fleet.
+    # Judgment and output: before starting the stack, probe docker first, then python; if either is missing print [E2E SKIP] with the reason and exit 0.
+    # (Fixed 2026-10-11: this pipeline was originally written as a second top-level push:/pull_request: key,
+    #  the duplicate YAML key made the whole main push/PR pipeline error at the prepare stage -- duration 0, no logs.
+    #  Now merged under the single push:/pull_request: key; anchors are defined in push (first in document order), pull_request/crontab reference them by alias.)
     # ============================================================
     - name: e2e-30k-landing
-      # ---- 为什么必须钉 image（2026-10 CI 实测教训）----
-      # 不写 image 时用缺省镜像 `cnbcool/default-build-env`，该镜像**没有 python3**：
-      # 首次实跑报 `sh: line 21: python3: command not found`（返回码 127），
-      # 而此时 docker 探测已经通过（日志里的 `docker 可用：Docker version 29.6.2`），
-      # 即「环境判定全绿 → 脚本起不来」，属于最坏的一类失败（红得莫名其妙）。
-      # 所以这里把运行环境写死成有 python3 的镜像，而不是靠默认镜像碰运气。
-      # 同理，脚本里也**不再**用 `python3` 裸命令，见下方 runner 探测。
+      # ---- Why the image must be pinned (2026-10 CI verified lesson) ----
+      # Without an image, the default `cnbcool/default-build-env` is used, which has NO python3:
+      # the first real run reported `sh: line 21: python3: command not found` (exit code 127),
+      # yet the docker probe had already passed (log line `docker available: Docker version 29.6.2`),
+      # i.e. "environment checks all green -> script never starts", the worst kind of failure (red for no obvious reason).
+      # So here the runtime is hard-coded to an image that has python3, rather than relying on default-image luck.
+      # Likewise, the script no longer uses the bare `python3` command either; see the runner probe below.
       #
-      # ---- 订单 34 T1/T2：image 改为**锚点**并在三处 e2e 全部引用 ----
-      # 归因结论（file:line + 日志双证据，详见 PR 描述）：
-      #   本行 image 声明**一直是生效的**，push 构建 cnb-152-1k4ohjp3k-002（sha 68b7b8b）
-      #   prepare 日志有 `docker pull python:3.11-slim`，e2e stage 打出
-      #   `python 可用：Python 3.11.17`。真正在缺省镜像里跑的是 **crontab 构建**
-      #   cnb-st7-1k4onp4ok-001（同一 sha）—— 因为 `"crontab: 0 3 * * *"` 这条
-      #   pipeline（原 `.cnb.yml:479`）**只写了 services/env/stages，漏了 docker.image**
-      #   （≠ 订单 34 初判的「push 块声明失效」）。crontab 的 prepare 日志因此是
-      #   `docker pull cnbcool/default-build-env`。
-      # 修法：把 image 提成锚点，三处引用同一个值 —— 一致性由 YAML 层保证，
-      # 而不是靠人记得改三遍（订单 32 的改动让 push/PR 增了行，crontab 却没同步，
-      # 正是「三份拷贝靠人维护」的必然结果）。
+      # ---- Order 34 T1/T2: image changed to an **anchor** and referenced by all three e2e sites ----
+      # Root-cause conclusion (file:line + log dual evidence, see PR description):
+      #   this image declaration has ALWAYS been in effect; push build cnb-152-1k4ohjp3k-002 (sha 68b7b8b)
+      #   has `docker pull python:3.11-slim` in its prepare log, and the e2e stage printed
+      #   `python available: Python 3.11.17`. What truly ran on the default image was the **crontab build**
+      #   cnb-st7-1k4onp4ok-001 (same sha) -- because the `"crontab: 0 3 * * *"` pipeline
+      #   (originally `.cnb.yml:479`) **only wrote services/env/stages, missing docker.image**
+      #   (not the "push block declaration failed" first guessed in Order 34). The crontab's prepare log was therefore
+      #   `docker pull cnbcool/default-build-env`.
+      # Fix: lift the image into an anchor, referenced by all three sites with the same value -- consistency guaranteed at the YAML layer,
+      # not by a human remembering to change it in three places (Order 32's change added lines to push/PR but not crontab,
+      # exactly the inevitable result of "three copies maintained by hand").
       docker: &e2e-image
         image: python:3.11-slim
       services: [docker]
       env: &e2e-env
-        # 40s × 100 台 × 10Hz ≈ 40,000 帧，相对 30,000 阈值留足余量。
+        # 40s x 100 units x 10Hz ~ 40,000 frames, plenty of headroom over the 30,000 threshold.
         E2E_DURATION: "40"
         E2E_ROBOTS: "100"
         E2E_MIN_ROWS: "30000"
@@ -216,94 +216,94 @@ main:
         - name: e2e
           script: |
             set -uo pipefail
-            echo "== e2e 30k 落库验证（ISSUE #60）=="
+            echo "== e2e 30k landing validation (ISSUE #60) =="
 
-            # SKIP 横幅（订单 34 T2）：任何一次「没实跑」的退出都必须先打这一行，
-            # 且**必须**是显著的、可 grep 的固定串，让「绿」不再能冒充实跑。
-            # 背景：push 构建 cnb-st7-1k4onp4ok 的 e2e 只有 240ms、status=success，
-            # 日志里只有一句【E2E SKIP】——肉眼扫 CI 列表只看到「绿」，看不出没跑。
+            # SKIP banner (Order 34 T2): any exit without a real run must print this line first,
+            # and it MUST be a prominent, grep-able fixed string, so "green" can no longer fake a real run.
+            # Background: the e2e of push build cnb-st7-1k4onp4ok was only 240ms, status=success,
+            # with only one line [E2E SKIP] in the log -- a human scanning the CI list saw only "green", not that it didn't run.
             skip_banner() {
               echo "================================================================"
-              echo "【E2E SKIPPED —— 本构建未实跑 30k 落库】"
-              echo "原因：$1"
-              echo "本构建的 e2e 为绿色但**未产生任何落库数字**，不可当作 ISSUE #60 的证据。"
+              echo "[E2E SKIPPED -- this build did not actually run the 30k landing]"
+              echo "Reason: $1"
+              echo "This build's e2e is green but produced NO landing numbers; it cannot count as evidence for ISSUE #60."
               echo "================================================================"
             }
 
-            # ---- 环境判定：无 Docker 即明确 skip，绝不 red ----
+            # ---- Environment check: no Docker -> explicit skip, never red ----
             if ! command -v docker >/dev/null 2>&1; then
-              echo "【E2E SKIP】PATH 内找不到 docker 命令。"
-              echo "本 job 需要真实 Docker（emqx + timescaledb:2.13.1 + redis + backend + mock_fleet），"
-              echo "且 ISSUE #60 禁止用 mock 替身冒充真实 TimescaleDB。"
-              echo "需要：在提供 docker 的构建机/自托管 runner 上运行本 job，或本地执行"
+              echo "[E2E SKIP] docker command not found in PATH."
+              echo "This job needs real Docker (emqx + timescaledb:2.13.1 + redis + backend + mock_fleet),"
+              echo "and ISSUE #60 forbids faking real TimescaleDB with a mock stand-in."
+              echo "Need: run this job on a build machine/self-hosted runner that provides docker, or run locally:"
               echo "  python -m pytest tests/e2e/test_e2e_30k.py -v -s"
-              skip_banner "PATH 内找不到 docker 命令（runner 未提供 Docker-in-Docker）"
+              skip_banner "docker command not found in PATH (runner did not provide Docker-in-Docker)"
               exit 0
             fi
             if ! docker info >/dev/null 2>&1; then
-              echo "【E2E SKIP】docker daemon 不可达（docker info 非 0）。原始输出（尾部）："
+              echo "[E2E SKIP] docker daemon unreachable (docker info non-zero). Original output (tail):"
               docker info 2>&1 | tail -5 || true
-              skip_banner "docker daemon 不可达"
+              skip_banner "docker daemon unreachable"
               exit 0
             fi
-            echo "docker 可用：$(docker --version)"
+            echo "docker available: $(docker --version)"
 
-            # ---- 运行环境判定：连 python 都没有就明确 skip，绝不 red ----
-            # 这一层是实跑打出来的：首次 CI 里 docker 可用，但缺省镜像无 python3，
-            # 脚本根本没起来（返回码 127）。所以顺序必须是
-            # 「先探 docker（本 job 的核心依赖）→ 再探 python（脚本自身的依赖）」，
-            # 两层都给出原因与解法，读者不必翻配置就知道卡在哪一层。
+            # ---- Runtime check: no python at all -> explicit skip, never red ----
+            # This layer was uncovered by a real run: in the first CI, docker was available but the default image had no python3,
+            # so the script never even started (exit code 127). Therefore the order must be
+            # "probe docker first (this job's core dependency) -> then probe python (the script's own dependency)",
+            # both layers giving a reason and a fix, so the reader knows which layer is stuck without reading config.
             #
-            # 订单 34 补充：本判定之所以会命中，唯一成因是**本 pipeline 没声明
-            # `docker.image`**。push / pull_request / crontab 三处 e2e 现统一由
-            # YAML 锚点 `&e2e-image` 注入 image，配置层就不该再有缺口；
-            # 若这里仍打 SKIP，说明锚点没被这三处引用到（file:line 可查）。
+            # Order 34 addendum: the only reason this check ever triggers is that **this pipeline did not declare
+            # `docker.image`**. The three e2e sites (push / pull_request / crontab) now uniformly inject the image via
+            # the YAML anchor `&e2e-image`, so the config layer should have no gap;
+            # if this still prints SKIP, it means the anchor is not referenced by these three sites (checkable by file:line).
             if command -v python3 >/dev/null 2>&1; then
               PY=python3
             elif command -v python >/dev/null 2>&1; then
               PY=python
             else
-              echo "【E2E SKIP】镜像内 PATH 找不到 python3/python（当前镜像：${CNB_BUILD_IMAGE:-缺省镜像}）。"
-              echo "本 job 需要 python 来驱动 tests/e2e/test_e2e_30k.py（只用标准库，无需 pip 安装）。"
-              echo "修复：本 pipeline 必须引用 docker.image 锚点（.cnb.yml 的 &e2e-image = python:3.11-slim），"
-              echo "      不要沿用缺省镜像 cnbcool/default-build-env（它没有 python3）。"
-              skip_banner "运行镜像内没有 python3/python（docker.image 锚点未生效）"
+              echo "[E2E SKIP] python3/python not found in image PATH (current image: ${CNB_BUILD_IMAGE:-default image})."
+              echo "This job needs python to drive tests/e2e/test_e2e_30k.py (standard library only, no pip install needed)."
+              echo "Fix: this pipeline must reference the docker.image anchor (the &e2e-image in .cnb.yml = python:3.11-slim),"
+              echo "      do not keep the default image cnbcool/default-build-env (it has no python3)."
+              skip_banner "image has no python3/python (docker.image anchor not in effect)"
               exit 0
             fi
-            echo "python 可用：$($PY --version 2>&1)"
+            echo "python available: $($PY --version 2>&1)"
 
-            # ---- 订单 32 / ISSUE #100：指标命名反例探针 ----
+            # ---- Order 32 / ISSUE #100: metric-naming antipattern probe ----
             #
-            # 为什么挂在**这里**（先把栈起好、再针对已起的栈断言）：命名门禁要断言的是
-            # 「跑起来的那个进程吐出的字节」，而 `test_e2e_30k.py` 的 run_e2e() 中途
-            # 会 teardown 掉栈；等它跑完再探就没人接了。故由本 stage 自己先 `up -d`
-            # （**不带 stress profile**，不起 mock_fleet）拿到一个活的 backend，
-            # 跑一次命名断言，然后 down 掉 —— 与 30k 落库两件事互不干扰。
+            # Why it hangs **here** (bring up the stack first, then assert against the running stack): the naming gate asserts
+            # "bytes emitted by the running process", but `test_e2e_30k.py`'s run_e2e() tears the stack down midway;
+            # probing after it finishes would find nothing listening. So this stage first `up -d` on its own
+            # (without the stress profile, no mock_fleet) to get a live backend,
+            # runs one naming assertion, then brings it down -- independent from the 30k landing work.
             #
-            # 判定：HTTP 探不到 → [SKIP] 并 exit 0（环境问题，不伪装通过）；
-            #       旧名残留 / 新名缺失 → 脚本退出码 1 → **本 stage 变红**。
-            # 这道门禁的价值全在「能红」：一个吞掉失败的门禁比没有门禁更糟。
+            # Judgment: HTTP unreachable -> [SKIP] and exit 0 (environment issue, not faking a pass);
+            #       old-name residue / new-name missing -> script exit code 1 -> this stage turns RED.
+            # The whole value of this gate is "can turn red": a gate that swallows failures is worse than no gate.
             #
-            # ⚠️ 订单 34 修复：原实现用 `curl -sf` 探 /healthz 与 /metrics，而本 job
-            #   运行镜像是 **python:3.11-slim** —— 该镜像**不带 curl**（Debian slim
-            #   不含 curl/wget）。于是无论栈起没起，两处探测都恒为「不可达」，
-            #   这道门禁从挂上去那天起**一次都没真跑过**（三次 push/PR 构建日志实证：
-            #   cnb-sfb-1k4oh9va6-002 / cnb-152-1k4ohjp3k-002 的 e2e stage 里
-            #   都是 `【E2E SKIP】订单 32 命名探针：/metrics 在 180s 内不可达`）。
-            #   改为调用 `$PY`（本 job 的运行时本体）做 HTTP 探测，不引入新依赖。
-            # ---- 顺序：先命名探针、后 30k；但两者结果**各自独立**收集，最后合并判定 ----
-            # 为什么不让命名探针「失败即 return」：它是订单 32 的门禁，而本 job 的主产出
-            # 是 30k 落库数字（订单 34 硬门槛）。若命名探针一走红就提前结束，
-            # 30k 永远拿不到输出，读者无法区分「命名回归」与「落库回归」两件事。
-            # 故：命名探针的 rc 先存下，30k 照跑，最后两者都为 0 才 exit 0。
+            # WARNING: Order 34 fix: the original used `curl -sf` to probe /healthz and /metrics, but this job's
+            #   runtime image is python:3.11-slim -- which ships NO curl (Debian slim has neither curl nor wget).
+            #   So regardless of whether the stack was up, both probes were permanently "unreachable",
+            #   and this gate NEVER actually ran once from the day it was hung (proven by three push/PR build logs:
+            #   cnb-sfb-1k4oh9va6-002 / cnb-152-1k4ohjp3k-002 e2e stages both show
+            #   `[E2E SKIP] Order 32 naming probe: /metrics unreachable within 180s`).
+            #   Changed to call `$PY` (this job's own runtime) for HTTP probing, adding no new dependency.
+            # ---- Order: naming probe first, then 30k; but the two results are collected INDEPENDENTLY and merged at the end ----
+            # Why not let the naming probe "return on failure": it is Order 32's gate, while this job's main output
+            # is the 30k landing number (Order 34 hard threshold). If the naming probe goes red and ends early,
+            # 30k never gets its output, and the reader cannot tell "naming regression" from "landing regression".
+            # So: store the naming probe's rc first, run 30k as normal, and only exit 0 when both are 0.
             naming_rc=0
 
-            echo "== 订单 32：指标命名反例探针 =="
-            # ⚠️ 每一条可能非 0 的命令都必须就地吞掉退出码（`|| naming_rc=$?`）：
-            #   实测（PR #111 首次 CI：cnb-dr0-1k4pbtmr7-002）本 stage 的 shell 会在
-            #   一条非 0 命令后**直接终止整段脚本**（`set -e` 语义），
-            #   于是「命名探针红」会连带把 30k 也掐死 —— 主产出拿不到，两件事分不清。
-            #   这不是靠 `set -uo pipefail` 能关掉的，只能不给它触发机会。
+            echo "== Order 32: metric-naming antipattern probe =="
+            # WARNING: every command that may exit non-zero must swallow its exit code inline (`|| naming_rc=$?`):
+            # verified (PR #111 first CI: cnb-dr0-1k4pbtmr7-002) this stage's shell would TERMINATE the whole script
+            # after one non-zero command (`set -e` semantics), so "naming probe red" would also kill 30k -- the main
+            # output would be lost and the two issues indistinguishable. This is not turned off by `set -uo pipefail`;
+            # the only way is to deny it the trigger.
             naming_rc=0
             if docker compose -f tests/e2e/docker-compose.e2e.yml up -d --build \
                  emqx timescaledb redis backend; then
@@ -315,48 +315,48 @@ main:
               if $PY -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:18000/metrics',timeout=3)" >/dev/null 2>&1; then
                 $PY tests/e2e/test_e2e_30k.py --metric-naming-check || naming_rc=$?
                 if [ "$naming_rc" = "3" ]; then
-                  echo "【E2E SKIP】订单 32 命名探针：脚本自判环境不具备（退出码 3），非代码失败。"
-                  skip_banner "订单 32 命名探针自判环境不具备（退出码 3）"
+                  echo "[E2E SKIP] Order 32 naming probe: script self-judged environment not ready (exit code 3), not a code failure."
+                  skip_banner "Order 32 naming probe self-judged environment not ready (exit code 3)"
                   naming_rc=0
                 elif [ "$naming_rc" != "0" ]; then
-                  echo "【E2E FAIL】订单 32 命名门禁未通过（退出码 $naming_rc）—— 旧前缀指标残留或规范名缺失。"
+                  echo "[E2E FAIL] Order 32 naming gate FAILED (exit code $naming_rc) -- old-prefix metrics residue or canonical name missing."
                 else
-                  echo "订单 32 命名门禁通过：/metrics 旧名 0 命中，robot_backend_* 规范名全部在位。"
+                  echo "Order 32 naming gate passed: 0 hits on old /metrics names; all robot_backend_* canonical names present."
                 fi
               else
-                # 栈起了但 /metrics 探不到：这**不是**代码失败，也不是能静默放过的事。
-                # 记为「未实跑」（打横幅），30k 仍继续跑并给出落库数字。
-                echo "【E2E SKIP】订单 32 命名探针：/metrics 在 180s 内不可达（栈未就绪）"
-                skip_banner "订单 32 命名探针：/metrics 在 180s 内不可达（该门禁本轮未实跑）"
+                # Stack is up but /metrics unreachable: this is NOT a code failure, nor something to silently pass.
+                # Mark it "not actually run" (print banner); 30k still runs and gives landing numbers.
+                echo "[E2E SKIP] Order 32 naming probe: /metrics unreachable within 180s (stack not ready)"
+                skip_banner "Order 32 naming probe: /metrics unreachable within 180s (gate not actually run this round)"
               fi
             else
-              echo "【E2E FAIL】订单 32 命名探针：起栈失败。"
-              echo "（订单 34 判定收紧：起栈失败**不再**当作可静默 skip 的环境问题 ——"
-              echo " 本 compose 栈此前已被 push 构建实跑证明可起，失败即代码/配置回归。）"
+              echo "[E2E FAIL] Order 32 naming probe: stack failed to start."
+              echo "(Order 34 tightened the rule: stack-up failure is NO LONGER treated as a silently-skippable environment issue --"
+              echo "  this compose stack was already proven startable by a push build, so failure means code/config regression.)"
               naming_rc=1
             fi
             docker compose -f tests/e2e/docker-compose.e2e.yml down -v --remove-orphans || true
 
-            # 依赖：e2e 脚本只用标准库（subprocess/urllib），无需 pip 安装。
-            # 同样用 `|| rc=$?` 就地吞退出码：这是本 job 的主产出，绝不能被 shell 语义掐断。
-            echo "== 30k 落库主链路（本 job 的硬门槛产出）=="
+            # Deps: the e2e script uses only the standard library (subprocess/urllib); no pip install needed.
+            # Again use `|| rc=$?` to swallow the exit code inline: this is the job's main output, must never be cut off by shell semantics.
+            echo "== 30k landing main path (this job's hard-threshold output) =="
             rc=0
             $PY tests/e2e/test_e2e_30k.py || rc=$?
             if [ "$rc" = "3" ]; then
-              echo "【E2E SKIP】脚本自判环境不具备（退出码 3），非代码失败。"
-              skip_banner "test_e2e_30k.py 自判环境不具备（退出码 3，无 Docker/daemon 不可达）"
+              echo "[E2E SKIP] Script self-judged environment not ready (exit code 3), not a code failure."
+              skip_banner "test_e2e_30k.py self-judged environment not ready (exit code 3, no Docker / daemon unreachable)"
               rc=0
             fi
-            # 合并判定：命名探针红、或 30k 红，本 stage 都红（都非静默可放过）。
+            # Merge judgment: naming-probe red, or 30k red, both turn this stage red (neither is silently passable).
             if [ "$rc" = "0" ] && [ "$naming_rc" = "0" ]; then
-              echo "e2e stage 全部通过：30k 落库断言通过 + 命名门禁在位。"
+              echo "e2e stage all passed: 30k landing assertion passed + naming gate in place."
               exit 0
             fi
             if [ "$naming_rc" != "0" ]; then
-              echo "【E2E FAIL】订单 32 命名门禁未通过（退出码 $naming_rc）—— 旧前缀指标残留或规范名缺失。"
+              echo "[E2E FAIL] Order 32 naming gate FAILED (exit code $naming_rc) -- old-prefix metrics residue or canonical name missing."
             fi
             if [ "$rc" != "0" ]; then
-              echo "【E2E FAIL】30k 落库断言未通过（退出码 $rc）。"
+              echo "[E2E FAIL] 30k landing assertion FAILED (exit code $rc)."
             fi
             exit 1
   pull_request:
@@ -367,63 +367,63 @@ main:
         - name: pytest
           script: |
             set -eu
-            # tests/load/test_payload_contract.py 需要 node 实跑 payload.js 取样例报文
-            # （订单 23 契约：payload 复用 mock_fleet 真实 24 关节结构，漏跑=契约裸奔）。
-            # python:3.11 镜像无 node；Debian bookworm 的 nodejs 18 支持 --input-type=module。
-            # 2026-10-11 首次实跑（CI 修复后）实证：3 failed, 68 passed —— 失败全因缺 node。
+            # tests/load/test_payload_contract.py needs node to actually run payload.js to sample example messages
+            # (Order 23 contract: payload reuses mock_fleet's real 24-joint structure; skipping = contract runs naked).
+            # python:3.11 image has no node; Debian bookworm's nodejs 18 supports --input-type=module.
+            # First real run 2026-10-11 (after CI fix) evidence: 3 failed, 68 passed -- all failures were due to missing node.
             apt-get update -qq && apt-get install -y -qq --no-install-recommends nodejs >/dev/null
             node --version
             python -m pip install --no-cache-dir -r alert_engine/requirements.txt
             python -m pip install --no-cache-dir -r backend_ingestion/requirements.txt
-            # fakeredis 是**测试期**依赖：订单 04 的验收用例要验去重器的 SET NX 幂等
-            # 与 TTL，进程内 dict 替身测不出 Redis 服务端语义。
+            # fakeredis is a **test-time** dependency: Order 04's acceptance case must verify the deduper's SET NX idempotence
+            # and TTL; an in-process dict stub cannot exercise Redis server-side semantics.
             python -m pip install --no-cache-dir pytest pytest-timeout 'httpx<0.28' fakeredis
-            # rich 是 tests/test_ts_sampling.py 间接需要的**测试期**依赖：该文件要 exec
-            # simulator/mock_fleet.py，而后者在 :41 `from rich.console import Console`。
-            # 上面两个 requirements 都**不含** rich（simulator 的依赖不入 CI）。
+            # rich is an indirect **test-time** dependency of tests/test_ts_sampling.py: that file execs
+            # simulator/mock_fleet.py, which at :41 does `from rich.console import Console`.
+            # Neither of the two requirements above contains rich (simulator deps are not in CI).
             #
-            # 测试侧已能把「缺依赖」判为 SKIP（见 tests/test_ts_sampling.py 的
-            # Skip/_PytestSkipped），所以**不装也不会红**。这里仍然补装，是因为
-            # 「跳过」和「跑过」不是一回事：这 3 个用例盯的是 PK (time, robot_id)
-            # 的毫秒时间戳唯一性（ON CONFLICT DO NOTHING 会静默丢行），
-            # 长年 SKIP 等于门禁不存在。补装后它们在 CI 真跑。
-            # 版本与 simulator/requirements.txt 对齐，避免「本机能跑、CI 不能跑」。
+            # The test side can already judge "missing dependency" as SKIP (see tests/test_ts_sampling.py's
+            # Skip/_PytestSkipped), so NOT installing it would not turn red either. We still install it because
+            # "skipped" and "run" are not the same: these 3 cases watch the millisecond-timestamp uniqueness of PK (time, robot_id)
+            # (ON CONFLICT DO NOTHING silently drops rows),
+            # a perpetual SKIP equals a non-existent gate. After installing, they truly run in CI.
+            # Versions are aligned with simulator/requirements.txt to avoid "works locally, fails in CI".
             python -m pip install --no-cache-dir rich==13.7.1
-            echo "── pytest（仓库根）──"
+            echo "── pytest (repo root) ──"
             python -m pytest -q
             echo "── pytest backend_ingestion/tests ──"
-            # 2026-10-11 实测：backend 套件一例 F 后整体挂死 10.8m 被 runner SIGKILL，
-            # F 的名字与栈都没打出来。加 pytest-timeout（单测 60s 封顶，超时打栈）
-            # 与 -v（挂死时日志至少留有「最后一个开跑的用例」），一次跑出可定位现场。
+            # Verified 2026-10-11: after one F in the backend suite the whole run hung for 10.8m and was SIGKILLed by the runner,
+            # with neither the F's name nor stack printed. Add pytest-timeout (60s cap per test, prints stack on timeout)
+            # and -v (at least logs "the last test that started" when it hangs) to surface a locatable scene in one run.
             python -m pytest backend_ingestion/tests/ -v --timeout=60
 
-            # ── 2026-11-10 新增：bridge 作业（ROS2 / ISO 21423，独立包无 app 冲突）──
-            # 与 push 分支口径必须一致。bridge 只硬依赖 websockets；aiomqtt 是 lazy 可选 import。
-            echo "── pytest bridge/tests（ROS2 / ISO 21423 桥接，独立包）──"
+            # -- 2026-11-10 added: bridge job (ROS2 / ISO 21423, standalone package, no app conflict) --
+            # Must match the push branch exactly. bridge only hard-depends on websockets; aiomqtt is a lazy optional import.
+            echo "── pytest bridge/tests (ROS2 / ISO 21423 bridge, standalone package) ──"
             python -m pip install --no-cache-dir -r bridge/requirements.txt
             python -m pip install --no-cache-dir pytest pytest-timeout
             python -m pytest bridge/tests/ -v --timeout=60
 
-            # 与 push 分支**逐字相同**的三道门禁 —— 两边口径必须一致，
-            # 否则会出现「PR 绿了、合到 main 才变红」，直接污染回归信号：
-            #   ① compileall 全量语法编译
-            #   ② test_*.py 真实测试函数健全性
-            #   ③ 后端 import 冒烟（LEDGER §8.3-5 历史上只能在本机跑不了的那一项）
-            echo "── python 全量语法编译 ──"
+            # Identical word-for-word to the push branch's three gates -- the two sides must stay consistent,
+            # otherwise you get "PR green but turns red after merging to main", directly polluting the regression signal:
+            #   1) compileall full syntax compile
+            #   2) real test function sanity in test_*.py
+            #   3) backend import smoke (LEDGER §8.3-5, historically the only item that could not run locally)
+            echo "── python full syntax compile ──"
             python -m compileall -q backend_ingestion/app alert_engine/app simulator tests bridge
-            echo "── 测试文件健全性 ──"
+            echo "── test-file sanity ──"
             missing=0
             for f in $(find tests alert_engine/tests backend_ingestion/tests bridge/tests -name 'test_*.py'); do
               if ! grep -qE '^[[:space:]]*def test_' "$f"; then
-                echo "无真实测试函数: $f"
+                echo "No real test function: $f"
                 missing=1
               fi
             done
             if [ "$missing" != "0" ]; then
-              echo "发现假覆盖测试文件 —— 门禁拒绝"
+              echo "Found fake-coverage test file -- gate rejected"
               exit 1
             fi
-            echo "── 后端 import 冒烟 ──"
+            echo "── backend import smoke ──"
             (cd backend_ingestion && JWT_SECRET=ci-import-smoke-placeholder python -c "import app.main; print('backend app.main import OK')")
             (cd alert_engine && JWT_SECRET=ci-import-smoke-placeholder python -c "import app.main; print('alert_engine app.main import OK')")
         - name: npm-test
@@ -431,44 +431,44 @@ main:
           script: |
             set -eu
             cd frontend_dashboard
-            # npm 10 实测（2026-10-11 两个 CI 轮次）：lockfile 在 Windows 生成时只写
-            # win32 的 rollup 原生可选依赖条目；无论 npm ci 还是 npm install，
-            # 只要 lockfile 存在就不据 rollup 的 optionalDependencies 元数据补装
-            # linux-x64 变体 → vitest 启动即崩（npm/cli#4828）。
-            # 解法：测试门禁内删 lockfile 让 npm 在 linux 全新 resolve
-            # （错误信息自身推荐的做法）；代价是传递依赖浮动，门禁可接受。
+            # npm 10 verified (2026-10-11, two CI rounds): when the lockfile is generated on Windows it only writes
+            # win32's rollup native optional-dependency entries; whether npm ci or npm install,
+            # as long as the lockfile exists it does not reinstall the linux-x64 variant from rollup's optionalDependencies metadata
+            # -> vitest crashes on startup (npm/cli#4828).
+            # Fix: delete the lockfile inside the test gate so npm does a fresh linux resolve
+            # (the approach the error message itself recommends); the cost is floating transitive deps, acceptable for the gate.
             rm -f package-lock.json
             npm install
             npm test
-            # 同 push 分支：ISSUE #62 的 typecheck + bundle 守卫，口径必须两边一致，
-            # 否则会出现「PR 绿了但合到 main 变红」的错位。
+            # Same as the push branch: ISSUE #62's typecheck + bundle guard must match on both sides,
+            # otherwise you get the mismatch "PR is green but turns red after merging to main".
             npm run typecheck
             npx vite build
             node scripts/report-bundle-size.mjs
-    # e2e 与 push 共用同一份 docker/env/stages（锚点定义在 push 块，此处按文档序用别名引用）
+    # e2e shares the same docker/env/stages with push (anchors defined in the push block; referenced here by alias per document order)
     - name: e2e-30k-landing
       docker: *e2e-image
       services: [docker]
       env: *e2e-env
       stages: *e2e-stages
 
-  # ⛔ NPC 自主流水线已删除（2026-10-20，按用户指令「删除所有自动触发的 NPC 设置」）。
-  # 原 `"crontab: 0 18 * * *"` 的 7 段 agent 自主流水线（pm/architect/dev/review/test/
-  # compliance/integration-call）因账号级 AI 配额（402 [EXCEEDING_LIMIT]）长期无法运行，
-  # 且 pm-call.md:6 的配额守卫结构性失效（历史证据见 git 记录）。删除后不再有自动触发的
-  # NPC 自主巡检。保留：① `$:` 下 issue/pull_request `comment@npc`（@mention 手动派单，
-  # 非自动触发，是派单入口）；② `"crontab: 0 3 * * *"` 每日 e2e 回归（非 NPC）。
-  # 恢复方式：root 组织提额后按 git 历史恢复本块，并执行 `cnb build build-crontab-sync`。
+  # NPC autonomous pipeline deleted (2026-10-20, per user instruction "remove all auto-triggered NPC settings").
+  # The original `"crontab: 0 18 * * *"` 7-stage agent autonomous pipeline (pm/architect/dev/review/test/
+  # compliance/integration-call) could not run long-term due to account-level AI quota (402 [EXCEEDING_LIMIT]),
+  # and pm-call.md:6's quota guard was structurally broken (historical evidence in git log). After deletion, no auto-triggered
+  # NPC autonomous inspection remains. Retained: 1) under `$:`, issue/pull_request `comment@npc` (@mention manual dispatch,
+  # not auto-triggered, the dispatch entry point); 2) `"crontab: 0 3 * * *"` daily e2e regression (not NPC).
+  # To restore: after the root org raises the quota, restore this block from git history and run `cnb build build-crontab-sync`.
 
   "crontab: 0 3 * * *":
     - name: e2e-30k-landing
-      # 订单 34 T2 修复点：原缺失 `docker:`（`.cnb.yml:479` 只有 services/env/stages），
-      # 于是这条 pipeline 跑在缺省镜像 cnbcool/default-build-env 里 —— 该镜像没有 python3，
-      # e2e stage 直接打【E2E SKIP】并 exit 0，构建 21306ms 整体绿。
-      # 实证（同一 sha 68b7b8b 的两个构建对照）：
-      #   push   cnb-152-1k4ohjp3k-002 prepare → `docker pull python:3.11-slim`
-      #   crontab cnb-st7-1k4onp4ok-001 prepare → `docker pull cnbcool/default-build-env`
-      # 现与 push/PR 引用同一锚点，三处不可能再漂移。
+      # Order 34 T2 fix point: originally missing `docker:` (`.cnb.yml:479` had only services/env/stages),
+      # so this pipeline ran on the default image cnbcool/default-build-env -- which has no python3,
+      # the e2e stage printed [E2E SKIP] and exited 0, the whole build green at 21306ms.
+      # Evidence (two builds compared at the same sha 68b7b8b):
+      #   push   cnb-152-1k4ohjp3k-002 prepare -> `docker pull python:3.11-slim`
+      #   crontab cnb-st7-1k4onp4ok-001 prepare -> `docker pull cnbcool/default-build-env`
+      # Now references the same anchor as push/PR, so the three sites can no longer drift.
       docker: *e2e-image
       services: [docker]
       env: *e2e-env

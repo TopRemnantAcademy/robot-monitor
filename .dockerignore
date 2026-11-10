@@ -1,4 +1,4 @@
-# 禁止把密钥/缓存/无关文件烘焙进镜像或提交上下文
+# Do not bake secrets/caches/unrelated files into the image or commit context
 .env
 .env.*
 __pycache__/

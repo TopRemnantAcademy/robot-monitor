@@ -1,47 +1,47 @@
 #!/bin/sh
-# 契约门禁执行脚本（订单 18 T2）。
+# Contract-gate execution script (Order 18 T2).
 #
-# 刻意用 `sh` 而不是 bash：CNB 的 script 本身就由 sh(dash) 执行
-# （实测 `set -euo pipefail` 会报 `sh: 1: set: Illegal option -o pipefail`），
-# 把逻辑放进 .sh 并显式用 sh 跑，可避免"本地 bash 能过、CI 挂掉"的错配。
-# 也因此**只用 POSIX 语法**，不用 pipefail / [[ ]] / $'...'。
+# Deliberately uses `sh` not bash: CNB's script is itself run by sh (dash)
+# (verified: `set -euo pipefail` errors with `sh: 1: set: Illegal option -o pipefail`),
+# putting logic in .sh and running it explicitly with sh avoids the "passes locally in bash, fails in CI" mismatch.
+# Therefore only POSIX syntax is used; no pipefail / [[ ]] / $'...'.
 set -eu
 
-echo "== 0) 环境自检 =="
+echo "== 0) Environment self-check =="
 node --version
 python3 --version
 python3 -m pip --version
-# 前端依赖的**来源**必须存在：要么工作区里已有 node_modules（本地 npm ci），
-# 要么镜像里备好了 /opt/fe/node_modules（CI，第 2 步会软链回工作区）。
-# 两者都没有时，后面每一步都会以晦涩方式失败（gen:types not found /
-# ajv ERR_MODULE_NOT_FOUND），这里显式点名，把「镜像构建期 npm ci 未生效」
-# 与「代码问题」区分开 —— 真机曾栽在挂载点不同（构建 cnb-pm7-1k4k4emnd）。
+# The source of frontend deps must exist: either node_modules already in the workspace (local npm ci),
+# or /opt/fe/node_modules prepared in the image (CI; step 2 symlinks it back into the workspace).
+# If neither exists, every later step fails cryptically (gen:types not found /
+# ajv ERR_MODULE_NOT_FOUND); naming it explicitly here separates "image build-time npm ci did not take effect"
+# from "code problem" -- the real machine once tripped on a different mount point (build cnb-pm7-1k4k4emnd).
 if [ ! -d frontend_dashboard/node_modules ] && [ ! -d /opt/fe/node_modules ]; then
-  echo "FATAL: 找不到前端依赖 —— 工作区无 node_modules 且镜像内无 /opt/fe/node_modules" >&2
+  echo "FATAL: frontend deps not found -- workspace has no node_modules and image has no /opt/fe/node_modules" >&2
   exit 1
 fi
 
 echo
-echo "== 1) 契约快照漂移 + breaking 检测（T3）=="
-# --check 语义：非 breaking（加可选字段/改描述）只告警并 exit 0；
-# breaking（删字段/改类型/删路径）exit 1。
+echo "== 1) Contract snapshot drift + breaking detection (T3) =="
+# --check semantics: non-breaking (adding optional fields / changing descriptions) only warns and exits 0;
+# breaking (removing fields / changing types / removing paths) exits 1.
 python3 scripts/export-openapi.py --check docs/contracts/openapi.snapshot.json
 
 echo
-echo "== 2) 生成类型必须与入库产物一致（T1/T2 核心门禁）=="
-# 【为什么要把镜像里的 node_modules 接回工作区】
-# 真机报错（构建 cnb-1tc-1k4k4ng86）：
+echo "== 2) Generated types must match committed artifact (T1/T2 core gate) =="
+# [Why link the image's node_modules back into the workspace]
+# Real error (build cnb-1tc-1k4k4ng86):
 #   Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'ajv'
 #   imported from /workspace/frontend_dashboard/tests/ws-envelope.test.mjs
-# 根因：Dockerfile 在构建期 npm ci 出的 node_modules 留在**镜像**里，
-# 而任务运行时的工作区是从 git checkout 出来的、**没有 node_modules**；
-# 且 Node 的 ESM 解析只沿「文件所在目录 → 上级」逐级找 node_modules，
-# **既不认全局包，NODE_PATH 对 ESM 也完全无效**（两条都实测过，
-# 见 ci/contract-gate.Dockerfile 把产物固定到 /opt/fe/node_modules 的那段注释）。
-# 不接回来，第 3 步 `import 'ajv'` 必红。
-# 这里整份软链（不是单挑 ajv）——ajv 还有 fast-deep-equal / fast-uri /
-# json-schema-traverse / require-from-string 四个传递依赖，缺一就崩。
-# 只软链 node_modules、不软链 .bin，故不触发 16ae80c 记录的 .bin shim 相对回跳问题。
+# Root cause: the node_modules npm-ci'd at build time in the Dockerfile stays in the image,
+# but the runtime task workspace is checked out from git and has no node_modules;
+# and Node's ESM resolution only walks "file dir -> parent" step by step to find node_modules,
+# recognizing neither global packages nor NODE_PATH for ESM (both verified,
+# see the comment in ci/contract-gate.Dockerfile that pins output to /opt/fe/node_modules).
+# Without linking it back, step 3's `import 'ajv'` always fails.
+# Symlink the whole thing here (not just ajv) -- ajv also has fast-deep-equal / fast-uri /
+# json-schema-traverse / require-from-string as transitive deps; missing any one breaks it.
+# Only symlink node_modules, not .bin, so we avoid the .bin shim relative-jump problem recorded in 16ae80c.
 cd frontend_dashboard
 if [ -d /opt/fe/node_modules ] && [ ! -e node_modules ]; then
   ln -s /opt/fe/node_modules node_modules
@@ -51,35 +51,35 @@ cd ..
 git diff --exit-code -- frontend_dashboard/src/types/api.gen.ts
 
 echo
-echo "== 3) WS 信封 schema 的 ajv 校验（T4）=="
+echo "== 3) ajv validation of WS envelope schema (T4) =="
 cd frontend_dashboard
-# ⚠️ glob 必须**不加引号**：引号会让它不被 shell 展开、原样传给 node，
-#   而 **Node 20 的 test runner 不展开 glob**（Node 22+ 才支持），
-#   它把 `tests/*.test.mjs` 当字面路径交给 statSync：
+# WARNING: the glob must NOT be quoted: quoting stops the shell from expanding it and passes it literally to node,
+# and Node 20's test runner does NOT expand globs (Node 22+ only),
+# so it hands `tests/*.test.mjs` as a literal path to statSync:
 #     lib/internal/test_runner/runner.js:136  resolve(process.argv[1])
-#     lib/internal/test_runner/runner.js:92   statSync(path) → ENOENT
+#     lib/internal/test_runner/runner.js:92   statSync(path) -> ENOENT
 #     lib/internal/test_runner/runner.js:142  console.error(`Could not find '${err.path}'`)
-#   真机报错原文：`Could not find '/workspace/frontend_dashboard/tests/*.test.mjs'`
-#   （构建 cnb-pm7-1k4k4emnd）。本机 node 24 能过是因为 24 会展开 glob ——
-#   典型「本地绿、CI 红」，别再把引号加回来。
-# `./` 前缀非必需（node 对 `tests/ws-...mjs` 也能按路径解析，已在本机实测），
-# 写上只是为了明确「这是相对路径、不是包名」，杜绝歧义。真正让本步可过的是
-# 上面把 node_modules 接回工作区 —— ajv 解析不到时，加不加 `./` 都会报同一句
-# `Cannot find package 'ajv'`。
+#   real error: `Could not find '/workspace/frontend_dashboard/tests/*.test.mjs'`
+#   (build cnb-pm7-1k4k4emnd). Local node 24 passes because 24 expands globs --
+#   a classic "green locally, red in CI"; do not re-add the quotes.
+# The `./` prefix is not required (node also resolves `tests/ws-...mjs` by path, verified locally),
+# it is written only to make clear "this is a relative path, not a package name", removing ambiguity. What actually makes this step pass
+# is linking node_modules back to the workspace above -- when ajv cannot be resolved, with or without `./` it reports the same
+# `Cannot find package 'ajv'`.
 node --test ./tests/*.test.mjs
 cd ..
 
 echo
-echo "== 4) 类型检查（tsc --noEmit，0 错误才放行）=="
+echo "== 4) Type check (tsc --noEmit, 0 errors to pass) =="
 cd frontend_dashboard
-# ⚠️ 用 node 直接跑 tsc 入口，**不要写 `npx tsc`**：`npx` 只在 PATH 上找
-#   `node_modules/.bin`，而这里 node_modules 是**软链**到 /opt/fe 的，
-#   软链不改变「.bin 不在 PATH 上」这一事实；Node 20 自带的 npx 找不到就
-#   **直接报错**（`npm error could not determine executable to run`），
-#   不像 npm 10.9 会回落联网取包。显式入口同时钉死「用的是哪份 tsc」，
-#   避免 npx 的隐式解析在别的环境挑到另一份。
+# WARNING: run the tsc entrypoint directly with node, do NOT write `npx tsc`: `npx` only looks on PATH for
+#   `node_modules/.bin`, but here node_modules is a symlink to /opt/fe,
+#   and the symlink does not change the fact that ".bin is not on PATH"; Node 20's bundled npx errors out when it can't find it
+#   directly (npm error could not determine executable to run),
+#   unlike npm 10.9 which falls back to fetching over the network. The explicit entrypoint also pins "which tsc is used",
+#   avoiding npx's implicit resolution picking a different copy in another environment.
 node ./node_modules/typescript/bin/tsc --noEmit
 cd ..
 
 echo
-echo "== 契约门禁全部通过 =="
+echo "== Contract gate passed =="

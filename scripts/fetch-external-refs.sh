@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# 拉取 external/ 下 14 个上游开源参考源。
-# 来源与取舍依据见 external/SOURCES.md；套用点见 external/INTEGRATION-PLAN.md。
-# 用法: bash scripts/fetch-external-refs.sh [目标目录，默认 external]
+# Fetch the 14 upstream open-source reference sources under external/
+# Source and selection rationale: see external/SOURCES.md; integration points: external/INTEGRATION-PLAN.md.
+# Usage: bash scripts/fetch-external-refs.sh [target dir, default external]
 set -uo pipefail
 
 DEST="${1:-external}"
 mkdir -p "$DEST"
 cd "$DEST"
 
-# 全部为 GitHub 官方组织仓库，--depth 1 浅克隆
+# All are official GitHub org repos, cloned shallow with --depth 1
 REPOS=(
   "https://github.com/emqx/mqtt-to-timescaledb.git"
   "https://github.com/timescale/tsbs.git"
@@ -28,7 +28,7 @@ REPOS=(
 ok=0; fail=0; failed_list=()
 for url in "${REPOS[@]}"; do
   name="$(basename "$url" .git)"
-  if [ -d "$name/.git" ]; then echo "SKIP  $name (已存在)"; ok=$((ok+1)); continue; fi
+  if [ -d "$name/.git" ]; then echo "SKIP  $name (already exists)"; ok=$((ok+1)); continue; fi
   if git clone --depth 1 --quiet "$url" "$name" 2>/dev/null; then
     echo "OK    $name"
     ok=$((ok+1))
@@ -38,9 +38,9 @@ for url in "${REPOS[@]}"; do
   fi
 done
 
-# alertmanager: 只取 docs/（全量 57MB，sparse 后 ~816KB）
+# alertmanager: only take docs/ (full repo 57MB, sparse to ~816KB)
 if [ -d "alertmanager/.git" ]; then
-  echo "SKIP  alertmanager (已存在)"
+  echo "SKIP  alertmanager (already exists)"
 else
   if git clone --depth 1 --quiet --filter=blob:none --sparse \
        https://github.com/prometheus/alertmanager.git alertmanager 2>/dev/null; then
@@ -53,9 +53,9 @@ else
 fi
 
 echo "-----"
-echo "成功/已存在: $ok  失败: $fail"
+echo "Succeeded/already present: $ok  Failed: $fail"
 if [ "$fail" -gt 0 ]; then
-  echo "失败清单: ${failed_list[*]}"
-  echo "提示: 若为网络问题（无法访问 github.com），请如实上报，勿伪造产出。"
+  echo "Failed list: ${failed_list[*]}"
+  echo "Hint: if it is a network issue (cannot reach github.com), report it truthfully; do not fabricate output."
   exit 1
 fi

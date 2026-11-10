@@ -1,6 +1,6 @@
-# Grafana 看板自动供给
-# 来源：external/emqx-exporter/examples/docker-compose/grafana-dashboard.yaml 的 provider 写法
-#   + external/prometheus/docs（provider 目录挂载语义）
+# Grafana dashboard auto-provisioning
+# Source: external/emqx-exporter/examples/docker-compose/grafana-dashboard.yaml provider style
+#   + external/prometheus/docs (provider directory mount semantics)
 apiVersion: 1
 
 providers:

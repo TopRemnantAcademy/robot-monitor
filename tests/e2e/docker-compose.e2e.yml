@@ -1,52 +1,54 @@
-# 端到端 30,000 行落库验证栈（ISSUE #60）
+# End-to-end 30,000-row persistence verification stack (ISSUE #60)
 #
-# 与 infra/docker-compose.yml 的关系：**不修改**基础设施栈，只在此处装一个
-# 「真实链路」的最小拓扑 —— EMQX + TimescaleDB + Redis + 后端 + 模拟器，
-# 五者同处一个 Docker 网络。之所以另起一份而不是叠加 infra 的两个文件：
-#   1. e2e 要的是**可一键重复运行**，不应依赖宿主机 .env（`JWT_SECRET:?` 会让
-#      compose 直接退出）；此处用 e2e 专用口令，与生产凭据无关。
-#   2. 模拟器在 infra 栈里根本没有容器（现状是在宿主机裸跑），
-#      「1000 msg/s 真实落库」这条链路的入口就缺了容器化的一环。
+# Relationship to infra/docker-compose.yml: this does **not modify** the infrastructure stack; it only
+# assembles a minimal "real pipeline" topology here — EMQX + TimescaleDB + Redis + backend + simulator,
+# all on one Docker network. Why a separate file instead of layering onto infra's two files:
+#   1. e2e needs to be **repeatable with one command** and should not depend on the host's .env
+#      (`JWT_SECRET:?` would make compose exit immediately); here we use an e2e-specific secret,
+#      unrelated to production credentials.
+#   2. The simulator has no container at all in the infra stack (currently runs bare on the host),
+#      so the entry point of the "1000 msg/s real persistence" pipeline was missing a containerized link.
 #
-# 用法：
-#   docker compose -f tests/e2e/docker-compose.e2e.yml up -d --build   # 起基础设施+后端
-#   docker compose -f tests/e2e/docker-compose.e2e.yml run --rm mock_fleet  # 受控压测
+# Usage:
+#   docker compose -f tests/e2e/docker-compose.e2e.yml up -d --build   # start infra + backend
+#   docker compose -f tests/e2e/docker-compose.e2e.yml run --rm mock_fleet  # controlled stress test
 #   docker compose -f tests/e2e/docker-compose.e2e.yml down -v
-# 或直接用 tests/e2e/test_e2e_30k.py 驱动（推荐，见其文件头）。
+# Or just drive it with tests/e2e/test_e2e_30k.py (recommended, see its file header).
 #
-# 纪律：这里的口令只用于**本地/CI 一次性栈**，不是生产凭据，也不从仓库外读密钥
-# （AGENTS.md §5 禁止的是把真实凭据写进仓库，不是禁止给测试栈设一个固定值）。
+# Discipline: the secrets here are used only for the **local/CI one-shot stack**, not production
+# credentials, and no secret is read from outside the repo (AGENTS.md §5 forbids committing real
+# credentials to the repo, not setting a fixed value for the test stack).
 name: robotmonitor-e2e
 
 services:
   emqx:
-    # 与 infra/docker-compose.yml 锁同一档 5.6（选型理由见该文件注释）：
-    # 5.6.x 只在 emqx/emqx 通道持续发布，是 5.6 的可追溯来源。
+    # Locked to the same 5.6 tier as infra/docker-compose.yml (selection rationale in that file's comments):
+    # 5.6.x is published continuously only on the emqx/emqx channel, making it the traceable source for 5.6.
     image: emqx/emqx:5.6
     environment:
       EMQX_LOG__LEVEL: warning
     healthcheck:
-      # `emqx ping` 可用前提：emqx-docker 的 Dockerfile 把 /opt/emqx/bin/* 软链到
-      # /usr/local/bin/（实证见 infra/docker-compose.yml 注释）。
+      # Prerequisite for `emqx ping` to work: emqx-docker's Dockerfile symlinks /opt/emqx/bin/* to
+      # /usr/local/bin/ (verified in infra/docker-compose.yml comments).
       test: ["CMD", "emqx", "ping"]
       interval: 5s
       timeout: 5s
       retries: 24
-      # start_period 必须给足：EMQX 首启要展开 Erlang 运行时，
-      # 早于它连 Broker 会得到「写入 0 条」的假失败（R-07 §1）。
+      # start_period must be generous: EMQX's first boot expands the Erlang runtime,
+      # and connecting before that yields a false "0 rows written" failure (R-07 §1).
       start_period: 40s
 
   timescaledb:
-    # 真实 TimescaleDB，**不接受 mock 替身**（ISSUE #60 禁止项）。
-    # 2.13.1-pg16 与 infra/docker-compose.yml 完全一致，且是 R-09 实测所用版本。
+    # A real TimescaleDB, **no mock substitute allowed** (ISSUE #60 prohibition).
+    # 2.13.1-pg16 is identical to infra/docker-compose.yml and is the version verified by R-09.
     image: timescale/timescaledb:2.13.1-pg16
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: robot_monitor
     volumes:
-      # 复用仓库唯一的 Schema 事实源（AGENTS.md §4）：e2e 考的就是 init.sql 本身，
-      # 另写一份 DDL 会让「e2e 通过」与「生产建表」脱钩。
+      # Reuse the repo's single Schema source of truth (AGENTS.md §4): e2e tests init.sql itself,
+      # and writing a separate DDL would decouple "e2e passes" from "production table creation".
       - ../../infra/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d robot_monitor"]
@@ -64,25 +66,25 @@ services:
 
   backend:
     build:
-      # 上下文必须是仓库根：Dockerfile 要 COPY backend_ingestion/。
+      # Context must be the repo root: the Dockerfile needs to COPY backend_ingestion/.
       context: ../..
       dockerfile: backend_ingestion/Dockerfile
     image: robot-monitor-backend:e2e
     environment:
-      # service 名即 Docker DNS
+      # service name is the Docker DNS
       MQTT_BROKER: emqx
       MQTT_PORT: "1883"
       REDIS_URL: redis://redis:6379
       DATABASE_URL: postgresql://postgres:postgres@timescaledb:5432/robot_monitor
-      # 双重触发窗口保持 spec/01 §4.2 的默认（满 500 条 或 满 1s），
-      # 刻意**不调小**：e2e 要验证的是生产配置下的落库无损，不是调参后的结果。
+      # The dual-trigger window keeps the spec/01 §4.2 default (500 rows OR 1s),
+      # deliberately **not reduced**: e2e verifies lossless persistence under production config, not after tuning.
       BATCH_TRIGGER_COUNT: "500"
       BATCH_TRIGGER_SECONDS: "1.0"
-      # 后端启动即要求 JWT_SECRET（config.py 无默认值，留空会 ValidationError）。
-      # 这是 e2e 专用占位值，与任何真实环境无关。
+      # The backend requires JWT_SECRET at startup (config.py has no default; empty triggers ValidationError).
+      # This is an e2e-only placeholder value, unrelated to any real environment.
       JWT_SECRET: "e2e-only-secret-0123456789abcdef0123456789abcdef"
     ports:
-      - "18000:8000"   # 宿主机也留一个口，便于 e2e 脚本从外面探 /healthz
+      - "18000:8000"   # also leave a port on the host so the e2e script can probe /healthz from outside
     depends_on:
       emqx:
         condition: service_healthy
@@ -91,9 +93,9 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      # 后端 /healthz 的语义是「存活探针」——依赖不可达时仍返回 200 且 status=degraded
-      # （backend_ingestion/app/main.py:85-118）。所以这里不能只看状态码，
-      # 必须等到 db=up 才算后端**真的能落库**，否则 e2e 会在 DB 未就绪时提前开跑。
+      # The backend's /healthz is a "liveness probe" — when deps are unreachable it still returns 200 with status=degraded
+      # (backend_ingestion/app/main.py:85-118). So we can't just check the status code here;
+      # we must wait until db=up to consider the backend **actually able to persist**, otherwise e2e starts early while DB is unready.
       test: ["CMD-SHELL", "python -c \"import urllib.request,json;d=json.load(urllib.request.urlopen('http://localhost:8000/healthz'));raise SystemExit(0 if d['db']=='up' else 1)\""]
       interval: 5s
       timeout: 5s
@@ -105,23 +107,25 @@ services:
       context: ../..
       dockerfile: tests/e2e/Dockerfile.mock_fleet
     image: robot-monitor-mock-fleet:e2e
-    # 默认不随 `up` 启动：压测由 e2e 脚本显式 `run`（或用 profile 手动拉起），
-    # 否则容器一起来就连，会把「起栈」和「压测」两件事的时序搅在一起。
+    # Not started with `up` by default: the stress test is run explicitly by the e2e script via `run`
+    # (or pulled up manually via profile), otherwise the container connects immediately on start and tangles
+    # the timing of "bringing up the stack" and "running the stress test" into one mess.
     profiles: ["stress"]
     environment:
-      # ⚠️ 这里**不**用 compose 的 `${VAR:-default}` 插值来传时长/台数。
-      # compose 的变量插值发生在**宿主机**解析 YAML 时，`docker compose run -e FLEET_DURATION=x`
-      # 是容器启动时才注入的，改不动已经展开的 command —— 用插值会让
-      # 「脚本指定 40s」永远被宿主机默认值覆盖（且不报错，最难查的那种静默失败）。
-      # 故改由 entrypoint 在**容器内**读环境变量再 exec，`-e` 才真正生效。
+      # ⚠️ Here we do **not** use compose's `${VAR:-default}` interpolation to pass duration/robot count.
+      # compose's variable interpolation happens on the **host** when parsing the YAML, while
+      # `docker compose run -e FLEET_DURATION=x` injects only at container start, so it can't change the
+      # already-expanded command — using interpolation means "script specifies 40s" is silently overridden by the
+      # host default forever (and errors nothing, the hardest-to-debug kind of silent failure).
+      # So instead the entrypoint reads env vars **inside the container** before exec, so `-e` actually takes effect.
       FLEET_DURATION: "40"
       FLEET_ROBOTS: "100"
-      # 发送量下限（默认 0=不设卡）：由 e2e 脚本按 E2E_ROBOTS×10×E2E_DURATION×0.5 算出并注入。
-      # 为什么需要它：发送量与 STACK_HARD_LIMIT 共用一套环境变量时，
-      # `docker compose run --rm` **不会**清掉 compose 里的环境值，只是把它换成
-      # 宿主机的值 —— 于是「脚本给 100 台」会被 compose 里的 5 台静默覆盖，
-      # 跑出 1000~2000 行却被 `--min-sent 0` 放行，是标准的静默假绿。
-      # 加上下限后，压测阶段自身就会以非 0 退出，不会把问题掩盖到断言阶段。
+      # Minimum sent count (default 0 = no threshold): computed and injected by the e2e script as
+      # E2E_ROBOTS×10×E2E_DURATION×0.5. Why it's needed: when send volume and STACK_HARD_LIMIT share the
+      # same set of env vars, `docker compose run --rm` does **not** clear the compose env values, it just
+      # replaces them with the host's values — so "script gives 100 robots" is silently overridden by compose's 5,
+      # yielding 1000~2000 rows but passing `--min-sent 0`, a textbook silent false-green.
+      # Once the lower bound is added, the stress phase itself exits non-zero and won't hide the problem until assertions.
       FLEET_MIN_SENT: "0"
       MQTT_BROKER: emqx
       MQTT_PORT: "1883"
@@ -137,7 +141,7 @@ services:
           --no-ui \
           --fault-rate 0.02 \
           --min-sent "$${FLEET_MIN_SENT:-0}"
-    # 容器内无 TTY，rich 的 Live 控制序列会把 logs 刷乱，故 --no-ui 走每秒一行日志。
+    # No TTY inside the container; rich's Live control sequences would scramble the logs, so --no-ui logs one line per second.
     depends_on:
       emqx:
         condition: service_healthy

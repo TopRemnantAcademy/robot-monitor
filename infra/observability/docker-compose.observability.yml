@@ -1,36 +1,38 @@
-# 可观测性叠加层（overlay）—— 与 infra/docker-compose.yml 组合使用：
+# Observability overlay layer — used in combination with infra/docker-compose.yml:
 #
 #   docker compose -f infra/docker-compose.yml \
 #                  -f infra/observability/docker-compose.observability.yml up -d
 #
-# 为什么用 overlay 而不是改基础 compose：
-#   基础 compose 是「跑通看板」的最小集（3 个组件），必须保持轻量；
-#   可观测性是运维增强层，按需叠加，不增加看板本身的启动负担。
+# Why an overlay instead of editing the base compose:
+#   The base compose is the minimal set to "get the dashboards running" (3 components) and must stay light;
+#   observability is an ops enhancement layer, added on demand without increasing the dashboards' startup burden.
 #
-# 每个服务都对应一个**已下载**的上游仓库（external/ 下），不是凭空写镜像名：
+# Each service maps to a **downloaded** upstream repo (under external/), not an invented image name:
 #   prometheus         <- external/prometheus              @ v3.2.1
 #   alertmanager       <- external/alertmanager            @ v0.28.1
 #   postgres-exporter  <- external/postgres_exporter       @ v0.17.1
 #   redis-exporter     <- external/redis_exporter          @ v1.74.0
 #
-# ── 网络（订单 22 / I-12 的硬约束）────────────────────────────
-# 两个 exporter 必须与 timescaledb / redis 处在**同一个网络**，否则：
-#   postgres_exporter 按 DATA_SOURCE_NAME 里的 `timescaledb` 主机名解析不到库；
-#   redis_exporter 按 REDIS_ADDR 里的 `redis` 解析不到实例。
-#   —— 两个 exporter 会起来，但 /metrics 里一个业务指标都没有，静默失效。
+# ── Network (hard constraint of order 22 / I-12) ────────────────────────────
+# The two exporters MUST be on the **same network** as timescaledb / redis, otherwise:
+#   postgres_exporter cannot resolve the `timescaledb` hostname in DATA_SOURCE_NAME;
+#   redis_exporter cannot resolve the `redis` hostname in REDIS_ADDR.
+#   —— Both exporters will start, but /metrics will show zero business metrics — silent failure.
 #
-# 这里刻意**不写** top-level `networks:` 声明：三个 compose 文件都不声明时，
-# 所有 service（含 base 的 emqx/timescaledb/redis）都落在 Compose 自动创建的
-# 默认网络 `{project}_default` 上，天然同网。一旦在本文件新增网络，要么把
-# base 的服务也接过去（那就得改基础 compose，本单禁止），要么 exporter 落单 → 解析失败。
+# Here we deliberately do **not** declare a top-level `networks:` block: when none of the three compose
+#   files declares one, every service (including base's emqx/timescaledb/redis) lands on the
+#   Compose-auto-created default network `{project}_default`, natively same-network. Once you add a
+#   network in this file, you'd either have to bring base's services onto it (which means editing the
+#   base compose, forbidden by this task), or the exporter ends up isolated → resolution failure.
 #
-# project 名要一致（同一条 `docker compose -f a -f b` 命令天然一致）；若拆成两条
-# 命令分别 up，必须显式 `-p robot-monitor`，否则会造出两张网络、DNS 互不可见。
+# The project name must be consistent (a single `docker compose -f a -f b` command is consistent by
+#   nature); if you split into two `up` commands, you must pass `-p robot-monitor` explicitly,
+#   otherwise two networks get created and DNS is mutually invisible.
 version: "3.8"
 
 services:
   prometheus:
-    # 官方镜像名带 org 前缀（教训同 EMQX：裸名会解析到同名第三方镜像）
+    # Official image name carries the org prefix (same lesson as EMQX: a bare name resolves to a same-named third-party image)
     image: prom/prometheus:v3.2.1
     container_name: robot-monitor-prometheus
     ports:
@@ -52,7 +54,7 @@ services:
       - "9093:9093"
     volumes:
       - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
-      # 官方示例 simple.yml:12 从 templates/ 读模板，沿用该目录约定
+      # Official example simple.yml:12 reads templates from templates/, following that directory convention
       - ./templates:/etc/alertmanager/template:ro
 
   postgres-exporter:
@@ -60,25 +62,27 @@ services:
     container_name: robot-monitor-postgres-exporter
     ports:
       - "9187:9187"
-    # 订单 31 §T3：把 pgBackRest 备份状态暴露为指标
-    # （pgbackrest_backup_last_success_timestamp_seconds / _last_errored /
-    #   pgbackrest_stanza_status_code），供 robot-alerts.yml 的 BackupStale 等规则消费。
-    # 自定义查询文件与 --extend.query-path 的写法实证：
-    #   external/postgres_exporter/README.md「Adding new metrics via a config file (DEPRECATED)」段。
-    # 上游已标记该 flag 为 DEPRECATED（仍可用）：详见查询文件顶部注释的迁移点说明。
+    # Order 31 §T3: expose pgBackRest backup status as metrics
+    # (pgbackrest_backup_last_success_timestamp_seconds / _last_errored /
+    #   pgbackrest_stanza_status_code), consumed by rules like BackupStale in robot-alerts.yml.
+    # The custom query file and --extend.query-path usage are verified against:
+    #   external/postgres_exporter/README.md "Adding new metrics via a config file (DEPRECATED)" section.
+    # The upstream has marked this flag DEPRECATED (still usable): see the migration note at the top
+    #   of the query file for details.
     command:
       - "--extend.query-path=/etc/postgres-exporter/queries.yaml"
     volumes:
-      # 只读挂载：查询定义是代码，不打进镜像（改查询不必重建 exporter 镜像）。
+      # Read-only mount: query definitions are code, not baked into the image (edit queries without rebuilding the exporter image).
       - ../ops/pgbackrest/postgres-exporter-queries.yaml:/etc/postgres-exporter/queries.yaml:ro
     environment:
-      # 变量名实证自 external/postgres_exporter/README.md:252（DATA_SOURCE_NAME）
+      # Variable name verified from external/postgres_exporter/README.md:252 (DATA_SOURCE_NAME)
       #
-      # 密码必须来自宿主机 .env，不允许把明文写进本文件（AGENTS.md §5）。
-      # compose 的 `${VAR:?msg}` 在变量未设置时直接报错退出 —— 这比给个默认口令好：
-      # 默认口令会让 exporter 以错误凭据静默起在 9187，没人发现它其实没连上。
-      # 本地首次使用：cp .env.example .env（模板里已含 POSTGRES_PASSWORD）。
-      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 未设置：请在宿主机 .env 里配置（见 .env.example）}@timescaledb:5432/${POSTGRES_DB:-robot_monitor}?sslmode=disable"
+      # The password MUST come from the host .env; plaintext in this file is not allowed (AGENTS.md §5).
+      # Compose's `${VAR:?msg}` fails and exits when the var is unset — better than a default password:
+      # a default password would let the exporter silently start on 9187 with wrong credentials, and
+      # nobody would notice it isn't actually connected.
+      # Local first use: cp .env.example .env (the template already includes POSTGRES_PASSWORD).
+      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD not set: configure it in host .env (see .env.example)}@timescaledb:5432/${POSTGRES_DB:-robot_monitor}?sslmode=disable"
     depends_on:
       - timescaledb
 
@@ -88,7 +92,7 @@ services:
     ports:
       - "9121:9121"
     environment:
-      # 变量名实证自 external/redis_exporter/README.md:170（REDIS_ADDR）
+      # Variable name verified from external/redis_exporter/README.md:170 (REDIS_ADDR)
       REDIS_ADDR: "redis://redis:6379"
     depends_on:
       - redis

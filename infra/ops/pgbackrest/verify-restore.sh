@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
-# L3 恢复真实性校验：把最新备份**真实恢复**到临时目录，启动只读实例，
-# 与源库比对 行数 / 最新时间戳。被 verify.sh --scratch 调用（也可单独跑）。
+# L3 restore authenticity verification: actually **restore** the latest backup to a temp directory,
+#   start a read-only instance, and compare row counts / latest timestamp against the source DB.
+#   Called by verify.sh --scratch (also runnable standalone).
 #
-# 为什么值得单独做一层：
-#   `verify` 只证明「仓库内文件的校验和没坏」，不证明「这份备份能还原成能用的库」。
-#   本层是唯一能覆盖「恢复后数据是否真的回来了」的证据 —— 订单 31 §T2 明确要求
-#   「恢复后行数/最新时间戳比对，禁止 echo OK 式假验证」。
+# Why it is worth a separate layer:
+#   `verify` only proves "the checksums of files in the repo are not broken", not "this backup can be
+#   restored into a usable DB". This layer is the only evidence that covers "did the data really come
+#   back after restore" — order 31 §T2 explicitly requires "compare row counts / latest timestamp
+#   after restore, forbid echo-OK-style fake verification".
 #
-# 用法：
+# Usage:
 #   verify-restore.sh [--help]
 #
-# 环境变量（默认值面向 compose：仓库边车内执行）：
-#   PGBACKREST_STANZA      默认 robot_monitor
-#   SRC_PSQL_ARGS          源库 psql 连接参数（默认 "-h timescaledb -U postgres -d robot_monitor"）
-#   SCRATCH_DIR            恢复目标空目录（默认 /tmp/pbr-verify-restore，自动创建）
-#   SCRATCH_PORT           恢复实例端口（默认 55432）
-#   VERIFY_TABLES          要比对的表（默认 "robot_telemetry robot_metadata robot_alert"）
+# Environment variables (defaults target the compose layout: runs inside the repository vehicle):
+#   PGBACKREST_STANZA       default robot_monitor
+#   SRC_PSQL_ARGS          source DB psql connection args (default "-h timescaledb -U postgres -d robot_monitor")
+#   SCRATCH_DIR            empty restore target dir (default /tmp/pbr-verify-restore, auto-created)
+#   SCRATCH_PORT           restore instance port (default 55432)
+#   VERIFY_TABLES          tables to compare (default "robot_telemetry robot_metadata robot_alert")
 #
-# 退出码：0 一致；1 不一致；2 用法错误；3 前置条件缺失（无 pgbackrest / 无源库连接）
-#
-# ⚠️ 已知边界：本脚本要求恢复目标目录**可写**且不与生产 PGDATA 冲突。
-#    它**不会**碰生产数据：--pg1-path 一律指向 SCRATCH_DIR。
+# Exit codes: 0 consistent; 1 inconsistent; 2 usage error; 3 missing prerequisite
+# ⚠️ Known boundary: this script requires the restore target dir to be **writable** and not conflict with production PGDATA. It **will not** touch production data: --pg1-path always points to SCRATCH_DIR.
 set -euo pipefail
 
 STANZA="${PGBACKREST_STANZA:-robot_monitor}"
@@ -37,52 +37,53 @@ if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
   exit 0
 fi
 
-command -v pgbackrest >/dev/null 2>&1 || die "PATH 内找不到 pgbackrest 二进制" 3
-command -v psql       >/dev/null 2>&1 || die "PATH 内找不到 psql（源库比对需要）" 3
+command -v pgbackrest >/dev/null 2>&1 || die "pgbackrest binary not found in PATH" 3
+command -v psql       >/dev/null 2>&1 || die "psql not found in PATH (needed for source DB comparison)" 3
 
-# 源库必须可达 —— 否则「比对」无从谈起，明确报缺条件而不是假装通过。
+# The source DB must be reachable — otherwise "comparison" is impossible; report the missing condition
+#   clearly instead of faking a pass.
 if ! psql $SRC_PSQL_ARGS -tAc 'SELECT 1' >/dev/null 2>&1; then
-  die "源库不可达（psql $SRC_PSQL_ARGS 失败）。本层需要能读源库做基线比对。" 3
+  die "Source DB unreachable (psql $SRC_PSQL_ARGS failed). This layer needs to read the source DB for a baseline comparison." 3
 fi
 
-# 1) 准备空目录（幂等：已存在则清空）
+# 1) Prepare an empty directory (idempotent: clear if already exists)
 if [ -e "$SCRATCH_DIR" ] && [ ! -d "$SCRATCH_DIR" ]; then
-  die "SCRATCH_DIR=$SCRATCH_DIR 存在但不是目录" 2
+  die "SCRATCH_DIR=$SCRATCH_DIR exists but is not a directory" 2
 fi
 mkdir -p "$SCRATCH_DIR"
-# --delta 在非空目录上需要 backup.manifest；这里要的是干净恢复，故清空后走全量。
+# --delta on a non-empty dir needs backup.manifest; we want a clean restore here, so clear then full.
 rm -rf "${SCRATCH_DIR:?}"/* "${SCRATCH_DIR:?}"/.[!.]* 2>/dev/null || true
-log "恢复目标：$SCRATCH_DIR（已清空）"
+log "Restore target: $SCRATCH_DIR (cleared)"
 
-# 2) 记录源库基线（**先取基线再恢复**，避免漂移）
+# 2) Record the source DB baseline (**capture baseline before restore**, to avoid drift)
 declare -A SRC_COUNT SRC_MAXTS
 for t in $VERIFY_TABLES; do
   SRC_COUNT[$t]="$(psql $SRC_PSQL_ARGS -tAc "SELECT count(*) FROM $t" 2>/dev/null || echo "")"
-  [ -n "${SRC_COUNT[$t]}" ] || die "源库表 $t 不可读（表名错/权限不足）" 3
-  # 时间戳列只有带 time 列的表才有
+  [ -n "${SRC_COUNT[$t]}" ] || die "Source table $t not readable (wrong name / insufficient privileges)" 3
+  # Only tables with a time column have a timestamp column
   SRC_MAXTS[$t]="$(psql $SRC_PSQL_ARGS -tAc "SELECT coalesce(max(time)::text,'') FROM $t" 2>/dev/null || echo "")"
-  log "基线 $t：count=${SRC_COUNT[$t]} max_time=${SRC_MAXTS[$t]:-n/a}"
+  log "Baseline $t: count=${SRC_COUNT[$t]} max_time=${SRC_MAXTS[$t]:-n/a}"
 done
 
-# 3) 真实恢复到临时目录（不加 --delta：干净目标，要的是可独立启动的库）
-log "执行 pgbackrest restore 到临时目录（真实落盘）"
+# 3) Actually restore to the temp dir (no --delta: clean target, want an independently startable DB)
+log "Running pgbackrest restore to temp dir (real on-disk)"
 pgbackrest --stanza="$STANZA" --pg1-path="$SCRATCH_DIR" \
   --log-level-console=info restore
 
-[ -f "$SCRATCH_DIR/PG_VERSION" ] || die "恢复后 $SCRATCH_DIR 内没有 PG_VERSION —— 恢复未产生有效数据目录" 1
-log "恢复产物校验：PG_VERSION=$(cat "$SCRATCH_DIR/PG_VERSION")，文件数=$(find "$SCRATCH_DIR" -type f | wc -l)"
+[ -f "$SCRATCH_DIR/PG_VERSION" ] || die "After restore, $SCRATCH_DIR has no PG_VERSION — restore produced no valid data directory" 1
+log "Restore artifact check: PG_VERSION=$(cat "$SCRATCH_DIR/PG_VERSION"), file count=$(find "$SCRATCH_DIR" -type f | wc -l)"
 
-# 4) 启动只读实例并比对
-#    ⚠️ restore 默认会写 recovery 配置；本层只需读数据，故以 -P（只读）与独立端口启动。
-#    postgres -c port 覆盖端口，避免与生产 5432 冲突。
-# pg 二进制目录：优先 pg_config（官方 PG 自带，跨发行版/自编译都可靠），
-# 其次 psql 所在目录，均无则报缺条件。
+# 4) Start a read-only instance and compare
+#    ⚠️ restore writes recovery config by default; this layer only reads data, so start with -P (read-only)
+#    and an independent port. postgres -c port overrides the port to avoid conflicting with production 5432.
+#    pg binary dir: prefer pg_config (ships with official PG, reliable across distros/self-build),
+#    then the psql directory; if neither, report the missing condition.
 if command -v pg_config >/dev/null 2>&1; then
   PG_BIN="$(pg_config --bindir)"
 else
   PG_BIN="$(dirname "$(command -v psql)")"
 fi
-[ -x "$PG_BIN/pg_ctl" ] || die "找不到 pg_ctl（PG_BIN=$PG_BIN）；恢复实例需要 PG 客户端工具集" 3
+[ -x "$PG_BIN/pg_ctl" ] || die "pg_ctl not found (PG_BIN=$PG_BIN); the restore instance needs the PG client toolset" 3
 SOCK_DIR="$(mktemp -d)"
 LOG_FILE="$(mktemp)"
 STARTED=no
@@ -94,70 +95,70 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Debian 系把 postgresql.conf 放在 /etc/postgresql/<ver>/main/（PGDATA 之外），
-# 这类布局下 restore 出来的目录**没有** postgresql.conf，实例起不来。
-# 生产 compose 的 PGDATA 自带 postgresql.conf，不存在此问题。
+# Debian puts postgresql.conf under /etc/postgresql/<ver>/main/ (outside PGDATA); under such a layout the
+#   restored dir **has no** postgresql.conf and the instance won't start. Production compose's PGDATA
+#   includes postgresql.conf, so this is not an issue there.
 if [ ! -f "$SCRATCH_DIR/postgresql.conf" ]; then
   if [ -n "${PGDATA_CONF_SRC:-}" ] && [ -f "$PGDATA_CONF_SRC" ]; then
     cp "$PGDATA_CONF_SRC" "$SCRATCH_DIR/postgresql.conf"
-    log "补入 postgresql.conf（来自 PGDATA_CONF_SRC=$PGDATA_CONF_SRC）"
-    # Debian split-config：conf.d 是 include_dir；data_directory 指向生产路径。
-    # 二者对临时实例都是干扰，就地修正 —— 只改 scratch 目录内的副本，不碰源配置。
+    log "Added postgresql.conf (from PGDATA_CONF_SRC=$PGDATA_CONF_SRC)"
+    # Debian split-config: conf.d is include_dir; data_directory points to the production path. Both are
+    #   disturbances for the temp instance; fix in place — only the scratch-dir copy is modified, not the source config.
     grep -qE "^[[:space:]]*include_dir" "$SCRATCH_DIR/postgresql.conf" \
       && mkdir -p "$SCRATCH_DIR/conf.d"
     sed -i "s|^[[:space:]]*data_directory[[:space:]]*=.*|data_directory = '$SCRATCH_DIR'|" \
       "$SCRATCH_DIR/postgresql.conf"
   else
-    log "警告：$SCRATCH_DIR 内无 postgresql.conf，且未提供 PGDATA_CONF_SRC。"
-    log "      Debian split-config 布局需要它；生产 PGDATA 自带，无需设置。"
+    log "Warning: $SCRATCH_DIR has no postgresql.conf, and no PGDATA_CONF_SRC provided."
+    log "      Debian split-config layout needs it; production PGDATA includes it, so no setting needed."
   fi
 fi
 
-log "启动恢复实例（端口 $SCRATCH_PORT，socket $SOCK_DIR）"
+log "Starting restore instance (port $SCRATCH_PORT, socket $SOCK_DIR)"
 if ! "$PG_BIN/pg_ctl" -D "$SCRATCH_DIR" \
        -o "-p $SCRATCH_PORT -c unix_socket_directories=$SOCK_DIR -c listen_addresses=''" \
        -l "$LOG_FILE" start; then
-  log "启动失败，日志尾部："
+  log "Start failed, log tail:"
   tail -20 "$LOG_FILE" >&2
-  die "恢复实例无法启动 —— 备份不可用（这本身就是失败证据）" 1
+  die "Restore instance failed to start — backup is unusable (this itself is failure evidence)" 1
 fi
 STARTED=yes
 
-# 等 pg_isready
+# Wait for pg_isready
 for _ in $(seq 1 30); do
   if "$PG_BIN/pg_isready" -h "$SOCK_DIR" -p "$SCRATCH_PORT" >/dev/null 2>&1; then break; fi
   sleep 1
 done
 "$PG_BIN/pg_isready" -h "$SOCK_DIR" -p "$SCRATCH_PORT" >/dev/null 2>&1 \
-  || { tail -20 "$LOG_FILE" >&2; die "恢复实例未就绪（pg_isready 超时）" 1; }
+  || { tail -20 "$LOG_FILE" >&2; die "Restore instance not ready (pg_isready timeout)" 1; }
 
-# 5) 逐表比对
+# 5) Compare table by table
 FAILED=0
 for t in $VERIFY_TABLES; do
   rcount="$(psql -h "$SOCK_DIR" -p "$SCRATCH_PORT" -U postgres -d robot_monitor -tAc "SELECT count(*) FROM $t" 2>/dev/null || echo "")"
   if [ "$rcount" != "${SRC_COUNT[$t]}" ]; then
-    printf '[dr-verify-restore] FAIL: 表 %s 行数不一致 源=%s 恢复=%s\n' "$t" "${SRC_COUNT[$t]}" "$rcount" >&2
+    printf '[dr-verify-restore] FAIL: table %s row count mismatch  src=%s  restore=%s\n' "$t" "${SRC_COUNT[$t]}" "$rcount" >&2
     FAILED=1
   else
-    log "OK 表 $t 行数一致：$rcount"
+    log "OK table $t row count matches: $rcount"
   fi
   rmax="$(psql -h "$SOCK_DIR" -p "$SCRATCH_PORT" -U postgres -d robot_monitor -tAc "SELECT coalesce(max(time)::text,'') FROM $t" 2>/dev/null || echo "")"
   if [ -n "${SRC_MAXTS[$t]}" ] && [ "$rmax" != "${SRC_MAXTS[$t]}" ]; then
-    printf '[dr-verify-restore] FAIL: 表 %s 最新时间戳不一致 源=%s 恢复=%s\n' "$t" "${SRC_MAXTS[$t]}" "$rmax" >&2
+    printf '[dr-verify-restore] FAIL: table %s latest timestamp mismatch  src=%s  restore=%s\n' "$t" "${SRC_MAXTS[$t]}" "$rmax" >&2
     FAILED=1
   elif [ -n "${SRC_MAXTS[$t]}" ]; then
-    log "OK 表 $t max(time) 一致：$rmax"
+    log "OK table $t max(time) matches: $rmax"
   fi
 done
 
-# 6) TimescaleDB 扩展表（若装了 timescaledb）—— 物理备份下超表目录一致性
+# 6) TimescaleDB extension table (if timescaledb is installed) — hypertable catalog consistency under physical backup
 ext_ver="$(psql -h "$SOCK_DIR" -p "$SCRATCH_PORT" -U postgres -d robot_monitor -tAc \
   "SELECT extversion FROM pg_extension WHERE extname='timescaledb'" 2>/dev/null || echo "")"
 if [ -n "$ext_ver" ]; then
   chunk_n="$(psql -h "$SOCK_DIR" -p "$SCRATCH_PORT" -U postgres -d robot_monitor -tAc \
     "SELECT count(*) FROM timescaledb_information.chunks" 2>/dev/null || echo "?")"
-  log "恢复库 timescaledb=${ext_ver}，chunk 数=${chunk_n}"
+  log "Restored DB timescaledb=${ext_ver}, chunk count=${chunk_n}"
 fi
 
-[ "$FAILED" -eq 0 ] || die "恢复真实性比对失败" 1
-log "恢复真实性全部通过：源库与恢复库 行数 / 最新时间戳 一致。"
+[ "$FAILED" -eq 0 ] || die "Restore authenticity comparison failed" 1
+log "All restore authenticity checks passed: source DB and restored DB have consistent row counts / latest timestamps."

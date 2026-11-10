@@ -2,17 +2,18 @@ version: "3.8"
 
 services:
   emqx:
-    # 镜像选型（2026-10-10 复核，此前结论已纠正，见 external/SOURCES.md §1.1）：
-    #   emqx/emqx 与 emqx(=library/emqx) 是【同一个镜像的两个发布通道】——
-    #   Docker Official Images 的 library/emqx 就是由 https://github.com/emqx/emqx-docker
-    #   构建的（official-images/library/emqx 明文写着 GitRepo: emqx/emqx-docker）。
-    #   两者 index digest 不同属正常（构建方不同），不代表其中一个是"非 EMQX"。
-    #   实测 library/emqx:5.6 config.Env 含 EMQX_VERSION=5.6.1，
-    #   Entrypoint=/usr/bin/docker-entrypoint.sh，与 emqx-docker/5.6/Dockerfile 逐行吻合。
+    # Image selection (re-reviewed 2026-10-10; prior conclusion corrected, see external/SOURCES.md §1.1):
+    #   emqx/emqx and emqx (=library/emqx) are [the same image's two release channels] —
+    #   Docker Official Images' library/emqx is built by https://github.com/emqx/emqx-docker
+    #   (official-images/library/emqx explicitly states GitRepo: emqx/emqx-docker).
+    #   Differing index digests are normal (different builders); it does not mean one is "non-EMQX".
+    #   Verification: library/emqx:5.6 config.Env contains EMQX_VERSION=5.6.1,
+    #   Entrypoint=/usr/bin/docker-entrypoint.sh, matching emqx-docker/5.6/Dockerfile line by line.
     #
-    # 仍选 emqx/emqx 而非 library/emqx 的真实理由：5.6 这一档只在 emqx/emqx 持续发布，
-    #   Docker Official Images 当前只维护 5.7 / 5.8（实证 official-images/library/emqx
-    #   的 Tags 只有这两个）；emqx/emqx:5.6 才是 5.6.x 的可追溯来源。
+    # Real reason for still choosing emqx/emqx over library/emqx: the 5.6 line is only continuously
+    #   published on emqx/emqx; Docker Official Images currently only maintains 5.7 / 5.8
+    #   (verified: official-images/library/emqx Tags only has these two);
+    #   emqx/emqx:5.6 is the traceable source for 5.6.x.
     image: emqx/emqx:5.6
     container_name: robot-monitor-emqx
     restart: unless-stopped
@@ -21,20 +22,23 @@ services:
       - "18083:18083"    # Dashboard
     environment:
       EMQX_LOG__LEVEL: warning
-      # Prometheus 拉取端点显式开启（EMQX 5 默认即为 true，此处显式声明便于审计）。
-      # 端点实证：external/emqx-prometheus-sparse/apps/emqx_prometheus/src/emqx_prometheus_api.erl:63
+      # Explicitly enable the Prometheus scrape endpoint (EMQX 5 defaults to true; declared here for auditability).
+      # Endpoint verified: external/emqx-prometheus-sparse/apps/emqx_prometheus/src/emqx_prometheus_api.erl:63
       #   "/prometheus/stats" => ?SCOPE_MONITORING
-      # 注意：这是**内置**能力，不需要 emqx-exporter；exporter 只补它没覆盖的指标。
-      # 该端点无需 API Key（scope 注册表见同文件 :60-67，/prometheus/stats 属 MONITORING 读接口），
-      # Prometheus 直接抓 /api/v5/prometheus/stats 即可 —— 见 ops/prometheus/prometheus.yml ①。
+      # Note: this is a **built-in** capability, no emqx-exporter needed; the exporter only supplements
+      #   metrics it does not cover.
+      # This endpoint needs no API Key (scope registry see same file :60-67, /prometheus/stats is a
+      #   MONITORING read interface); Prometheus can scrape /api/v5/prometheus/stats directly —
+      #   see ops/prometheus/prometheus.yml ①.
       EMQX_PROMETHEUS__ENABLE: "true"
     healthcheck:
-      # `emqx ping` 是 EMQX 官方示例（external/mqtt-to-timescaledb/docker-compose.yml）用法，
-      # 其可用的前提是 emqx-docker 的 Dockerfile 做了
-      #   `ln -s /opt/emqx/bin/* /usr/local/bin/`（实证 emqx-docker/5.6/Dockerfile），
-      # 故 PATH 上存在 emqx 可执行文件。
-      # start_period 必须给足：EMQX 首次启动需展开 Erlang 运行时，明显慢于 DB/Redis
-      # （R-07 §1 已强调「只等 DB 就开跑模拟器 → 连不上 Broker → 写入 0 条」的假失败）。
+      # `emqx ping` is EMQX's official example (external/mqtt-to-timescaledb/docker-compose.yml) usage.
+      # It only works because emqx-docker's Dockerfile does
+      #   `ln -s /opt/emqx/bin/* /usr/local/bin/` (verified: emqx-docker/5.6/Dockerfile),
+      # so the emqx executable exists on PATH.
+      # start_period must be generous: EMQX's first start unpacks the Erlang runtime, clearly slower
+      #   than DB/Redis (R-07 §1 already stressed the false failure of
+      #   'start the simulator as soon as DB is up → can't connect to Broker → 0 writes').
       test: ["CMD", "emqx", "ping"]
       interval: 10s
       timeout: 5s
@@ -52,71 +56,76 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: robot_monitor
       # ------------------------------------------------------------------
-      # TimescaleDB/Postgres 调优（订单 21 / I-11）
+      # TimescaleDB/Postgres tuning (order 21 / I-11)
       #
-      # ⚠️ 重要（无幻觉，先说清）：timescaledb 官方镜像【不存在】形如
-      #   TS_TUNE_SHARED_BUFFERS / TS_TUNE_MAX_CONNECTIONS 的「按 PG 参数命名」env。
-      #   官方镜像 entrypoint 只读下面这 6 个 TS_TUNE_* + NO_TS_TUNE（实证：
-      #   timescaledb-docker/docker-entrypoint-initdb.d/001_timescaledb_tune.sh:3-8），
-      #   由 timescaledb-tune 按公式推导出 postgresql.conf 里的 shared_buffers 等键。
-      #   因此本单无法「为 7 个 PG 参数各写一个同名 env」——那是臆造，违反订单 §4.2。
-      #   7 个目标参数的实际可控路径与其推导来源见下方逐条注释。
+      # ⚠️ Important (no hallucination, stated upfront): the timescaledb official image [does not have]
+      #   per-PG-parameter env vars named like
+      #   TS_TUNE_SHARED_BUFFERS / TS_TUNE_MAX_CONNECTIONS.
+      #   The official image entrypoint only reads these 6 TS_TUNE_* + NO_TS_TUNE (verified:
+      #   timescaledb-docker/docker-entrypoint-initdb.d/001_timescaledb_tune.sh:3-8),
+      #   and timescaledb-tune derives keys like shared_buffers in postgresql.conf via formulas.
+      #   Therefore this task cannot 'write one same-named env per each of the 7 PG parameters' —
+      #   that would be fabrication, violating order §4.2.
+      #   The actual controllable paths and derivation sources for the 7 target parameters are in
+      #   the per-item comments below.
       #
-      # 取值基线：16GB 内存 / 4 vCPU（订单 §2「100 台 / 16GB 类规格」）。
-      # 设显式值 = 固定基线，消除镜像按 cgroup 自推算导致的压测不可复现（R-08 C1 ±10%）。
+      # Baseline values: 16GB memory / 4 vCPU (order §2 '100 units / 16GB-class spec').
+      # Set explicit values = fixed baseline, eliminating non-reproducible load-test results caused by
+      #   the image's cgroup-based auto-tuning (R-08 C1 ±10%).
       # ------------------------------------------------------------------
 
-      # 内存基线。语义/出处：timescaledb-docker/README.md:52-56
+      # Memory baseline. Semantics/source: timescaledb-docker/README.md:52-56
       #   "use the TS_TUNE_MEMORY and TS_TUNE_NUM_CPUS environment variables"
-      # 影响键（pkg/pgtune/memory.go，DefaultProfile）：
-      #   shared_buffers        = memory/4      → 4GB   （memory.go:60-61）
-      #   effective_cache_size  = memory*3/4    → 12GB  （memory.go:62-63）
-      #   maintenance_work_mem  = min(mem_GB*128MB, 2047MB) → 2GB（memory.go:16,64-69）
-      #   work_mem              = f(mem,conns,cpus)         → 32MB（memory.go:70-75）
+      # Affected keys (pkg/pgtune/memory.go, DefaultProfile):
+      #   shared_buffers        = memory/4      → 4GB   (memory.go:60-61)
+      #   effective_cache_size  = memory*3/4    → 12GB  (memory.go:62-63)
+      #   maintenance_work_mem  = min(mem_GB*128MB, 2047MB) → 2GB (memory.go:16,64-69)
+      #   work_mem              = f(mem,conns,cpus)         → 32MB (memory.go:70-75)
       TS_TUNE_MEMORY: "16GB"
 
-      # CPU 基线。出处同上 README.md:52-56；仅影响 parallels/work_mem 推导。
-      #   work_mem 分母含 cpuFactor=round(cpus/2)（memory.go:71）
+      # CPU baseline. Source: same README.md:52-56; only affects parallels/work_mem derivation.
+      #   work_mem denominator includes cpuFactor=round(cpus/2) (memory.go:71)
       TS_TUNE_NUM_CPUS: "4"
 
-      # 最大连接数。出处：timescaledb-docker/README.md:65-68
+      # Max connections. Source: timescaledb-docker/README.md:65-68
       #   "use the TS_TUNE_MAX_CONNS environment variable"
-      # 影响键：max_connections（pkg/pgtune/misc.go:157-161）。
-      # 16GB 时 tuner 默认值本就为 100（misc.go:48 MaxConnectionsDefault / :55-62 getMaxConns），
-      # 此处显式钉死防漂移。
+      # Affected key: max_connections (pkg/pgtune/misc.go:157-161).
+      # At 16GB the tuner default is already 100 (misc.go:48 MaxConnectionsDefault / :55-62 getMaxConns),
+      #   pinned explicitly here to prevent drift.
       TS_TUNE_MAX_CONNS: "100"
 
-      # 后台 worker 数。出处：README.md:59-62
+      # Background worker count. Source: README.md:59-62
       #   "use the TS_TUNE_MAX_BG_WORKERS environment variable"
-      # 影响键：timescaledb.max_background_workers（pkg/pgtune/parallel.go:10,69-70），
-      #   并间接推导 max_worker_processes = 3 + bgworkers + cpus（parallel.go:15,64）。
+      # Affected key: timescaledb.max_background_workers (pkg/pgtune/parallel.go:10,69-70),
+      #   and indirectly derives max_worker_processes = 3 + bgworkers + cpus (parallel.go:15,64).
       TS_TUNE_MAX_BG_WORKERS: "16"
 
-      # WAL 所在磁盘容量。出处：timescaledb-tune/README.md:95
+      # WAL disk capacity. Source: timescaledb-tune/README.md:95
       #   `$ timescaledb-tune --wal-disk-size="10GB"`
-      # 影响键：max_wal_size = wal_disk*60%/16MB 上取整（pkg/pgtune/wal.go:15,79-95），
-      #   min_wal_size = max_wal_size/2（wal.go:67-69）。
-      # 不设时默认 max_wal_size=1GB（wal.go:18 defaultMaxWALBytes）。
-      # 显式给 10GB → max_wal_size ≈ 6GB / min_wal_size ≈ 3GB，写吞吐更稳。
+      # Affected key: max_wal_size = wal_disk*60%/16MB ceiling (pkg/pgtune/wal.go:15,79-95),
+      #   min_wal_size = max_wal_size/2 (wal.go:67-69).
+      # If unset, default max_wal_size=1GB (wal.go:18 defaultMaxWALBytes).
+      # Set 10GB explicitly → max_wal_size ≈ 6GB / min_wal_size ≈ 3GB, steadier write throughput.
       TS_TUNE_WAL_DISK_SIZE: "10GB"
 
-      # 遥测开关。出处：timescaledb-docker/README.md:31-34
+      # Telemetry switch. Source: timescaledb-docker/README.md:31-34
       #   "set an environmental variable, TIMESCALEDB_TELEMETRY ... -e TIMESCALEDB_TELEMETRY=off"
-      # 消费点：docker-entrypoint-initdb.d/000_install_timescaledb.sh:14
+      # Consumption point: docker-entrypoint-initdb.d/000_install_timescaledb.sh:14
       #   `if [ "${TIMESCALEDB_TELEMETRY:-}" == "off" ]`
       TIMESCALEDB_TELEMETRY: "off"
 
-      # NO_TS_TUNE（关闭 tuner 自调优）的出处与取舍说明——本单【故意不设】它。
-      # 出处：timescaledb-docker/README.md:71-74
+      # NO_TS_TUNE (disable tuner auto-tuning) source and trade-off notes — this task [deliberately does not set] it.
+      # Source: timescaledb-docker/README.md:71-74
       #   "To not run timescaledb-tune at all, use the NO_TS_TUNE environment variable"
-      # 消费点：001_timescaledb_tune.sh:3,10-12（非空即 exit 0）。
-      # ⚠️ 副作用：关掉 tune 后，下面这些「没有独立 env」的键将不再由 tuner 自动写入，
-      #   需依赖 postgresql.conf.sample 的 PG 默认值：
-      #     checkpoint_completion_target → tuner 运行时=0.9（misc.go:27,132-133）
-      #     random_page_cost             → tuner 运行时=1.1（misc.go:29,140-141；SSD 推荐）
-      #     wal_compression              → 默认 profile 无推荐值（wal.go:142-153，仅 promscale=1）
-      #   为保证基线可控且这 3 项达到推荐值，本单【不】设 NO_TS_TUNE（保持 tuner 运行），
-      #   仅以显式 TS_TUNE_* 钉住内存/CPU/连接数/WAL 四项输入。故此行故意不启用：
+      # Consumption point: 001_timescaledb_tune.sh:3,10-12 (non-empty → exit 0).
+      # ⚠️ Side effect: after disabling tune, these keys 'without a standalone env' below will no longer
+      #   be auto-written by the tuner, and must rely on postgresql.conf.sample's PG defaults:
+      #     checkpoint_completion_target → tuner runtime=0.9 (misc.go:27,132-133)
+      #     random_page_cost             → tuner runtime=1.1 (misc.go:29,140-141; SSD recommended)
+      #     wal_compression              → default profile has no recommended value (wal.go:142-153, only promscale=1)
+      #   To keep the baseline controllable and these 3 items at recommended values, this task does [not]
+      #   set NO_TS_TUNE (keep tuner running), only pinning memory/CPU/connections/WAL inputs via
+      #   explicit TS_TUNE_*. Hence this line is deliberately left disabled:
       # NO_TS_TUNE: "true"
     volumes:
       - tsdb-data:/var/lib/postgresql/data
@@ -141,15 +150,15 @@ services:
 
 
   # ============================================================
-  # 运维/可观测性层（sources: external/prometheus, external/emqx-exporter,
+  # Ops/observability layer (sources: external/prometheus, external/emqx-exporter,
   #                       external/blackbox_exporter, external/postgres_exporter,
-  #                       external/redis_exporter）
+  #                       external/redis_exporter)
   #
-  # 为什么必需：看板只能回答「我现在看到什么」。压测跑完谁都不知道
-  #   - 峰值到底打在哪一层（EMQX 连接数 / 队列 / PG 写入 / Redis RTT）
-  #   - 1000 msg/s 是 broker 先扛不住还是后端先扛不住
-  #   - 过去 10 分钟到底掉了几条（/healthz 只是一个瞬时 JSON，没有历史）
-  # 这一层就是把这个空白补上。全部为**可选叠加**，不改变 robot-monitor 的既有启动方式。
+  # Why it's needed: dashboards only answer "what do I see right now". After a load test, nobody knows
+  #   - where the peak actually hit (EMQX connections / queue / PG writes / Redis RTT)
+  #   - at 1000 msg/s, does the broker fail first or the backend fail first
+  #   - how many messages actually dropped in the last 10 minutes (/healthz is just an instant JSON, no history)
+  # This layer fills that gap. All are **optional overlays** that don't change robot-monitor's existing startup method.
   # ============================================================
 
   prometheus:
@@ -164,25 +173,25 @@ services:
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.retention.time=30d"
-      # 校验入口实证：external/prometheus/docs/command-line/promtool.md:91
-      #   `promtool check config`（本仓库未跑，见 PR「未验证」章节）
+      # Verification entry point: external/prometheus/docs/command-line/promtool.md:91
+      #   `promtool check config` (not run in this repo; see PR "unverified" section)
     depends_on:
       - emqx
     profiles: ["ops"]
 
   emqx-exporter:
-    # 端口 8085 实证：external/emqx-exporter/README.md
+    # Port 8085 verified: external/emqx-exporter/README.md
     #   "The emqx-exporter listens on HTTP port 8085 by default."
-    # tag 0.2.3 来自官方示例：external/emqx-exporter/examples/docker-compose/docker-compose.yml
+    # tag 0.2.3 comes from the official example: external/emqx-exporter/examples/docker-compose/docker-compose.yml
     image: emqx/emqx-exporter:0.2.3
     container_name: robot-monitor-emqx-exporter
     restart: unless-stopped
     ports:
       - "8085:8085"
     environment:
-      # 刻意保留示例里的占位值形态（不是生产凭据，也不是秘密）：
-      # 见 external/emqx-exporter/examples/docker-compose/bootstrap-api
-      # 正式部署换成 EMQX Dashboard → System → API Keys 生成的真实值，走 .env。
+      # Deliberately keep the placeholder value form from the example (not a production credential, not a secret):
+      # See external/emqx-exporter/examples/docker-compose/bootstrap-api
+      # In production, replace with the real value generated by EMQX Dashboard → System → API Keys, via .env.
       EMQX_EXPORTER_API_KEY: ${EMQX_EXPORTER_API_KEY:-replace-me}
       EMQX_EXPORTER_API_SECRET: ${EMQX_EXPORTER_API_SECRET:-replace-me}
     volumes:
@@ -193,7 +202,7 @@ services:
     profiles: ["ops"]
 
   blackbox-exporter:
-    # /probe?target=&module= 与 9115 端口实证：external/blackbox_exporter/README.md
+    # /probe?target=&module= and port 9115 verified: external/blackbox_exporter/README.md
     image: prom/blackbox-exporter:v0.26.0
     container_name: robot-monitor-blackbox-exporter
     restart: unless-stopped
@@ -204,8 +213,9 @@ services:
     profiles: ["ops"]
 
   postgres-exporter:
-    # 用途：把「批量落库是否真的在写」变成可观测的时间序列（/healthz 只有瞬时值）。
-    # DATA_SOURCE_NAME 语义实证：external/postgres_exporter/README.md:252,316-325
+    # Purpose: turn "whether batch writes to DB are actually happening" into an observable time series
+    #   (/healthz only has instant values).
+    # DATA_SOURCE_NAME semantics verified: external/postgres_exporter/README.md:252,316-325
     image: prometheuscommunity/postgres-exporter:v0.17.0
     container_name: robot-monitor-postgres-exporter
     restart: unless-stopped
@@ -219,7 +229,7 @@ services:
     profiles: ["ops"]
 
   redis-exporter:
-    # 端口 9121 实证：external/redis_exporter/README.md:292  "-p 9121:9121"
+    # Port 9121 verified: external/redis_exporter/README.md:292  "-p 9121:9121"
     image: oliver006/redis_exporter:v1.67.0
     container_name: robot-monitor-redis-exporter
     restart: unless-stopped
@@ -232,22 +242,22 @@ services:
     profiles: ["ops"]
 
   grafana:
-    # ⚠️ License 提醒：grafana/grafana 与 grafana/loki 为 **AGPL-3.0**。
-    #   本仓库 MIT（LICENSE）下「调用」它没问题，但若将来对外提供修改版 Grafana 服务，
-    #   需承担 AGPL 的源码开放义务。已记录在 external/SOURCES.md。
+    # ⚠️ License note: grafana/grafana and grafana/loki are **AGPL-3.0**.
+    #   Using it under this repo's MIT (LICENSE) is fine, but if you later offer a modified Grafana
+    #   service to others, you must meet AGPL's source-disclosure obligation. Already recorded in external/SOURCES.md.
     image: grafana/grafana:11.5.0
     container_name: robot-monitor-grafana
     restart: unless-stopped
     ports:
       - "3000:3000"
     environment:
-      # 默认口令只用于本地开发；生产必须从 .env 覆盖（AGENTS.md §5：不在代码里硬编码生产凭据）
+      # Default credentials are for local dev only; production must override via .env (AGENTS.md §5: never hardcode production credentials in code)
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_AUTH_ANONYMOUS_ENABLED: "false"
     volumes:
-      # 供给目录结构实证：external/grafana-provisioning-ref/docker-compose.yml:40-43
+      # Provisioning directory structure verified: external/grafana-provisioning-ref/docker-compose.yml:40-43
       - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana

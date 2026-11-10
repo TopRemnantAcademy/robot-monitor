@@ -174,11 +174,11 @@ Also: `npm install` once stripped 42 lines of `libc`/`musl` platform markers fro
 
 | # | Defect | Location | Consequence |
 |---|---|---|---|
-| 18 | **crontab e2e omitted `docker.image`** | `.cnb.yml:479` (the `"crontab: 0 3 * * *"` block) | Under this trigger e2e ran on the default image `cnbcool/default-build-env` (**no python3**) → hit 【E2E SKIP】`exit 0` → build 21306ms **all green**, zero rows landed. The same sha (68b7b8b) push build `cnb-152-1k4ohjp3k-002` actually ran on `python:3.11-slim` — the broken declaration was the crontab block, not the push block |
+| 18 | **crontab e2e omitted `docker.image`** | `.cnb.yml:479` (the `"crontab: 0 3 * * *"` block) | Under this trigger e2e ran on the default image `cnbcool/default-build-env` (**no python3**) → hit [E2E SKIP]`exit 0` → build 21306ms **all green**, zero rows landed. The same sha (68b7b8b) push build `cnb-152-1k4ohjp3k-002` actually ran on `python:3.11-slim` — the broken declaration was the crontab block, not the push block |
 | 19 | **Naming probe used `curl`, unreachable in `python:3.11-slim`** | `.cnb.yml:270,273` (original impl) | `python:3.11-slim` has no curl/wget → `/healthz`/`/metrics` always judged "unreachable" → SKIP. This gate **never actually ran** from the moment it was attached |
 | 20 | **Naming probe misjudged "no series" as "metric absent"** | `REQUIRED_BACKEND_METRICS` in `tests/e2e/test_e2e_30k.py` | `robot_backend_batch_flushes_total` has a label; at zero traffic prometheus_client exports no sample line; only exposed after the probe fix (`cnb-dr0-1k4pbtmr7-002` measured) |
 
-Fix: hoist `docker.image` into an anchor `&e2e-image`, referenced by push/PR/crontab; replace `curl` probe with inline `$PY` `urllib`; split label-bearing metrics into `LABELED_BACKEND_METRICS`, allowing only zero-traffic standalone probes to be absent (and logging it); the 30k path requires all present; SKIP paths print a banner `【E2E SKIPPED —— this build did not actually run the 30k landing】`.
+Fix: hoist `docker.image` into an anchor `&e2e-image`, referenced by push/PR/crontab; replace `curl` probe with inline `$PY` `urllib`; split label-bearing metrics into `LABELED_BACKEND_METRICS`, allowing only zero-traffic standalone probes to be absent (and logging it); the 30k path requires all present; SKIP paths print a banner `[E2E SKIPPED —— this build did not actually run the 30k landing]`.
 
 ### Round-2 detail re-audit (2026-10-10, this round)
 

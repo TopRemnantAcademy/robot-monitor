@@ -1,13 +1,13 @@
 # RobotMonitor CI (GitHub Actions)
 #
-# CNB `.cnb.yml` 的测试门禁 1:1 移植到 GitHub Actions，保证两处口径一致：
-#   - backend   : pytest(testpaths) + backend_ingestion/tests + compileall + 测试文件健全性 + import 冒烟
-#   - frontend  : npm test + typecheck + vite build + bundle-size 守卫
-#   - contract-gate : OpenAPI 快照漂移/breaking + 生成类型须与入库 api.gen.ts 一致 + WS 信封 ajv + tsc
-#   - e2e       : 真实 TimescaleDB 栈 30k 落库（ISSUE #60 禁止 mock 替身）
+# CNB `.cnb.yml`'s test gates ported 1:1 to GitHub Actions, so the two stay in sync:
+#   - backend   : pytest(testpaths) + backend_ingestion/tests + compileall + test-file sanity + import smoke
+#   - frontend  : npm test + typecheck + vite build + bundle-size guard
+#   - contract-gate : OpenAPI snapshot drift/breaking + generated types must match committed api.gen.ts + WS envelope ajv + tsc
+#   - e2e       : real TimescaleDB stack 30k landing (ISSUE #60 forbids mock stand-ins)
 #
-# 触发：push 到 main、对 main 开 PR。
-# 铁律（与 CNB 一致）：全程禁止静默吞失败 —— 任何门禁红都必须让构建变红。
+# Trigger: push to main, or open a PR against main.
+# Iron rule (same as CNB): never silently swallow failures -- any red gate must turn the build red.
 
 name: CI
 
@@ -33,10 +33,10 @@ jobs:
           python-version: "3.11"
       - uses: actions/setup-node@v5
         with:
-          node-version: "20"   # test_payload_contract.py 需要 node 实跑 payload.js
-      # 门禁：backend_ingestion 与 alert_engine 的 pydantic / pydantic-settings 必须完全一致。
-      # CI 把两份 requirements 装进同一个 venv，分叉会导致 pip ResolutionImpossible
-      #（PR #25 / #20 曾因此红）。这步在任何安装之前先卡死，避免「装到一半才炸」。
+          node-version: "20"   # test_payload_contract.py needs node to actually run payload.js
+      # Gate: backend_ingestion and alert_engine pydantic / pydantic-settings must match exactly.
+      # CI installs both requirements into one venv; divergence causes pip ResolutionImpossible
+      # (PR #25 / #20 went red for this before). Fail fast before any install to avoid "explodes mid-install".
       - name: Guard - pydantic pin lockstep (backend_ingestion <-> alert_engine)
         run: |
           set -eu
@@ -55,31 +55,31 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r alert_engine/requirements.txt
           python -m pip install -r backend_ingestion/requirements.txt
-          # fakeredis / httpx / rich 是测试期依赖（见 .cnb.yml 同款注释）
+          # fakeredis / httpx / rich are test-time deps (see the same comment in .cnb.yml)
           python -m pip install pytest pytest-timeout "httpx<0.28" fakeredis "rich==13.7.1"
-      # tests/e2e/ 는 Docker 통합 테스트다. CNB의 유닛 잡은 python:3.11 이미지에
-      # docker 가 없어 이 파일들이 항상 skip 됐다. GitHub runner 는 docker 가 있어
-      # 실제 실행되는데, 이 테스트들은 독립 실행(전용 e2e 잡) 또는 컨테이너 준비 대기
-      # 순서 등으로 유닛 잡에서 바로 돌리면 실패/타임아웃된다. CNB 와 동일하게
-      # 유닛 잡에서는 제외하고, 전용 e2e 잡이 test_e2e_30k.py 를 스크립트로 실행한다.
+      # tests/e2e/ are Docker integration tests. CNB's unit jobs run on the python:3.11 image which
+      # has no docker, so these files were always skipped. The GitHub runner does have docker and
+      # actually runs them, but running these tests directly in the unit job -- via standalone execution
+      # (a dedicated e2e job) or container-readiness waiting -- causes failures/timeouts. As with CNB,
+      # exclude them from the unit job, and let the dedicated e2e job run test_e2e_30k.py via the script.
       - name: pytest (root testpaths; e2e Docker tests run in dedicated e2e job)
         run: python -m pytest -q --ignore=tests/e2e
-      - name: pytest backend_ingestion/tests (顶层 app 包冲突，单独跑)
+      - name: pytest backend_ingestion/tests (top-level app package conflict, run separately)
         run: python -m pytest backend_ingestion/tests/ -v --timeout=60
       - name: Compile all (syntax gate)
         run: python -m compileall -q backend_ingestion/app alert_engine/app simulator tests
-      - name: Test-file sanity (每个 test_*.py 至少一个真实 test 函数)
+      - name: Test-file sanity (each test_*.py has at least one real test function)
         run: |
           set -eu
           missing=0
           for f in $(find tests alert_engine/tests backend_ingestion/tests -name 'test_*.py'); do
             if ! grep -qE '^[[:space:]]*def test_' "$f"; then
-              echo "无真实测试函数: $f"
+              echo "No real test function: $f"
               missing=1
             fi
           done
           if [ "$missing" != "0" ]; then
-            echo "发现假覆盖测试文件 —— 门禁拒绝"
+            echo "Found fake-coverage test file -- gate rejected"
             exit 1
           fi
       - name: Backend import smoke
@@ -87,10 +87,10 @@ jobs:
           set -eu
           (cd backend_ingestion && JWT_SECRET=ci-import-smoke-placeholder python -c "import app.main; print('backend app.main import OK')")
           (cd alert_engine && JWT_SECRET=ci-import-smoke-placeholder python -c "import app.main; print('alert_engine app.main import OK')")
-      # `test_metric_naming_probe.py` 不依赖 Docker（只给 `assert_metric_naming` 喂伪造
-      # /metrics 文本，不起栈）。但上面的 `pytest -q --ignore=tests/e2e` 把它一并排除了，
-      # 导致它此前**不在任何 CI 链路里实跑**。这里显式补跑，让订单 32 的命名反例门禁
-      # 在单元测试里也常驻（e2e 链路只顺带验一次，覆盖不够）。
+      # `test_metric_naming_probe.py` does not depend on Docker (it only feeds fake
+      # /metrics text to `assert_metric_naming`, no stack up). But the `pytest -q --ignore=tests/e2e` above
+      # excludes it too, so it was not actually run in any CI path before. Here we run it explicitly, so Order 32's
+      # naming-antipattern gate is also present in unit tests (the e2e path only checks it once, insufficient coverage).
       - name: pytest metric-naming guard (docker-free)
         run: python -m pytest tests/e2e/test_metric_naming_probe.py -v
 
@@ -119,12 +119,12 @@ jobs:
           missing=0
           for f in $(find bridge/tests -name 'test_*.py'); do
             if ! grep -qE '^[[:space:]]*def test_' "$f"; then
-              echo "无真实测试函数: $f"
+              echo "No real test function: $f"
               missing=1
             fi
           done
           if [ "$missing" != "0" ]; then
-            echo "发现假覆盖测试文件 —— 门禁拒绝"
+            echo "Found fake-coverage test file -- gate rejected"
             exit 1
           fi
 
@@ -140,7 +140,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: "20"
-      - name: Install (Linux 全新 resolve，避开 Windows 生成的 lockfile)
+      - name: Install (fresh Linux resolve, avoids Windows-generated lockfile)
         run: |
           set -eu
           rm -f package-lock.json
@@ -177,7 +177,7 @@ jobs:
               exit 1
             fi
           done
-      - name: Install backend deps (OpenAPI 导出要 import app.main)
+      - name: Install backend deps (OpenAPI export needs import app.main)
         run: |
           set -eu
           python -m pip install --upgrade pip
@@ -189,7 +189,7 @@ jobs:
           set -eu
           rm -f package-lock.json
           npm install
-      - name: Run contract gate (复用 ci/contract-gate.sh)
+      - name: Run contract gate (reuses ci/contract-gate.sh)
         run: bash ci/contract-gate.sh
 
   docs-sync:
@@ -223,5 +223,5 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Run e2e (复用 ci/run-e2e.sh，与 CNB e2e-30k-landing 等效)
+      - name: Run e2e (reuses ci/run-e2e.sh, equivalent to CNB e2e-30k-landing)
         run: bash ci/run-e2e.sh

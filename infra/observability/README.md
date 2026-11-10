@@ -1,9 +1,9 @@
-# 可观测性接线说明
+# Observability wiring guide
 
-> 回答一个问题：**这些开源下下来之后，到底接在哪、怎么跑。**
-> 来源与取舍理由见 `external/SOURCES.md` §5；套用点 file:line 见 `external/INTEGRATION-PLAN.md` §6。
+> Answers one question: **once these open-source components are downloaded, where exactly are they wired in, and how do they run.**
+> Provenance and trade-off rationale: `external/SOURCES.md` §5; adoption points with file:line: `external/INTEGRATION-PLAN.md` §6.
 
-## 1. 一条命令起来
+## 1. Bring it up with one command
 
 ```bash
 docker compose \
@@ -13,42 +13,36 @@ docker compose \
   up -d
 ```
 
-三层各管什么：
+What each of the three layers manages:
 
-| 文件 | 内容 | 为什么单独一层 |
+| File | Contents | Why a separate layer |
 |---|---|---|
-| `infra/docker-compose.yml` | EMQX + TimescaleDB + Redis | 「跑通看板」的最小集，必须保持轻量 |
-| `infra/docker-compose.app.yml` | backend + alert-engine | 应用要进同一网络，否则 Prometheus 的目标名解析不到 |
-| `infra/observability/…` | prometheus + alertmanager + 2 个 exporter | 运维增强层，按需叠加 |
+| `infra/docker-compose.yml` | EMQX + TimescaleDB + Redis | the minimal set to "make the dashboard work", must stay lightweight |
+| `infra/docker-compose.app.yml` | backend + alert-engine | the apps must be on the same network, otherwise Prometheus cannot resolve the target names |
+| `infra/observability/…` | prometheus + alertmanager + 2 exporters | ops enhancement layer, stacked on demand |
 
-## 1.1 为什么 exporter 必须与 base 组件同网（订单 22 / I-12）
+## 1.1 Why exporters must share a network with the base components (Order 22 / I-12)
 
-四个 exporter/prometheus 的目标地址全是 **Docker service DNS**（`timescaledb:5432`、
-`redis:6379`、`backend:8000` …）。这些名字只有在**同一张网络**里才解析得到。
+The target addresses of the four exporters/prometheus are all **Docker service DNS** (`timescaledb:5432`, `redis:6379`, `backend:8000` …). These names only resolve on **the same network**.
 
-本仓库的做法是**三层都不声明 `networks:`**，让 Compose 把三个文件的所有 service
-一起投进默认网络 `{project}_default`。`verify_wiring.sh` 的第 5 步会守住这条：
-一旦有人在 observability 文件里加了 `networks:`，检查立即变红。
+This repo's approach is to **declare `networks:` in none of the three layers**, letting Compose drop all services from the three files into the default network `{project}_default`. `verify_wiring.sh` step 5 guards this: the moment someone adds `networks:` in the observability file, the check immediately turns red.
 
-踩过的坑（这正是 I-12 反复强调的原因）：
-exporter 容器会**正常起来**、端口也正常监听，但 `/metrics` 里没有任何业务指标 ——
-因为 `DATA_SOURCE_NAME` 里的 `timescaledb` 解析失败。只看 `docker ps` 完全发现不了。
+The pit that was hit (exactly why I-12 keeps emphasizing this): the exporter container **comes up normally** and the port listens normally, but `/metrics` has no business metrics at all — because `timescaledb` in `DATA_SOURCE_NAME` fails to resolve. Looking only at `docker ps` completely misses it.
 
-拼命令时 project 名必须一致：用**一条** `docker compose -f a -f b up`，或给每条命令
-都加同一个 `-p <project>`。否则会造出两张网络，DNS 互不可见。
+When assembling the command the project name must be consistent: use **one** `docker compose -f a -f b up`, or add the same `-p <project>` to every command. Otherwise two networks are created and DNS cannot see across them.
 
-## 2. 端口与入口
+## 2. Ports and entry points
 
-| 服务 | 地址 | 用途 |
+| Service | Address | Purpose |
 |---|---|---|
-| backend | `:8000` | `/healthz`、`/robots`、`/ws/robots`、**`/metrics`**（均免鉴权；`/robots` 等业务 REST 需 Bearer） |
-| alert-engine | `:8001` | **`/metrics`**（独立 HTTP 服务，不是 FastAPI） |
+| backend | `:8000` | `/healthz`, `/robots`, `/ws/robots`, **`/metrics`** (all unauthenticated; business REST like `/robots` needs Bearer) |
+| alert-engine | `:8001` | **`/metrics`** (standalone HTTP service, not FastAPI) |
 | Prometheus | `:9090` | UI / PromQL / `/-/rules` |
-| Alertmanager | `:9093` | UI / 静默 / 抑制 |
-| postgres-exporter | `:9187` | TimescaleDB 指标 |
-| redis-exporter | `:9121` | Redis 指标 |
+| Alertmanager | `:9093` | UI / silence / inhibition |
+| postgres-exporter | `:9187` | TimescaleDB metrics |
+| redis-exporter | `:9121` | Redis metrics |
 
-## 3. 抓取拓扑
+## 3. Scrape topology
 
 ```
 prometheus.yml
@@ -60,90 +54,79 @@ prometheus.yml
 └── redis                      redis-exporter:9121/m
 ```
 
-## 4. 告警规则分两层，别混淆
+## 4. Alert rules are in two layers, don't confuse them
 
-| 层 | 是谁 | 判什么 | 落在哪 |
+| Layer | Whose | Judges | Falls where |
 |---|---|---|---|
-| 应用层 | `alert_engine` | **机器人**：过热 / 低电量 / 离线 / 关节卡死 | `robot_alert` 表 + Redis `robot:alerts` |
-| 平台层 | Prometheus + Alertmanager | **监控系统自己**：broker down / 落库积压 / 抓取失败 | `rules/robot-alerts.yml` |
+| App layer | `alert_engine` | **robots**: overheating / low battery / offline / joint stuck | `robot_alert` table + Redis `robot:alerts` |
+| Platform layer | Prometheus + Alertmanager | **the monitoring system itself**: broker down / store backlog / scrape failure | `rules/robot-alerts.yml` |
 
-`robot_alert` 回答「哪台机器人坏了」；Prometheus 回答「监控系统还有没有资格回答前一个问题」。
-后者失灵时，前者的所有结论都不可信。
+`robot_alert` answers "which robot broke"; Prometheus answers "does the monitoring system still deserve to answer the previous question". When the latter fails, all conclusions of the former are untrustworthy.
 
-### 4.0 命名唯一来源（ISSUE #72）
+### 4.0 Single source of naming (ISSUE #72)
 
-后端的指标前缀**只有 `robot_backend_*`**。历史上订单 16 的实现分支另立过一套
-`robot_monitor_*`（6 个），与订单 19 已落地的 `robot_backend_*` 双轨并存 —— 其中 3 个
-是同一计数源的重复指标（同一 `queue.qsize()` / `writer.written` / `mqtt.received`）。
-现已统一：
+The backend metric prefix is **only `robot_backend_*`**. Historically the Order 16 implementation branch set up a separate `robot_monitor_*` set (6 of them), running in parallel with the Order 19-landed `robot_backend_*` — of which 3 were duplicate metrics from the same counting source (same `queue.qsize()` / `writer.written` / `mqtt.received`). Now unified:
 
-| 旧名（已废） | 现状 |
+| Old name (retired) | Status |
 |---|---|
-| `robot_monitor_batch_queue_size` | 删除（同源 `robot_backend_queue_depth`） |
-| `robot_monitor_batch_rows_total` | 删除（同源 `robot_backend_telemetry_written_total`） |
-| `robot_monitor_mqtt_messages_total` | 删除（同源 `robot_backend_mqtt_received_total`） |
-| `robot_monitor_batch_flush_total{reason}` | 并入 `robot_backend_batch_flushes_total{reason}` |
-| `robot_monitor_ws_connections` | 改名 `robot_backend_ws_connections` |
-| `robot_monitor_history_latency_seconds` | 改名 `robot_backend_history_latency_seconds` |
+| `robot_monitor_batch_queue_size` | removed (same source as `robot_backend_queue_depth`) |
+| `robot_monitor_batch_rows_total` | removed (same source as `robot_backend_telemetry_written_total`) |
+| `robot_monitor_mqtt_messages_total` | removed (same source as `robot_backend_mqtt_received_total`) |
+| `robot_monitor_batch_flush_total{reason}` | merged into `robot_backend_batch_flushes_total{reason}` |
+| `robot_monitor_ws_connections` | renamed to `robot_backend_ws_connections` |
+| `robot_monitor_history_latency_seconds` | renamed to `robot_backend_history_latency_seconds` |
 
-**面板/告警若引用过 `robot_monitor_*`，需同步改名**（本仓 rules 与 verify_wiring 已同步；
-外部 Grafana 面板不在仓库内，属运维侧动作）。改名的两个指标 PromQL 写法不变，只是名字换了。
+**If any panel/alert referenced `robot_monitor_*`, it must be renamed in sync** (this repo's rules and verify_wiring are already synced; external Grafana panels are outside the repo and are an ops-side action). The two renamed metrics keep the same PromQL syntax, only the name changed.
 
-#### 4.0.1 订单 32 的收口：从「文档说已改」到「机器能证明已改」
+#### 4.0.1 Order 32 closure: from 'docs say it changed' to 'a machine can prove it changed'
 
-上面的表是**记录**，不是**门禁**。订单 32（ISSUE #100）补的是门禁本身：
+The table above is a **record**, not a **gate**. Order 32 (ISSUE #100) adds the gate itself:
 
-| 层级 | 门禁 | 位置 | 能红吗 |
+| Layer | Gate | Location | Can it go red |
 |---|---|---|---|
-| 单测 | `FORBIDDEN_MONITOR_PREFIX` 前缀断言 | `backend_ingestion/tests/test_observability.py` | 能（进程内 registry） |
-| 静态 | 全仓扫描 + 逐名对照（旧名消失 / 新名在位） | `infra/observability/verify_wiring.sh` [3.6] | 能（实测注入旧名即 FAIL） |
-| **运行时** | 真实 `/metrics` 字节断言 | `tests/e2e/test_e2e_30k.py --metric-naming-check`（CI 的 e2e stage） | 能（退出码 1 → stage 红） |
+| Unit test | `FORBIDDEN_MONITOR_PREFIX` prefix assertion | `backend_ingestion/tests/test_observability.py` | Yes (in-process registry) |
+| Static | whole-repo scan + name-by-name check (old name gone / new name present) | `infra/observability/verify_wiring.sh` [3.6] | Yes (measured: injecting the old name FAILs) |
+| **Runtime** | real `/metrics` byte assertion | `tests/e2e/test_e2e_30k.py --metric-naming-check` (CI's e2e stage) | Yes (exit code 1 → stage red) |
 
-为什么需要运行那一层：单测与静态门禁都在**源码/进程内**看问题，而
-`robot_monitor_*` 是「多注册一个 Collector 就复活」的东西 —— 只有抓**跑起来那个
-进程**吐出的字节，才等于「面板真的看不到旧名了」。
+Why the runtime layer is needed: unit and static gates both look at the problem **in source / in-process**, but `robot_monitor_*` is the kind of thing that "revives if you register one more Collector" — only by scraping the bytes emitted by **the actually-running process** do you know "the panel really can't see the old name".
 
-告警引擎侧同步改名一处（#72 的收敛范围没覆盖到它）：
-`robot_alert_robots_online` → `robot_alert_robots_online_gauge`。
-后端侧的 `robot_backend_robots_online` **不动** —— 它被现网 PromQL 引用，改名属跨单返工。
+One rename synced on the alert-engine side (outside #72's convergence scope): `robot_alert_robots_online` → `robot_alert_robots_online_gauge`. The backend-side `robot_backend_robots_online` is **left alone** — it is referenced by production PromQL, and renaming it would be cross-unit rework.
 
-### 4.1 两个「WS 指标」不是一回事（易混）
+### 4.1 The two 'WS metrics' are not the same thing (easy to confuse)
 
-| 指标 | 视角 | 谁能回答 | 谁在写 |
+| Metric | Perspective | Who can answer | Who writes |
 |---|---|---|---|
-| `robot_backend_ws_connections` | **服务端** | 有几个客户端挂着 | `main.py` 的 `ws_robots` 连接/断开时增删 |
-| `robot_backend_ws_probe_alive` | **客户端** | 这条连接真的还能收到首帧 snapshot 吗 | `app/ws_probe.py` 的合成探针循环 |
-| `robot_backend_ws_probe_failures_total` | **客户端** | 断过几次（`increase()` 看抖动） | 同上 |
+| `robot_backend_ws_connections` | **Server side** | how many clients are connected | incremented/decremented on connect/disconnect in `main.py`'s `ws_robots` |
+| `robot_backend_ws_probe_alive` | **Client side** | can this connection still actually receive the first snapshot frame | the synthetic probe loop in `app/ws_probe.py` |
+| `robot_backend_ws_probe_failures_total` | **Client side** | how many times it dropped (`increase()` shows jitter) | same as above |
 
-判据：**连接数 ≥ 1 且探针为 0** ⇒ 看板「假的绿」—— 网关卡了升级 / snapshot 抛异常 /
-Redis Pub/Sub 断了，但连接对象还在。这正是缺口 G-3 要抓的事故。
-探针免鉴权（自签 token 打 loopback）、≥30s 一次、可降级（`WS_PROBE_ENABLED=false` 即 no-op）。
+Criterion: **connection count ≥ 1 and probe is 0** ⇒ the dashboard is "fake green" — the gateway stalled an upgrade / the snapshot threw / Redis Pub/Sub dropped, but the connection object remains. This is exactly the incident gap G-3 targets. The probe is unauthenticated (self-signed token hitting loopback), runs ≥30s once, and is degradable (`WS_PROBE_ENABLED=false` = no-op).
 
-## 5. 快速自检
+## 5. Quick self-check
 
 ```bash
-# 1) 三个 exporter 的 /metrics 都有内容
+# 1) the three exporters' /metrics all have content
 curl -sf localhost:8000/metrics | grep robot_backend_queue_depth
 curl -sf localhost:8001/metrics | grep robot_alert_robots_online_gauge
 curl -sf localhost:9187/metrics | head
 
-# 2) Prometheus 目标全 UP（不要只看容器在跑）
+# 2) all Prometheus targets UP (don't just check containers are running)
 curl -s localhost:9090/api/v1/targets | grep -o '"health":"[a-z]*"' | sort | uniq -c
 
-# 3) 规则已加载
+# 3) rules loaded
 curl -s localhost:9090/api/v1/rules | grep -o '"name":"[A-Za-z]*"' | head
 ```
 
-判据：`health` 全部 `up`。出现 `down` 时按下面排查。
+Criterion: all `health` are `up`. When a `down` appears, troubleshoot per below.
 
-## 6. 常见故障
+## 6. Common failures
 
-| 现象 | 根因 | 处置 |
+| Symptom | Root cause | Action |
 |---|---|---|
-| `robot_alert_engine` 一直 down | 告警引擎进程没起 metrics 线程 | 确认 `alert_engine/app/main.py` 的 `main()` 调了 `metrics.start()` |
-| `robot_backend` 一直 down | 应用跑在宿主机，`backend` 域名解析不到 | 用 `docker-compose.app.yml` 让应用进网络 |
-| `emqx` down | `/api/v5/prometheus/stats` 需 API key | 该端点未验证；不要伪报 up=1，改用 emqtt-bench `--prometheus` |
-| `queue_depth` 抓取后不变 | Gauge 只在写入时 set | 已有修正：`/metrics` 处理函数抓取前刷新（`main.py:86`） |
-| postgres/redis-exporter 起来了但无业务指标 | exporter 与 timescaledb/redis **不同网**，`DATA_SOURCE_NAME` 的 host 解析失败 | 确认三个 compose 都没声明 `networks:`、且用同一条命令（或同一 `-p`）拉起 |
-| 启动即报 `POSTGRES_PASSWORD 未设置` | `${POSTGRES_PASSWORD:?…}` 按设计拦住了无凭据启动 | 在宿主机 `cp .env.example .env` 并填写（见 `.env.example` 的 TimescaleDB 凭据段） |
-| `robot_backend_ws_probe_alive` 恒为 0 | 探针目标写错 / 端口不对 / 服务在 gateway 后 | 探针默认打 `ws://127.0.0.1:${WS_PORT}${WS_PROBE_PATH}`；容器内需与 `--port` 一致；关掉探针用 `WS_PROBE_ENABLED=false`（此时该指标不出现） |
+| `robot_alert_engine` always down | the alert-engine process didn't start the metrics thread | confirm `alert_engine/app/main.py`'s `main()` calls `metrics.start()` |
+| `robot_backend` always down | the app runs on the host, `backend` domain can't resolve | use `docker-compose.app.yml` to put the app in the network |
+| `emqx` down | `/api/v5/prometheus/stats` needs an API key | that endpoint is unverified; don't fake-report up=1, use emqtt-bench `--prometheus` instead |
+| `queue_depth` unchanged after scrape | the Gauge is only set on write | already fixed: the `/metrics` handler refreshes before scrape (`main.py:86`) |
+| postgres/redis-exporter up but no business metrics | the exporter and timescaledb/redis are **on different networks**, `DATA_SOURCE_NAME`'s host fails to resolve | confirm none of the three compose files declare `networks:`, and that they are brought up with one command (or the same `-p`) |
+| error at startup `POSTGRES_PASSWORD not set` | `${POSTGRES_PASSWORD:?…}` by design blocks credential-less startup | on the host `cp .env.example .env` and fill it in (see the TimescaleDB credentials section in `.env.example`) |
+| `robot_backend_ws_probe_alive` always 0 | probe target wrong / port wrong / service behind a gateway | the probe defaults to `ws://127.0.0.1:${WS_PORT}${WS_PROBE_PATH}`; inside a container it must match `--port`; to disable the probe use `WS_PROBE_ENABLED=false` (then the metric does not appear) |

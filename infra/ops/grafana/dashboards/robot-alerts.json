@@ -24,8 +24,8 @@
     {
       "id": 1,
       "type": "stat",
-      "title": "在线台数（告警引擎口径）",
-      "description": "robot_alert_robots_online_gauge：ticker 线判定在线数（分母固定 100），与后端 robot_backend_robots_online 两口径对照。指标源 alert_engine/app/metrics.py:71",
+      "title": "Robots online (alert engine gauge)",
+      "description": "robot_alert_robots_online_gauge: online count judged by the ticker line (denominator fixed at 100), compared against the backend's robot_backend_robots_online as two gauges. Metric source alert_engine/app/metrics.py:71",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -79,8 +79,8 @@
     {
       "id": 2,
       "type": "stat",
-      "title": "告警发射总数（1h）",
-      "description": "increase(robot_alert_emitted_total[1h])：成功发出（落库+发布）的告警条数。指标源 alert_engine/app/metrics.py:35",
+      "title": "Total alerts emitted (1h)",
+      "description": "increase(robot_alert_emitted_total[1h]): number of alerts successfully emitted (stored + published). Metric source alert_engine/app/metrics.py:35",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -134,8 +134,8 @@
     {
       "id": 3,
       "type": "stat",
-      "title": "落库错误（非 0 即告警链路故障）",
-      "description": "increase(robot_alert_store_errors_total[5m])：emitted 在涨而 store_errors 也涨 ⇒ 告警判定出来了但没落库（G-4）。>0 触发 AlertStoreFailing（rules/robot-alerts.yml:75）。指标源 alert_engine/app/metrics.py:83",
+      "title": "Store errors (non-zero = alert pipeline fault)",
+      "description": "increase(robot_alert_store_errors_total[5m]): emitted is rising but store_errors is also rising ⇒ alert was judged but not stored (G-4). >0 triggers AlertStoreFailing (rules/robot-alerts.yml:75). Metric source alert_engine/app/metrics.py:83",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -193,7 +193,7 @@
     {
       "id": null,
       "type": "row",
-      "title": "告警流",
+      "title": "Alert stream",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -206,8 +206,8 @@
     {
       "id": 10,
       "type": "timeseries",
-      "title": "告警发射（按 rule_id）",
-      "description": "rate(robot_alert_emitted_total[5m]) by rule_id。指标源 alert_engine/app/metrics.py:35",
+      "title": "Alerts emitted (by rule_id)",
+      "description": "rate(robot_alert_emitted_total[5m]) by rule_id. Metric source alert_engine/app/metrics.py:35",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -257,8 +257,8 @@
     {
       "id": 11,
       "type": "timeseries",
-      "title": "抑制（按 rule_id / reason）",
-      "description": "rate(robot_alert_suppressed_total[5m]) by rule_id, reason。reason=offline（订单 10）/ severity（订单 30）。指标源 alert_engine/app/metrics.py:41",
+      "title": "Suppressed (by rule_id / reason)",
+      "description": "rate(robot_alert_suppressed_total[5m]) by rule_id, reason. reason=offline (order 10) / severity (order 30). Metric source alert_engine/app/metrics.py:41",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -308,8 +308,8 @@
     {
       "id": 12,
       "type": "timeseries",
-      "title": "静音（按 rule_id）",
-      "description": "rate(robot_alert_silenced_total[5m]) by rule_id：TTL 静默期内未落库/未发布。指标源 alert_engine/app/metrics.py:47",
+      "title": "Silenced (by rule_id)",
+      "description": "rate(robot_alert_silenced_total[5m]) by rule_id: not stored/published within the TTL silence period. Metric source alert_engine/app/metrics.py:47",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -359,8 +359,8 @@
     {
       "id": 13,
       "type": "timeseries",
-      "title": "升级重发（按 rule_id）",
-      "description": "rate(robot_alert_escalated_total[5m]) by rule_id：severity=3 超时未 ack 升级。指标源 alert_engine/app/metrics.py:53",
+      "title": "Escalated re-emits (by rule_id)",
+      "description": "rate(robot_alert_escalated_total[5m]) by rule_id: severity=3 not acked past timeout, escalated. Metric source alert_engine/app/metrics.py:53",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -410,8 +410,8 @@
     {
       "id": 14,
       "type": "timeseries",
-      "title": "落库错误 robot_alert_store_errors_total",
-      "description": "rate(robot_alert_store_errors_total[5m])：>0 即「有告警但 DB 查不到」。指标源 alert_engine/app/metrics.py:83",
+      "title": "Store errors robot_alert_store_errors_total",
+      "description": "rate(robot_alert_store_errors_total[5m]): >0 means 'alert exists but not found in DB'. Metric source alert_engine/app/metrics.py:83",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -461,7 +461,7 @@
     {
       "id": null,
       "type": "row",
-      "title": "在线台数两口径对照",
+      "title": "Online count: two gauges compared",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -474,8 +474,8 @@
     {
       "id": 20,
       "type": "timeseries",
-      "title": "online：后端 vs 告警引擎",
-      "description": "两条口径对照：robot_backend_robots_online（后端 /healthz 维护，metrics.py:132）与 robot_alert_robots_online_gauge（告警引擎 ticker，alert_engine/app/metrics.py:71）。长期背离说明两个进程对 last_seen 阈值的理解不一致。",
+      "title": "online: backend vs alert engine",
+      "description": "Two gauges compared: robot_backend_robots_online (backend /healthz maintained, metrics.py:132) and robot_alert_robots_online_gauge (alert engine ticker, alert_engine/app/metrics.py:71). Persistent divergence means the two processes disagree on the last_seen threshold.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -550,7 +550,7 @@
         },
         "hide": 0,
         "includeAll": false,
-        "label": "数据源",
+        "label": "Datasource",
         "multi": false,
         "name": "datasource",
         "options": [],
@@ -568,7 +568,7 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "RobotMonitor · 告警引擎指标",
+  "title": "RobotMonitor - Alert engine metrics",
   "uid": "robot-alerts",
   "version": 1,
   "weekStart": ""

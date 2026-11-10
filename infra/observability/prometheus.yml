@@ -1,17 +1,17 @@
-# Prometheus 抓取配置 —— 直接套用 external/prometheus 的 v3.x 配置语法。
+# Prometheus scrape config — directly adapts external/prometheus's v3.x config syntax.
 #
-# 为什么这个文件此前不存在：
-#   `prometheus/client_python` 已在上一轮下载，但**代码里没有任何一处 import**，
-#   也没有 Prometheus 服务端去抓 —— 等于「下了但没接」。
-#   仅装客户端库不会产生任何指标，必须有 server 抓 + exporter 暴露。
+# Why this file didn't exist before:
+#   `prometheus/client_python` was downloaded in a previous round, but **there is no import anywhere in
+#   the code**, and no Prometheus server to scrape — i.e. "downloaded but not wired up".
+#   Installing just the client library produces zero metrics; you need a server to scrape + an exporter to expose.
 #
-# 抓取目标的端口与 infra/docker-compose.yml 中的 service 一一对应：
-#   backend  :8000 /metrics   <- backend_ingestion 暴露（见 app/metrics.py）
-#   alert    :8001 /metrics   <- alert_engine 暴露
+# Scrape target ports map one-to-one to the services in infra/docker-compose.yml:
+#   backend  :8000 /metrics   <- exposed by backend_ingestion (see app/metrics.py)
+#   alert    :8001 /metrics   <- exposed by alert_engine
 #   postgres :9187            <- prometheus-community/postgres_exporter
 #   redis    :9121            <- oliver006/redis_exporter
 global:
-  scrape_interval: 10s        # 与遥测 10Hz / 看板 10s 刷新对齐，不引入额外量级
+  scrape_interval: 10s        # aligns with telemetry 10Hz / dashboard 10s refresh, no extra magnitude
   evaluation_interval: 10s
 
 rule_files:
@@ -27,9 +27,9 @@ scrape_configs:
     static_configs:
       - targets: ["localhost:9090"]
 
-  # 应用层：后端采集与告警引擎（自定义业务指标）
-  # 后端的**唯一规范前缀是 `robot_backend_*`**（ISSUE #72 统一双轨命名；
-  # 历史订单 16 的 `robot_monitor_*` 已作废/并入，见 backend_ingestion/app/metrics.py 头注释）。
+  # Application layer: backend collection and alert engine (custom business metrics)
+  # The backend's **only canonical prefix is `robot_backend_*`** (ISSUE #72 unified dual-track naming;
+  # the historical order 16 `robot_monitor_*` is deprecated/merged — see backend_ingestion/app/metrics.py header comment).
   - job_name: robot_backend
     metrics_path: /metrics
     static_configs:
@@ -40,15 +40,15 @@ scrape_configs:
     static_configs:
       - targets: ["alert-engine:8001"]
 
-  # Broker 层：EMQX 自带 Prometheus 端点（18083 端口的 /api/v5/prometheus/stats）
-  # 注：该端点默认需 API key；未验证 —— 若抓取失败，用 emqtt-bench 的 --prometheus
-  # 或 EMQX Dashboard 的 metrics 页面替代，不要伪造 up=1。
+  # Broker layer: EMQX's built-in Prometheus endpoint (18083 port /api/v5/prometheus/stats)
+  # Note: this endpoint requires an API key by default; unverified — if scraping fails, use emqtt-bench's
+  #   --prometheus or the EMQX Dashboard metrics page instead; do not fake up=1.
   - job_name: emqx
     metrics_path: /api/v5/prometheus/stats
     static_configs:
       - targets: ["emqx:18083"]
 
-  # 数据层：TimescaleDB / Redis（用 exporter 暴露，无需改数据库）
+  # Data layer: TimescaleDB / Redis (exposed via exporters, no DB changes needed)
   - job_name: postgres
     static_configs:
       - targets: ["postgres-exporter:9187"]

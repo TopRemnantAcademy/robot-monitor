@@ -1,12 +1,14 @@
-# emqx-exporter 配置
-# 来源：external/emqx-exporter/examples/docker-compose/emqx-exporter.config.yaml
-#   （示例里是 https + tls_config.insecure_skip_verify；本仓库 EMQX 只开明文 18083，故简化为 http）
-# 说明（source: external/emqx-exporter/README.md:26-34）：
-#   metrics 段需要 EMQX Dashboard 的 API KEY/SECRET（EMQX 5 路径：Dashboard → System → API Keys）。
-#   随仓库**不能**放真实密钥 → 这里只引用环境变量占位，由 compose 注入 .env。
-#   metrics / probes 均可选：不填 = 该功能关闭（README.md:62）。
-# ⚠️ 本段必须显式选 http：EMQX 5.6 在 18083 上是明文 HTTP，
-#    Dashboard 的 HTTPS 监听（18084）在 infra/docker-compose.yml 里没有开。
+# emqx-exporter config
+# Source: external/emqx-exporter/examples/docker-compose/emqx-exporter.config.yaml
+#   (the example uses https + tls_config.insecure_skip_verify; this repo's EMQX only opens plaintext
+#   18083, so simplified to http)
+# Notes (source: external/emqx-exporter/README.md:26-34):
+#   the metrics section needs EMQX Dashboard's API KEY/SECRET (EMQX 5 path: Dashboard → System → API Keys).
+#   The repo **cannot** ship real secrets → here we only reference env-var placeholders, injected by
+#   compose from .env.
+#   metrics / probes are both optional: empty = that feature is off (README.md:62).
+# ⚠️ This section must explicitly choose http: EMQX 5.6 serves plaintext HTTP on 18083,
+#    and the Dashboard's HTTPS listener (18084) is not opened in infra/docker-compose.yml.
 metrics:
   target: emqx:18083
   scheme: http

@@ -1,12 +1,12 @@
 // Auth state (Order 15 T4)
 //
-// 【Why sessionStorage instead of localStorage】
+// [Why sessionStorage instead of localStorage]
 // The dashboard is a **public terminal**: a machine hung on the wall in the workshop that anyone walking by can operate.
 // localStorage persists across tabs and sessions — after the previous shift logs out, the next person opening the browser is still logged in;
 // sessionStorage is cleared when the tab closes, matching the physical semantics of "one person per shift, leave when done".
 // Order 15's forbidden items explicitly prohibit localStorage.
 //
-// 【Why the token is not put into the Zustand store】
+// [Why the token is not put into the Zustand store]
 // The token is only read in two places: assembling the fetch request header and building the WS URL. Putting it in the global store would
 // trigger subscription notifications across the entire component tree on every login/logout, while it itself does not participate in rendering.
 

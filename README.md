@@ -6,7 +6,7 @@ High-frequency telemetry (100 robots × 10 Hz = 1000 msg/s) flows over MQTT → 
 
 > 🌍 **This project is international.** Documentation is available in:
 > - 🇺🇸 **English** (this file)
-> - 🇰🇷 [한국어](./README.ko.md)
+> - 🇰🇷 [Korean](./README.ko.md)
 > - 🇨🇳 [Chinese](./README.zh.md)
 >
 > The dashboard UI itself supports **English / Korean / Chinese / Japanese** with a live language switcher (default: English). See [docs/README.md](./docs/README.md).

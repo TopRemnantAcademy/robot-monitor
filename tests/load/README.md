@@ -1,61 +1,56 @@
-# tests/load —— 可判定的压测（订单 23 / I-16）
+# tests/load — decidable load testing (Order 23 / I-16)
 
-> **一句话**：用 k6 + xk6-mqtt 替换 emqtt-bench 的「只吐数字」，
-> 让「连接成功率 / 发布延迟 / WS 收包率」都变成机器可判的 `check()` 断言，
-> 直接进 k6 退出码，而不是让人去读一串数字自己判断。
+> **One-liner**: Replace emqtt-bench's "just emit numbers" with k6 + xk6-mqtt, so that "connection success rate / publish latency / WS receive rate" become machine-decidable `check()` assertions that feed directly into the k6 exit code, instead of making a human read a string of numbers and judge for themselves.
 
 ---
 
-## 1. 为什么换掉 emqtt-bench
+## 1. Why replace emqtt-bench
 
-| | emqtt-bench（Erlang） | 本目录（k6 + xk6-mqtt） |
+| | emqtt-bench (Erlang) | This directory (k6 + xk6-mqtt) |
 |---|---|---|
-| 输出 | 只吐数字（吞吐、时延） | 数字 **+ `check()` 的 PASS/FAIL** |
-| 判定 | 人工看图定阈值 | 阈值写进 `thresholds`，**不达标即退出码非 0** |
-| CI 可用性 | 要 OTP 27.2+ 编译 | 官方发布预编译二进制，或 `xk6 build` 一条命令 |
-| 断言能力 | 弱 | JS 任意逻辑（字段类型、报文内容、语义） |
+| Output | Just emit numbers (throughput, latency) | Numbers **+ `check()` PASS/FAIL** |
+| Judgment | Human reads the chart to set thresholds | Thresholds written into `thresholds`, **non-zero exit code on miss** |
+| CI usability | Needs OTP 27.2+ to compile | Official prebuilt binary, or one `xk6 build` command |
+| Assertion power | Weak | Arbitrary JS logic (field types, message content, semantics) |
 
-依据：`external/INTEGRATION-PLAN.md` §8.6（I-16）、`external/SOURCES.md` §5（N7/N8）。
-`R-07 §6.1` 明确「禁止用『日志无报错』代替通过判定」——
-emqtt-bench 的数字恰好属于「日志无报错」那一类。
+Basis: `external/INTEGRATION-PLAN.md` §8.6 (I-16), `external/SOURCES.md` §5 (N7/N8). `R-07 §6.1` explicitly says "forbid using 'no errors in logs' as a substitute for a pass judgment" — and emqtt-bench's numbers fall exactly into that "no errors in logs" category.
 
-⚠️ **不替换 `simulator/mock_fleet.py`**（订单 23 明确，`INTEGRATION-PLAN.md` §8.6 亦同）。
-mock_fleet 是 24 关节真实 payload 的唯一产生者，本目录只做**压测与判定**。
+Note: **Do not replace `simulator/mock_fleet.py`** (explicit in Order 23, same in `INTEGRATION-PLAN.md` §8.6). mock_fleet is the only producer of the real 24-joint payload; this directory only does **load testing and judgment**.
 
 ---
 
-## 2. 文件清单
+## 2. File list
 
-| 文件 | 作用 |
+| File | Role |
 |---|---|
-| `payload.js` | 与 `mock_fleet.py` **逐字段同构**的 payload 生成器（24 关节） |
-| `config.js` | 压测参数 + 判定阈值（全部可用环境变量覆盖） |
-| `mqtt_pub.js` | MQTT 压测主体：N 台 × 10Hz 发布 + `check()` 断言（**需 xk6-mqtt**） |
-| `ws_watch.js` | WS 收包率 / snapshot 规模 / 字段类型断言（**官方 k6 即可**） |
-| `run.sh` | 一键入口：先决条件 → 压测 → 探针 → 汇总（区分环境错误/判定失败） |
-| `test_payload_contract.py` | **单测**：把 `payload.js` 与 `mock_fleet.py` 逐字段对拍 |
-| `last-run.json` / `last-ws-run.json` | 最近一次运行的判定摘要（`handleSummary` 产出） |
+| `payload.js` | Payload generator **structurally identical field-by-field** to `mock_fleet.py` (24 joints) |
+| `config.js` | Load parameters + judgment thresholds (all overridable via env vars) |
+| `mqtt_pub.js` | MQTT load core: N units × 10Hz publish + `check()` assertions (**requires xk6-mqtt**) |
+| `ws_watch.js` | WS receive-rate / snapshot size / field-type assertions (**official k6 suffices**) |
+| `run.sh` | One-click entry: prerequisites → load → probe → summary (distinguishes env errors / judgment failures) |
+| `test_payload_contract.py` | **Unit test**: field-by-field diff of `payload.js` against `mock_fleet.py` |
+| `last-run.json` / `last-ws-run.json` | Most recent run's judgment summary (`handleSummary` output) |
 
 ---
 
-## 3. 拿到「带 xk6-mqtt 的 k6」（三选一）
+## 3. Getting k6 with xk6-mqtt (pick one of three)
 
-官方 k6 **不含** `k6/x/mqtt` 模块，直接跑会报 `unknown module: k6/x/mqtt`。
+Official k6 **does not include** the `k6/x/mqtt` module; running it directly errors with `unknown module: k6/x/mqtt`.
 
 ```bash
-# A) 预编译产物（最快；注意资产 URL 带版本号，不是 /latest/）
+# A) Prebuilt artifact (fastest; note the asset URL has a version, not /latest/)
 curl -sL https://github.com/grafana/xk6-mqtt/releases/download/v0.3.3/xk6-mqtt_v0.3.3_linux_amd64.tar.gz \
   | tar xz -C /tmp && mv /tmp/xk6-mqtt_v0.3.3_linux_amd64/k6 ./k6-mqtt
 
-# B) 自行编译（需 Go）
+# B) Build it yourself (needs Go)
 go install go.k6.io/xk6/cmd/xk6@latest
 xk6 build --with github.com/grafana/xk6-mqtt@latest --output ./k6-mqtt
 
-# C) 复用已有的
+# C) Reuse an existing one
 K6_BIN=/path/to/k6-mqtt bash tests/load/run.sh
 ```
 
-实测二进制自报扩展（本机验证）：
+Actually-measured binary self-reported extensions (verified locally):
 ```
 k6 v2.3.0 (go1.27.1, linux/amd64)
 Extensions:
@@ -64,53 +59,53 @@ Extensions:
 
 ---
 
-## 4. 跑法
+## 4. How to run
 
 ```bash
-# 完整（MQTT 压测 + WS 探针）—— 需 broker 与后端都起着
+# Full (MQTT load + WS probe) —— requires broker and backend both running
 bash tests/load/run.sh
 
-# 小规模冒烟（不起 100 台）
+# Small smoke test (not 100 units)
 ROBOTS=20 DURATION_S=10 bash tests/load/run.sh
 
-# 只跑 MQTT，或只跑 WS
+# Only MQTT, or only WS
 bash tests/load/run.sh --mqtt-only
 WS_TOKEN=<jwt> bash tests/load/run.sh --ws-only
 
-# 只探测环境，不起任何负载
+# Only probe the environment, start no load
 bash tests/load/run.sh --preflight-only
 ```
 
-**退出码**（沿用 `test_integration.sh` 的约定，R-07 §6.3）：
+**Exit codes** (continuing the `test_integration.sh` convention, R-07 §6.3):
 
-| 码 | 含义 |
+| Code | Meaning |
 |---|---|
-| 0 | 全部判定通过 |
-| 1 | 存在**判定失败**（阈值/check 红了）—— 代码或配置问题 |
-| 2 | **环境不具备**（没有 k6 二进制 / broker 未起 / 后端未起）→ 相关项标「未验证」 |
+| 0 | All judgments passed |
+| 1 | A **judgment failure** exists (threshold/check red) —— code or config problem |
+| 2 | **Environment not ready** (no k6 binary / broker not up / backend not up) → related items marked "unverified" |
 
-### 可直接用 k6 跑单个脚本
+### Run a single script directly with k6
 
 ```bash
-./k6-mqtt run tests/load/mqtt_pub.js          # 默认 100 台 × 10Hz × 30s
-./k6-mqtt run tests/load/ws_watch.js          # WS 探针（官方 k6 也可）
+./k6-mqtt run tests/load/mqtt_pub.js          # default 100 units × 10Hz × 30s
+./k6-mqtt run tests/load/ws_watch.js          # WS probe (official k6 also works)
 ```
 
-### 关键环境变量
+### Key environment variables
 
-| 变量 | 默认 | 说明 |
+| Variable | Default | Description |
 |---|---|---|
-| `ROBOTS` | `100` | 机器人台数（`spec/00 §1`） |
-| `PUBLISH_HZ` | `10` | 每台每秒发布数（`spec/00 §1`） |
-| `DURATION_S` | `30` | 稳态时长（`R-07 §2` 用 30s） |
-| `RAMP_S` | `5` | 爬坡时长（避免连接风暴误判） |
-| `BROKER_URL` | `mqtt://localhost:1883` | xk6-mqtt 接受 `mqtt://` URL |
-| `WS_URL` | `ws://localhost:8000/ws/robots` | 后端 WS 端点 |
-| `WS_TOKEN` | 空 | JWT。**订单 15 起 WS 需 `?token=`**，留空会被 close 1008 拒绝 |
-| `K6_BIN` | `./k6-mqtt` | 带扩展的 k6 路径 |
-| `TH_PUB_P95_MS` 等 | 见 `config.js` | 判定阈值覆盖 |
+| `ROBOTS` | `100` | Number of robot units (`spec/00 §1`) |
+| `PUBLISH_HZ` | `10` | Publishes per unit per second (`spec/00 §1`) |
+| `DURATION_S` | `30` | Steady-state duration (`R-07 §2` uses 30s) |
+| `RAMP_S` | `5` | Ramp-up duration (avoid misjudging a connection storm) |
+| `BROKER_URL` | `mqtt://localhost:1883` | xk6-mqtt accepts `mqtt://` URL |
+| `WS_URL` | `ws://localhost:8000/ws/robots` | Backend WS endpoint |
+| `WS_TOKEN` | empty | JWT. **From Order 15, WS requires `?token=`**; empty is rejected with close 1008 |
+| `K6_BIN` | `./k6-mqtt` | Path to k6 with the extension |
+| `TH_PUB_P95_MS` etc | see `config.js` | Judgment threshold overrides |
 
-取 JWT（后端起着时）：
+Get a JWT (when backend is running):
 
 ```bash
 curl -s -X POST http://localhost:8000/auth/jwt/login \
@@ -119,131 +114,115 @@ curl -s -X POST http://localhost:8000/auth/jwt/login \
 
 ---
 
-## 5. 判定的三条硬断言（对应 R-07/R-08）
+## 5. The three hard assertions (corresponding to R-07/R-08)
 
-| # | 断言 | 出处 | 阈值 | 实现位置 |
+| # | Assertion | Source | Threshold | Where implemented |
 |---|---|---|---|---|
-| ① | **连接成功率** | `R-07 §1` 就绪判据 | ≥ 0.99 | `mqtt_pub.js` 的 `'MQTT 连接已建立'` + `thresholds.checks` |
-| ② | **发布延迟** | `R-07 §3` | p95 < 50ms，p99 < 200ms | `mqtt_pub.js` 的 `pub_latency_ms` Trend |
-| ③ | **WS 收包率 / 首帧** | `R-08 C4/C5` | snapshot ≥ 100 台；字段为数字率 ≥ 0.99 | `ws_watch.js` 的 `ws_snapshot_robots` / `ws_telemetry_fields_ok` |
+| ① | **Connection success rate** | `R-07 §1` readiness criterion | ≥ 0.99 | `mqtt_pub.js`'s `'MQTT connection established'` + `thresholds.checks` |
+| ② | **Publish latency** | `R-07 §3` | p95 < 50ms, p99 < 200ms | `mqtt_pub.js`'s `pub_latency_ms` Trend |
+| ③ | **WS receive rate / first frame** | `R-08 C4/C5` | snapshot ≥ 100 units; numeric-field rate ≥ 0.99 | `ws_watch.js`'s `ws_snapshot_robots` / `ws_telemetry_fields_ok` |
 
-**每条都接了 `thresholds`**，不达标 k6 退出码非 0。
-这一点是**反向验证过的**（见 §7「断言有效性」）——只写 `check()` 不接阈值，会红着判通过。
+**Each is hooked to `thresholds`**, so a miss gives a non-zero k6 exit code. This point is **reverse-verified** (see §7 "assertion validity") — writing only `check()` without thresholds would judge red as pass.
 
-### payload 契约怎么保证「复用 mock_fleet 真实 24 关节结构」
+### How the payload contract guarantees "reuse mock_fleet's real 24-joint structure"
 
-`payload.js` 的关节名与字段是从 `simulator/mock_fleet.py` 抄来的，
-但「抄」不可信，所以有 `test_payload_contract.py`：
+`payload.js`'s joint names and fields were copied from `simulator/mock_fleet.py`, but "copying" is not trustworthy, so there is `test_payload_contract.py`:
 
 ```bash
-python tests/load/test_payload_contract.py     # 或 python -m pytest tests/load/
+python tests/load/test_payload_contract.py     # or python -m pytest tests/load/
 ```
 
-它用 `ast` **解析** `mock_fleet.py`（不是正则猜），再**实际用 node 执行** `payload.js`，
-逐项断言：24 关节键名与顺序、顶层字段集合、`robot_id` 正则、
-三个关节字典键一致、`max_joint_temp == max(joint_temperatures)`、报文大小同量级。
+It uses `ast` to **parse** `mock_fleet.py` (not regex guessing), then **actually runs** `payload.js` with node, asserting item by item: 24 joint key names and order, top-level field set, `robot_id` regex, three joint-dict key consistency, `max_joint_temp == max(joint_temperatures)`, and message size on the same order of magnitude.
 
 ---
 
-## 6. 本机实测证据（2026-10-11）
+## 6. Local measured evidence (2026-10-11)
 
-环境：容器内 Linux amd64；broker 为本地 `aedes`（MQTT 3.1.1）、
-WS 服务为按后端契约复刻的 `ws` 服务端（三段信封 + `?token=` 拒绝语义）。
-k6 = 官方发布 `xk6-mqtt v0.3.3` 预编译二进制。
+Environment: in-container Linux amd64; broker is a local `aedes` (MQTT 3.1.1), WS server is a `ws` server reproduced from the backend contract (three-part envelope + `?token=` rejection semantics). k6 = official prebuilt `xk6-mqtt v0.3.3` binary.
 
-### 6.1 满规模：100 台 × 10Hz × 30s
+### 6.1 Full scale: 100 units × 10Hz × 30s
 
 ```
 [load] broker=mqtt://localhost:1883 robots=100 hz=10 vus=100 duration=30s ramp=5s
-       target=1000 msg/s expected=30000 条
-[load] 判定摘要（checks rate=1.0000，pass=285 fail=0）
+       target=1000 msg/s expected=30000
+[load] judgment summary (checks rate=1.0000, pass=285 fail=0)
 ```
 
-| 指标 | 实测 | 目标（R-07 §3） | 判定 |
+| Metric | Measured | Target (R-07 §3) | Judgment |
 |---|---|---|---|
-| check 通过率 | **285/285 = 1.0000** | — | PASS |
-| 发布吞吐 | **35696 条 / 30s = 1190 msg/s** | ≥ 1000 msg/s | PASS |
-| 发布延迟 p95 | **1 ms** | < 50 ms | PASS |
-| 发布延迟 p99 | **1 ms** | < 200 ms | PASS |
-| 发布延迟 max | 12 ms | — | 观测值 |
+| check pass rate | **285/285 = 1.0000** | — | PASS |
+| Publish throughput | **35696 in 30s = 1190 msg/s** | ≥ 1000 msg/s | PASS |
+| Publish latency p95 | **1 ms** | < 50 ms | PASS |
+| Publish latency p99 | **1 ms** | < 200 ms | PASS |
+| Publish latency max | 12 ms | — | observation |
 
-> `1189.9 msg/s` 略高于 1000 是正常的：稳态窗口外还夹带了爬坡尾段，
-> 故用 `EXPECTED_PUBLISHES` 做量级校验、用 `checks` 判每 VU 的节奏达标率。
-> **这不是「放宽阈值」**（R-07 §6.2）—— R-07 的 ≥1000 msg/s 判据是下界。
+> `1189.9 msg/s` being slightly above 1000 is normal: beyond the steady-state window it also includes the tail of the ramp, so `EXPECTED_PUBLISHES` is used for order-of-magnitude validation, and `checks` for each VU's per-rhythm pass rate. **This is not "loosening the threshold"** (R-07 §6.2) — R-07's ≥1000 msg/s criterion is a lower bound.
 
-### 6.2 WS 探针
+### 6.2 WS probe
 
 ```
-[ws] 判定摘要（checks rate=1.0000，pass=84 fail=0，messages=80）
-  [PASS] WS 探针：check 通过 84/84（失败率 0% <= 5%）
+[ws] judgment summary (checks rate=1.0000, pass=84 fail=0, messages=80)
+  [PASS] WS probe: checks passed 84/84 (fail rate 0% <= 5%)
 ```
 
-### 6.3 run.sh 全链路
+### 6.3 run.sh full chain
 
 ```
-==> 汇总
-  通过 4 项 / 判定失败 0 项 / 环境错误 0 项 / 未验证 0 项
-  —— 通过 ——
-     * MQTT 压测
-     * k6 thresholds（MQTT）
-     * WS 探针
-     * k6 thresholds（WS）
-  结论：全部通过
+==> summary
+  passed 4 / judgment failed 0 / env errors 0 / unverified 0
+  —— passed ——
+     * MQTT load
+     * k6 thresholds (MQTT)
+     * WS probe
+     * k6 thresholds (WS)
+  conclusion: all passed
 ```
 
 ---
 
-## 7. 断言有效性（**反向验证**，本仓纪律要求）
+## 7. Assertion validity (**reverse verification**, required by repo discipline)
 
-写测试不算数，要证明「它真的会红」。三组反向验证实际跑过：
+Writing a test doesn't count; you must prove "it really goes red". Three reverse-verification scenarios were actually run:
 
-| 场景 | 构造 | 结果 |
+| Scenario | Construct | Result |
 |---|---|---|
-| **坏 WS 服务端** | snapshot 只发 50 台 + `status_code`/`battery_pct` 字符串化 | `checks rate=0.6000（3 pass / 2 fail）`，**k6 退出码 99** |
-| **无 token** | `WS_TOKEN=` 留空（订单 15 起会 close 1008） | `setup()` 抛错，**退出码 107**，只打印 1 条说明（不刷屏） |
-| **broker 未起** | 停掉 broker 后 `run.sh --mqtt-only` | 归为**环境错误**，**退出码 2**，MQTT 项标「未验证」 |
+| **Bad WS server** | snapshot sends only 50 units + stringifies `status_code`/`battery_pct` | `checks rate=0.6000 (3 pass / 2 fail)`, **k6 exit code 99** |
+| **No token** | `WS_TOKEN=` left empty (Order 15 onward closes 1008) | `setup()` throws, **exit code 107**, prints only 1 explanation (no log spam) |
+| **Broker not up** | stop broker then `run.sh --mqtt-only` | classified as **env error**, **exit code 2**, MQTT item marked "unverified" |
 
-### 反向验证暴露并修掉的**两个真缺陷**
+### Two real defects exposed and fixed by reverse verification
 
-1. **只写 `check()` 不接 `thresholds` → 红着判通过。**
-   首版 `ws_watch.js` 只声明了 `ws_up` / `ws_telemetry_fields_ok` 两条阈值，
-   `checks` 没接。实测：在「50 台 + 字符串字段」的坏服务端上，k6 仍打印
-   `ws_probe ✓` 并 **以退出码 0 结束**。补上 `checks: ['rate>=…']` 后才变 99。
-2. **被拒重连风暴把 summary 冲爆。**
-   把 `check()` 放在 `socket.on('error')` / `on('close')` 里，会在 k6 自动重连时
-   **反复触发**：实测一次 2s 会话炸出 **43647 条 fail**，通过率被稀释到 0.25，
-   摘要完全失去意义。修法：收尾断言只在**首次 close** 结账一次（`settled` 标志），
-   且「未带 token」改在 `setup()` 里中止，不进风暴。
+1. **Writing `check()` without `thresholds` → judges red as pass.**
+   The first version of `ws_watch.js` only declared `ws_up` / `ws_telemetry_fields_ok` thresholds; `checks` was not hooked. Measured: on the bad server ("50 units + stringified fields"), k6 still printed `ws_probe ✓` and **ended with exit code 0**. Only after adding `checks: ['rate>=…']` did it become 99.
+2. **Rejection-triggered reconnect storm floods the summary.**
+   Putting `check()` inside `socket.on('error')` / `on('close')` re-triggers it on every k6 auto-reconnect: measured one 2s session blew up to **43647 fails**, diluting the pass rate to 0.25 and making the summary meaningless. Fix: final assertions settle exactly once on the **first close** (`settled` flag), and "no token" aborts in `setup()` instead of entering the storm.
 
 ---
 
-## 8. 未验证 / 边界（诚实标注）
+## 8. Unverified / boundaries (honestly labeled)
 
-| 项 | 为什么未验证 | 需要什么才能验证 |
+| Item | Why unverified | What's needed to verify |
 |---|---|---|
-| **真实 EMQX broker** | 本机无 Docker，压测用本地 `aedes` 起的 MQTT 3.1.1 broker | `docker compose -f infra/docker-compose.yml up -d` 后重跑，并核对 `emqx ctl` 的连接数/丢弃指标 |
-| **真实后端 `/ws/robots`** | 同上，WS 用按契约复刻的替身服务端 | 起 `backend_ingestion` 并取到真 JWT（`WS_TOKEN`） |
-| **端到端落库行数 ≈ 30000** | 需 TimescaleDB 真实 SQL 计数 | 这是 `test_integration.sh` 的职责（`R-08 F3`），本目录不重复 |
-| **前端渲染 ≈10 次/秒（R-08 E4）** | 100ms 节流是**浏览器内**行为 | 需 Playwright/真浏览器计数；`ws_watch.js` 只判**服务端→客户端投递** |
-| **`xk6-mqtt` 与 EMQX 5.6 的协议细节** | 未对真 EMQX 跑过 | 同上起 EMQX 后重跑 |
-| **publish 延迟的「真值」** | 本项测的是**写入 socket** 的同步代价（qos=0） | R-07 §3 的 P95<200ms 是**落库批耗时**，口径不同，勿混用 |
+| **Real EMQX broker** | No Docker locally; load test used a local `aedes` MQTT 3.1.1 broker | Run after `docker compose -f infra/docker-compose.yml up -d`, and check EMQX's connection-count / dropped metrics via `emqx ctl` |
+| **Real backend `/ws/robots`** | Same as above; WS used a reproduced substitute server | Bring up `backend_ingestion` and obtain a real JWT (`WS_TOKEN`) |
+| **End-to-end landing rows ≈ 30000** | Needs real TimescaleDB SQL counting | This is `test_integration.sh`'s job (`R-08 F3`), not repeated here |
+| **Frontend render ≈10 times/sec (R-08 E4)** | 100ms throttle is **browser-internal** behavior | Needs Playwright / real browser counting; `ws_watch.js` only judges **server→client delivery** |
+| **`xk6-mqtt` vs EMQX 5.6 protocol details** | Never run against real EMQX | Same as above — bring up EMQX then re-run |
+| **The "truth" of publish latency** | This item measures the synchronous cost of **writing to the socket** (qos=0) | R-07 §3's P95<200ms is the **batch landing cost**, different scope, don't mix them |
 
-⚠️ 另外两点口径提醒：
+Note: two more scope reminders:
 
-- **`noConnectionReuse` / 连接模型**：每个 VU 建一条 MQTT 连接。100 VU = 100 连接。
-  把 `ROBOTS` 调到上千前，先确认 broker 的 `max_connections`。
-- **发布时机语义**：`client.publish()` 是同步版（`mqtt/client_publish.go:22`，
-  内部 `token.Wait()`），故 `pub_latency_ms` 是「写入 socket + 等 token 完成」的耗时，
-  不含 broker 落盘，也不含后端消费。
+- **`noConnectionReuse` / connection model**: each VU opens one MQTT connection. 100 VU = 100 connections. Before dialing `ROBOTS` into the thousands, confirm the broker's `max_connections`.
+- **Publish timing semantics**: `client.publish()` is the synchronous version (`mqtt/client_publish.go:22`, internal `token.Wait()`), so `pub_latency_ms` is the cost of "write to socket + wait for token completion", excluding broker persistence and backend consumption.
 
 ---
 
-## 9. 与其他测试的关系（别重复跑）
+## 9. Relationship with other tests (don't duplicate runs)
 
-| 层 | 在哪 | 判什么 |
+| Layer | Where | What it judges |
 |---|---|---|
-| payload 结构契约 | `tests/load/test_payload_contract.py` | `payload.js` ↔ `mock_fleet.py` 逐字段 |
-| **压测判定** | **本目录** | 连接成功率 / 发布延迟 / WS 投递率（`R-07`、`R-08 C1-C5`） |
-| 端到端落库 | `test_integration.sh` | SQL 真值计数 ≈ 30000 行（`R-08 F3`） |
-| schema 契约 | `tests/test_schema_contract.py` | `init.sql` ↔ ORM |
-| 前端行为 | `frontend_dashboard` 的类型/构建检查 | 节流、渲染次数（`R-08 E1-E10`） |
+| payload structure contract | `tests/load/test_payload_contract.py` | `payload.js` ↔ `mock_fleet.py` field-by-field |
+| **Load judgment** | **This directory** | Connection success rate / publish latency / WS delivery rate (`R-07`, `R-08 C1-C5`) |
+| End-to-end landing | `test_integration.sh` | SQL truth count ≈ 30000 rows (`R-08 F3`) |
+| schema contract | `tests/test_schema_contract.py` | `init.sql` ↔ ORM |
+| Frontend behavior | `frontend_dashboard`'s type / build checks | throttle, render count (`R-08 E1-E10`) |

@@ -1,50 +1,50 @@
-# pgBackRest 灾备边车镜像
+# pgBackRest disaster-recovery sidecar image
 #
-# 为什么自建而不是拉现成镜像：
-#   1. 官方**没有**发布 `pgbackrest/pgbackrest` 镜像 —— 实测
-#      2026-10-11 查询 Docker Hub，`pgbackrest/*` 下只有 `test` 与 `doc` 两个仓库，
-#      `pgbackrest/pgbackrest` 返回 {"message":"object not found"}。
-#      （`external/SOURCES.md:325` 先前记的镜像名是**错的**，已在本次一并纠正。）
-#   2. 第三方镜像（woblerr/pgbackrest 等）内部构建不可审计，不符合 AGENTS.md「不裸信镜像名」。
-#   3. 官方唯一推荐的安装路径就是 **PGDG 包仓库**（apt.postgresql.org）：
+# Why build our own rather than pull an existing image:
+#   1. The official project does **not** publish a `pgbackrest/pgbackrest` image — verified
+#      2026-10-11 query of Docker Hub: under `pgbackrest/*` only the `test` and `doc` repos exist,
+#      `pgbackrest/pgbackrest` returns {"message":"object not found"}.
+#      (The image name recorded in `external/SOURCES.md:325` earlier was **wrong**; corrected this time.)
+#   2. Third-party images (woblerr/pgbackrest etc.) have unauditable internal builds, violating AGENTS.md "don't trust bare image names".
+#   3. The official sole recommended install path is the **PGDG package repo** (apt.postgresql.org):
 #      external/pgbackrest/doc/xml/user-guide.xml:586
 #        "Ubuntu packages for pgBackRest are available at apt.postgresql.org"
-#      安装方式实证（同文件 :343-344）：先装 postgresql-common，再跑 PGDG 仓库脚本。
+#      Install method verified (same file :343-344): install postgresql-common first, then run the PGDG repo script.
 #
-# 基础镜像：官方 Debian slim（非 postgres 镜像）。
-# 为什么不用 postgres:16 —— 该镜像的 ENTRYPOINT 是 docker-entrypoint.sh，
-# 会试图初始化一个 PG 集群，与「纯备份客户端」的用途冲突（我们不需要本机 PG）。
-# pgbackrest 只需 libpq 等运行时库，故用 debian:bookworm-slim + PGDG 包。
-# PG 大版本一致性由「连的是 PG16 + pgbackrest 客户端协议」保证，不需要本机装 PG。
+# Base image: official Debian slim (not a postgres image).
+# Why not postgres:16 — that image's ENTRYPOINT is docker-entrypoint.sh, which would try to
+#   initialize a PG cluster, conflicting with the "pure backup client" purpose (we don't need a local PG).
+# pgbackrest only needs runtime libs like libpq, so use debian:bookworm-slim + the PGDG package.
+# PG major-version consistency is guaranteed by "connecting to PG16 + pgbackrest client protocol"; no local PG needed.
 FROM debian:bookworm-slim
 
-# 官方安装路径：PGDG 仓库（user-guide.xml:343-344 的 pgdg 脚本）
-# jq：verify.sh / postgres-exporter 自定义查询都要解析 `info --output=json`。
-# 官方 user-guide.xml 的「Using jq」段即推荐 jq 提取该 JSON，故随镜像装上，
-# 避免运行期才发现工具缺失。
+# Official install path: PGDG repo (the pgdg script from user-guide.xml:343-344)
+# jq: verify.sh / postgres-exporter custom queries both parse `info --output=json`.
+# The official user-guide.xml "Using jq" section recommends jq for extracting that JSON, so install it in the image
+#   to avoid discovering a missing tool at runtime.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends postgresql-common ca-certificates gnupg curl lsb-release \
  && /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y \
  && apt-get install -y --no-install-recommends pgbackrest jq \
- # 镜像内验证二进制存在，否则构建即失败（不让「配置了但没装」的假成功溜过去）
+ # Verify the binary exists in the image at build time, otherwise the build fails (don't let "configured but not installed" fake success slip through)
  && pgbackrest version \
  && jq --version \
  && rm -rf /var/lib/apt/lists/*
 
-# 官方要求的目录布局（user-guide.xml:626-637）：日志目录 / 配置目录
-# 注：mkdir -p -m 对中间目录不生效（hadolint SC2174），故分两步先建再改权限
-# postgres 用户：postgresql-common 通常会建；此处显式兜底保证 USER 指令可解析
+# Directory layout required by the official docs (user-guide.xml:626-637): log dir / config dir
+# Note: mkdir -p -m does not apply to intermediate dirs (hadolint SC2174), so create then chmod in two steps
+# postgres user: usually created by postgresql-common; explicitly fall back here to ensure the USER instruction resolves
 RUN id postgres >/dev/null 2>&1 || useradd --system --create-home --shell /bin/bash postgres \
  && mkdir -p /var/log/pgbackrest /etc/pgbackrest /var/lib/pgbackrest \
  && chmod 770 /var/log/pgbackrest
 
-# 配置**不 COPY 进镜像** —— 由 compose 只读挂载（见 docker-compose.dr.yml）。
-# 好处：改配置不必重建镜像；且镜像里不含任何口令注入点，降低误烘焙密钥的风险。
+# Config is **not COPYed into the image** — mounted read-only by compose (see docker-compose.dr.yml).
+# Benefit: changing config doesn't require rebuilding the image; and the image contains no passphrase injection point, reducing the risk of baking secrets in by mistake.
 RUN chown postgres:postgres /etc/pgbackrest /var/log/pgbackrest /var/lib/pgbackrest
 
-# 以 postgres 身份运行（pgbackrest 不允许以 root 跑非 restore 命令，
-# 实证：external/pgbackrest/doc/xml/reference.xml:164）
+# Run as postgres (pgbackrest refuses to run non-restore commands as root, verified:
+#   external/pgbackrest/doc/xml/reference.xml:164)
 USER postgres
 
-# 默认空转；实际命令由 compose 的 command 覆盖（见 docker-compose.dr.yml）
+# Idle by default; actual command overridden by compose's command (see docker-compose.dr.yml)
 CMD ["sleep", "infinity"]

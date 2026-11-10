@@ -1,106 +1,78 @@
-# e2e：端到端 30,000 行落库验证（ISSUE #60）
+# e2e: End-to-end 30,000-row landing verification (ISSUE #60)
 
-把「100 台 × 10Hz → MQTT → 后端批量落库 → 真实 TimescaleDB ≥ 30,000 行且无 PK 冲突丢行」
-固化成一条可重复运行的命令。此前这条链路只在**单测口径**验证过，
-`STATUS.md` §九与 `docs/requirements/R-09-database-integration.md` §6 都挂着「仍未验证」。
+Pin the chain "100 units × 10Hz → MQTT → backend batch landing → real TimescaleDB ≥ 30,000 rows with no PK-conflict row loss" into a single repeatable command. Previously this chain was only verified at the **unit-test scope**; both `STATUS.md` §9 and `docs/requirements/R-09-database-integration.md` §6 still carried the note "still unverified".
 
-## 文件
+## Files
 
-| 文件 | 作用 |
+| File | Role |
 | :--- | :--- |
-| `docker-compose.e2e.yml` | 一次性栈：`emqx:5.6` + `timescaledb:2.13.1-pg16` + `redis:7.2` + `backend` + `mock_fleet`（`stress` profile） |
-| `Dockerfile.mock_fleet` | 模拟器镜像（`simulator/` 原本只有裸跑，没有 Dockerfile） |
-| `test_e2e_30k.py` | 驱动 + 断言 + 取证报告；无 Docker 时 **skip（退出码 3）**，绝不红 |
+| `docker-compose.e2e.yml` | One-shot stack: `emqx:5.6` + `timescaledb:2.13.1-pg16` + `redis:7.2` + `backend` + `mock_fleet` (`stress` profile) |
+| `Dockerfile.mock_fleet` | Simulator image (`simulator/` originally only had bare-run, no Dockerfile) |
+| `test_e2e_30k.py` | Driver + assertions + forensic report; without Docker, **skip (exit code 3)**, never red |
 
-## CI 里怎么跑
+## How to run in CI
 
-`.cnb.yml` 的 `e2e-30k-landing` pipeline（PR / push main / 每日 crontab 三触发）挂
-`services: [docker]`，并**显式钉 `docker.image: python:3.11-slim`**。
+`.cnb.yml`'s `e2e-30k-landing` pipeline (PR / push main / daily crontab — three triggers) attaches `services: [docker]` and **explicitly pins `docker.image: python:3.11-slim`**.
 
-为什么必须钉镜像：首次实跑时没写 `image`，缺省镜像 `cnbcool/default-build-env` **没有 python3**，
-日志里 docker 探测已经通过，紧接着 `sh: line 21: python3: command not found`（返回码 127）——
-job 变红但和代码毫无关系。脚本里也做了两层探测（docker → python），
-任一层缺失都打印【E2E SKIP】+ 原因 + 解法并以 0 退出，绝不把环境问题伪装成回归。
+Why the image must be pinned: on the first real run, `image` was not written; the default image `cnbcool/default-build-env` **ships no python3**, so after the docker probe had already passed, `sh: line 21: python3: command not found` (return code 127) appeared — the job went red but had nothing to do with the code. The script also does two-layer probing (docker → python); if either layer is missing it prints [E2E SKIP]+ reason + fix and exits 0, never masking an environment issue as a regression.
 
-### 三处触发必须共用同一份声明（订单 34 归因）
+### The three triggers must share one declaration (Order 34 attribution)
 
-订单 32 把 e2e stage 加长之后，push / pull_request 两块跟着改了，**`"crontab: 0 3 * * *"` 那块没改**：
-它当时只写了 `services/env/stages`，**漏了 `docker.image`**。于是同一份 stages 在 crontab 触发下
-跑在缺省镜像里，`python` 探测那层直接命中 → 打一句【E2E SKIP】→ `exit 0` → 构建整体绿，
-但**一行数据都没落**。同一 sha（`68b7b8b`）的两个构建是对照组：
+After Order 32 lengthened the e2e stage, the push / pull_request blocks were updated, **but the `"crontab: 0 3 * * *"` block was not changed**: it only wrote `services/env/stages` and **omitted `docker.image`**. So the same stages ran under the default image on the crontab trigger, the `python` probe layer hit immediately → printed [E2E SKIP] → `exit 0` → the whole build stayed green, but **not a single row was landed**. The two builds of the same sha (`68b7b8b`) are the control group:
 
-- push `cnb-152-1k4ohjp3k-002` prepare：`docker pull python:3.11-slim`，e2e stage 打印 `python 可用：Python 3.11.17`
-- crontab `cnb-st7-1k4onp4ok-001` prepare：`docker pull cnbcool/default-build-env`，e2e stage 打印【E2E SKIP】
+- push `cnb-152-1k4ohjp3k-002` prepare: `docker pull python:3.11-slim`, e2e stage prints `python available: Python 3.11.17`
+- crontab `cnb-st7-1k4onp4ok-001` prepare: `docker pull cnbcool/default-build-env`, e2e stage prints [E2E SKIP]
 
-现状：`docker.image` 提成 YAML 锚点 `&e2e-image`，三处 `docker: *e2e-image` 引用同一个值 ——
-一致性由 YAML 层保证，不再靠人记得改三遍。
+Current state: `docker.image` is extracted into the YAML anchor `&e2e-image`, and the three `docker: *e2e-image` reference the same value — consistency is guaranteed at the YAML layer, no longer relying on a human remembering to change it three times.
 
-### SKIP 必须打横幅（订单 34 T2）
+### SKIP must print a banner (Order 34 T2)
 
-任何「没实跑」的退出路径都先调用 `skip_banner`，打印固定串：
+Any exit path that "did not really run" first calls `skip_banner`, printing a fixed string:
 
 ```
 ================================================================
-【E2E SKIPPED —— 本构建未实跑 30k 落库】
-原因：<具体原因>
-本构建的 e2e 为绿色但**未产生任何落库数字**，不可当作 ISSUE #60 的证据。
+[E2E SKIPPED -- this build did not actually run the 30k landing]
+Reason: <specific reason>
+This build's e2e is green but **produced no landing numbers**, and must not be treated as evidence for ISSUE #60.
 ================================================================
 ```
 
-之前 SKIP 只打一行 `【E2E SKIP】...`，混在几百行日志里与刷屏无异；CI 列表上只看得到「绿」。
+Previously SKIP only printed a single line `[E2E SKIP]...`, lost among hundreds of log lines, indistinguishable from noise; on the CI list you only saw "green".
 
-### 命名探针原用 `curl`，在 `python:3.11-slim` 里恒不可达（订单 34 T2）
+### The naming probe originally used `curl`, unreachable in `python:3.11-slim` (Order 34 T2)
 
-`python:3.11-slim` 是 Debian slim，**不带 curl/wget**。而订单 32 那段探测写的是
-`curl -sf http://127.0.0.1:18000/healthz` / `/metrics` —— 于是无论栈起没起都判「不可达」，
-**这道门禁从挂上去那天起一次都没真跑过**（`cnb-sfb-1k4oh9va6-002`、`cnb-152-1k4ohjp3k-002`
-的 e2e stage 日志里都是「【E2E SKIP】订单 32 命名探针：/metrics 在 180s 内不可达」）。
-现改为调用 `$PY -c "import urllib.request; ..."`（本 job 的运行时本体），不引入新依赖。
+`python:3.11-slim` is Debian slim and **ships no curl/wget**. But the probe written in Order 32 used `curl -sf http://127.0.0.1:18000/healthz` / `/metrics` — so regardless of whether the stack came up, it judged "unreachable", **and this gate never actually ran from the day it was attached** (`cnb-sfb-1k4oh9va6-002`, `cnb-152-1k4ohjp3k-002`'s e2e stage logs both show "[E2E SKIP]Order 32 naming probe: /metrics unreachable within 180s"). It is now changed to call `$PY -c "import urllib.request; ..."` (this job's own runtime), introducing no new dependency.
 
-### 命名探针的两类判据：无 label / 带 label（订单 34）
+### The naming probe's two classes of judgment: no-label / with-label (Order 34)
 
-修完 `curl` 之后，探针第一次真跑就红了：`/metrics` 缺少 `robot_backend_batch_flushes_total`。
-**这不是命名回归** —— 该指标在 `backend_ingestion/app/metrics.py:77` 注册得好好的，缺的是**样本行**：
-prometheus_client 对带 label 的 Counter **惰性注册**，序列要等第一次 `labels(reason=...).inc()` 才诞生。
-而本 stage 是 `up -d` 起完栈就探、不起 `mock_fleet`，backend 从未刷过批。
+After fixing `curl`, the probe turned red on its first real run: `/metrics` was missing `robot_backend_batch_flushes_total`. **This is not a naming regression** — that metric is registered fine at `backend_ingestion/app/metrics.py:77`; what's missing is the **sample line**: prometheus_client lazily registers Counters with labels, and the series is only born on the first `labels(reason=...).inc()`. And this stage brings up the stack with `up -d` and probes immediately, without starting `mock_fleet`, so the backend never flushed a batch.
 
-两种修法都成立，边界不同：
+Both fixes are valid, with different boundaries:
 
-- **探针侧（本单采用）**：把判据拆成 `REQUIRED_BACKEND_METRICS`（无 label，随时应在）与
-  `LABELED_BACKEND_METRICS`（有事件才导出）。零流量的独立 `--metric-naming-check` 传
-  `allow_unemitted=True`，缺席**打印但不判红**；30k 落库路径（压测之后）保持默认 `False`，
-  要求全量在位 —— 对它的要求**不打折**。
-- **服务侧（另一修法，本单未采用）**：在 `/metrics` 暴露前对两个恒定枚举 label 各 `inc(0)` 预热，
-  让带 label 的 Counter「从第一个 scrape 起」就有 0 值行。这能同时消灭「指标不存在」与
-  「指标恒为 0」在面板上无法区分的隐患，**是一次真实的可观测性改进** ——
-  但它要改 `backend_ingestion/app/metrics.py`，落在这张单的文件白名单之外
-  （白名单：`.cnb.yml` / `tests/e2e/**` / `STATUS.md` / `docs/**`），故不适合塞进本 PR，
-  应另开一单（订单 32 的后续）。
+- **Probe side (adopted in this order)**: split the judgment into `REQUIRED_BACKEND_METRICS` (no-label, should always be present) and `LABELED_BACKEND_METRICS` (only exported when an event occurs). For the zero-traffic standalone `--metric-naming-check`, pass `allow_unemitted=True`: absence is **printed but not judged red**; the 30k landing path (after the load test) keeps the default `False`, requiring everything in place — **no discount** on its requirements.
+- **Service side (the other fix, not adopted in this order)**: before exposing `/metrics`, `inc(0)` pre-warm each constant enum label, so the labeled Counter has a 0-value line "from the first scrape". This also eliminates the "metric doesn't exist" vs "metric is always 0" ambiguity on the panel — **a genuine observability improvement** — but it modifies `backend_ingestion/app/metrics.py`, which falls outside this order's file whitelist (whitelist: `.cnb.yml` / `tests/e2e/**` / `STATUS.md` / `docs/**`), so it doesn't belong in this PR; it should be a separate order (follow-up to Order 32).
 
-两者不冲突：服务侧预热后 `allow_unemitted` 分支不会被触发。本单选探针侧，纯粹是**白名单约束**。
+The two don't conflict: after the service-side warm-up, the `allow_unemitted` branch won't be triggered. This order picks the probe side, purely due to the **whitelist constraint**.
 
-### shell 会在非 0 后终止整段脚本（订单 34 T2）
+### The shell aborts the whole script after a non-zero (Order 34 T2)
 
-实测（`cnb-dr0-1k4pbtmr7-002`）：命名探针返回 1 之后，脚本**没有**继续往下跑 30k，
-而是直接 `Finished, code: 1, duration: 1m 1s`。即本 stage 的 shell 带 `set -e` 语义，
-不是 `set -uo pipefail` 能关掉的。故所有可能非 0 的命令都就地吞退出码
-（`cmd || rc=$?`），把判定收拢到脚本末尾显式 `exit`。
+Measured (`cnb-dr0-1k4pbtmr7-002`): after the naming probe returned 1, the script **did not** continue to run 30k, but directly `Finished, code: 1, duration: 1m 1s`. That is, this stage's shell has `set -e` semantics, not something `set -uo pipefail` can turn off. Hence every command that might be non-zero swallows its exit code locally (`cmd || rc=$?`), consolidating the judgment to an explicit `exit` at the end of the script.
 
-## 跑法
+## How to run
 
 ```bash
 # pytest
 python -m pytest tests/e2e/test_e2e_30k.py -v -s
 
-# 或裸跑（0=通过 1=断言失败 3=环境不具备）
+# or bare-run (0=pass 1=assertion failure 3=environment not ready)
 python tests/e2e/test_e2e_30k.py
 ```
 
-手工分步（排查时用）：
+Manual step-by-step (for troubleshooting):
 
 ```bash
 docker compose -f tests/e2e/docker-compose.e2e.yml up -d --build
-# 等 /healthz 的 db=up
+# wait for /healthz db=up
 FLEET_DURATION=40 docker compose -f tests/e2e/docker-compose.e2e.yml \
   --profile stress run --rm mock_fleet
 docker compose -f tests/e2e/docker-compose.e2e.yml exec -T timescaledb \
@@ -108,114 +80,91 @@ docker compose -f tests/e2e/docker-compose.e2e.yml exec -T timescaledb \
 docker compose -f tests/e2e/docker-compose.e2e.yml down -v
 ```
 
-## 环境变量
+## Environment variables
 
-| 变量 | 默认 | 说明 |
+| Variable | Default | Description |
 | :--- | :--- | :--- |
-| `E2E_DURATION` | `40` | 压测秒数（40s × 100 台 × 10Hz ≈ 40,000 帧） |
-| `E2E_ROBOTS` | `100` | 台数 |
-| `E2E_MIN_ROWS` | `30000` | 行数阈值（ISSUE #60 口径） |
-| `E2E_UP_TIMEOUT` | `300` | 起栈 + 拉/构建镜像的超时（秒） |
-| `E2E_KEEP` | — | `1` 则结束后保留栈，便于人工排查 |
-| `E2E_COMPOSE` | `tests/e2e/docker-compose.e2e.yml` | 覆盖 compose 文件路径 |
+| `E2E_DURATION` | `40` | Load duration in seconds (40s × 100 units × 10Hz ≈ 40,000 frames) |
+| `E2E_ROBOTS` | `100` | Number of units |
+| `E2E_MIN_ROWS` | `30000` | Row threshold (ISSUE #60 scope) |
+| `E2E_UP_TIMEOUT` | `300` | Timeout for bringing up the stack + pulling/building images (seconds) |
+| `E2E_KEEP` | — | `1` keeps the stack after finishing, for manual troubleshooting |
+| `E2E_COMPOSE` | `tests/e2e/docker-compose.e2e.yml` | Override the compose file path |
 
-`E2E_ROBOTS` / `E2E_DURATION` 会被换算成 `FLEET_MIN_SENT = 台数 × 10 × 秒数 × 0.5`
-注入 `mock_fleet`（见下条）。
+`E2E_ROBOTS` / `E2E_DURATION` are converted to `FLEET_MIN_SENT = units × 10 × seconds × 0.5` and injected into `mock_fleet` (see next item).
 
-## 断言口径（为什么这么写）
+## Assertion scope (why written this way)
 
-1. **行数用 `>=`，不用 `==`**：网络/调度抖动允许向下浮动（ISSUE #60 明令）。
-2. **「无 PK 冲突丢行」两侧同时取证**，缺一不可：
-   - 库内：`GROUP BY time, robot_id HAVING count(*)>1` 必须为 0，且 PK 形状是 `(time, robot_id)`；
-   - 后端：`rows_written == rows_submitted`、`rows_skipped == 0`、`rejected == 0`。
-     `rows_skipped` 是 `ON CONFLICT DO NOTHING` **静默丢行**的唯一计数器
-     （`backend_ingestion/app/services/batch_writer.py:166-174`）。
-   只查库拿不到「该落的没落」，只信自报拿不到「库内事实」。
-3. **必须先真 TimescaleDB**：断言里先核 `is_hypertable=1` 与 `timescaledb` 扩展版本，
-   防止误连到普通 PostgreSQL 时断言假绿。mock 替身被 ISSUE #60 点名禁止。
-4. **等 `/healthz` 的 `db=up` 再开跑**：`/healthz` 是存活探针语义，依赖不可达时仍返回 200，
-   只判端口会提前开跑；结束时等到 `rows_submitted` 连续两次不变才算落定（队列排空）。
-5. **压测阶段自带发送量下限**：`mock_fleet --min-sent`（由脚本按 `台数×10×秒数×0.5` 注入）。
-   只有 `--duration` 时，模拟器**跑满时长就退 0**，发不出去也不吭声：
-   `docker compose run --rm` 不会清掉 compose 里为同一变量设的默认值，
-   台数被静默覆盖、broker 写错、发布侧持续报错，都会一路苟到断言阶段甚至被阈值放过。
-   加了下限，失败发生在**离因最近的地方**，日志直接点名原因。
+1. **Use `>=` for row count, not `==`**: network/scheduling jitter allows a downward float (per ISSUE #60).
+2. **"No PK-conflict row loss" requires evidence on both sides, neither alone suffices**:
+   - In-DB: `GROUP BY time, robot_id HAVING count(*)>1` must be 0, and PK shape is `(time, robot_id)`;
+   - Backend: `rows_written == rows_submitted`, `rows_skipped == 0`, `rejected == 0`. `rows_skipped` is the only counter for **silent row loss** from `ON CONFLICT DO NOTHING` (`backend_ingestion/app/services/batch_writer.py:166-174`).
+   Querying the DB alone can't catch "should-have-landed-but-didn't"; trusting self-reported numbers alone can't establish "in-DB facts".
+3. **Must first be a real TimescaleDB**: the assertion first checks `is_hypertable=1` and the `timescaledb` extension version, to prevent a false-green when accidentally connected to a plain PostgreSQL. Mock substitutes are explicitly forbidden by ISSUE #60.
+4. **Wait for `/healthz` with `db=up` before starting**: `/healthz` is a liveness-probe semantic; it still returns 200 when dependencies are unreachable, so judging only by port would start early; at the end, wait until `rows_submitted` is unchanged twice in a row to consider landing settled (queue drained).
+5. **The load stage carries its own send lower bound**: `mock_fleet --min-sent` (injected by the script as `units×10×seconds×0.5`). With only `--duration`, the simulator **exits 0 when it runs its full time**, and won't complain if it couldn't send: `docker compose run --rm` doesn't clear the default value set for the same variable in compose, so a silently-overridden unit count, a wrong broker, or a continuously-erroring publish side can all coast to the assertion stage or even slip past the threshold. Adding a lower bound makes failures happen **at the point closest to the cause**, with the log naming the reason directly.
 
-## 订单 32：指标命名反例探针（`--metric-naming-check`）
+## Order 32: metric-naming counter-example probe (`--metric-naming-check`)
 
-`test_e2e_30k.py` 除落库断言外，还对**真实 `/metrics` 的原始字节**断言指标命名：
+Besides the landing assertions, `test_e2e_30k.py` also asserts metric naming against the **raw bytes of the real `/metrics`**:
 
 ```bash
-# 栈已在跑（含 backend 的 18000→8000 映射）时：
+# when the stack is running (with backend's 18000→8000 mapping):
 python tests/e2e/test_e2e_30k.py --metric-naming-check
-# 0=通过 1=命名不合口径（red） 3=环境不具备（skip）
+# 0=pass 1=naming out of scope (red) 3=environment not ready (skip)
 ```
 
-断言两件事：6 个 `robot_monitor_*` 旧名 0 命中、6 个 `robot_backend_*` 规范名在位。
-为什么必须是运行时探针而不是单测：`backend_ingestion/tests/test_observability.py`
-跑的是 `metrics.render()`（进程内自带 registry）+ `TestClient`，
-**它证明不了「跑起来的那个进程吐出的字节」** —— 而旧前缀恰恰是「多注册一个
-Collector 就复活」的东西。探针盯的是进程，所以它必须在栈里、对着真端口。
+It asserts two things: 0 hits for the 6 `robot_monitor_*` legacy names, and all 6 `robot_backend_*` canonical names present. Why it must be a runtime probe rather than a unit test: `backend_ingestion/tests/test_observability.py` runs `metrics.render()` (in-process registry) + `TestClient`, **which cannot prove "the bytes the actually-running process emits"** — and the legacy prefix is exactly the kind of thing that "revives if you register one more Collector". The probe watches the process, so it must be in the stack, against the real port.
 
-细节（都是实测踩出来的）：
+Details (all learned from real runs):
 
-- 命中判据**逐指标族**而非逐名字面量：Histogram 没有 `name <value>` 裸样本行，
-  只有 `name_bucket{le=}` / `_count` / `_sum`。第一版按字面量等值匹配，
-  连正例都过不去 —— 那会造出一道「永远红」的假门禁。
-- 只认**指标行**（跳过 `#` 注释）：`metrics.py` 头注释里有意保留了旧名的迁移记录，
-  全文 `in` 断言会把迁移记录误判成违规。
-- 探针自身做了反例自检（见 PR 描述）：注入 `robot_monitor_ws_connections` 后必红。
+- The hit criterion is **per-metric-family**, not per-literal-name: a Histogram has no `name <value>` bare sample line, only `name_bucket{le=}` / `_count` / `_sum`. The first version matched literals by equality and couldn't even pass the positive case — that would have created a "permanently red" fake gate.
+- Only recognize **metric lines** (skip `#` comments): `metrics.py`'s header comment deliberately keeps the legacy-name migration records; a full-text `in` assertion would misjudge the migration records as violations.
+- The probe does its own negative self-check (see PR description): after injecting `robot_monitor_ws_connections`, it must go red.
 
-CI 里挂在 `e2e-30k-landing` stage 的**最前面**，自己 `up -d`（不带 stress profile）
-拿到活的 backend，断言完再 `down`。HTTP 探不到 → `[SKIP]` 并 exit 0；
-断言失败 → 退出码 1 → **stage 变红**（一个吞掉失败的门禁比没有门禁更糟）。
+In CI it is attached at the **very front** of the `e2e-30k-landing` stage, runs its own `up -d` (without the stress profile) to get a live backend, asserts, then `down`. HTTP unreachable → `[SKIP]` and exit 0; assertion failure → exit code 1 → **stage goes red** (a gate that swallows a failure is worse than no gate).
 
-## 实跑记录
+## Real run records
 
-### 2026-10-13 — 首次真实落库（订单 34 T3）
+### 2026-10-13 — First real landing (Order 34 T3)
 
-构建：PR **#111** 的 pull_request build **`cnb-vro-1k4pcqp07`**（pipeline `-002`，e2e stage **160.8s**，
-非 SKIP）。运行环境 `python:3.11-slim`（`python 可用：Python 3.11.17`）+ `services: [docker]`。
+Build: PR **#111**'s pull_request build **`cnb-vro-1k4pcqp07`** (pipeline `-002`, e2e stage **160.8s**, not SKIP). Runtime `python:3.11-slim` (`python available: Python 3.11.17`) + `services: [docker]`.
 
 ```
-== e2e 30k 落库验证（ISSUE #60）==
-docker 可用：Docker version 29.6.2, build dfc4efb
-python 可用：Python 3.11.17
-== 订单 32：指标命名反例探针 ==
-[e2e] 指标命名探针：带 label 指标尚未导出（本轮零流量，属预期）：['robot_backend_batch_flushes_total']
-[e2e] 指标命名探针通过：旧名前缀 0 命中，规范名 5 个在位
-订单 32 命名门禁通过：/metrics 旧名 0 命中，robot_backend_* 规范名全部在位。
-== 30k 落库主链路（本 job 的硬门槛产出）==
+== e2e 30k landing verification (ISSUE #60) ==
+docker available: Docker version 29.6.2, build dfc4efb
+python available: Python 3.11.17
+== Order 32: metric-naming counter-example probe ==
+[e2e] metric naming probe: labeled metric not yet exported (this round zero traffic, expected): ['robot_backend_batch_flushes_total']
+[e2e] metric naming probe passed: legacy-name prefix 0 hits, canonical name 5 present
+Order 32 naming gate passed: /metrics legacy-name 0 hits, robot_backend_* canonical names all present.
+== 30k landing main chain (this job's hard-threshold output) ==
 [e2e] compose = /workspace/tests/e2e/docker-compose.e2e.yml
-[e2e] 口径：100 台 × 10Hz × 40s，阈值 >= 30000 行
-[e2e] 栈已起（9.1s）
+[e2e] scope: 100 units × 10Hz × 40s, threshold >= 30000 rows
+[e2e] stack up (9.1s)
 [e2e] /healthz = {"status": "ok", "db": "up", ..., "rows_submitted": 0, "rows_written": 0, "rows_skipped": 0}
-[e2e] 压测前 robot_telemetry = 0
-[e2e] 压测发送量下限 = 20000 条（理论 40000 的一半）
-[e2e] 压测结束（52.5s）
-[e2e] /healthz（落定后）= {"status": "ok", "db": "up", "written": 39864, "flushes": 80,
+[e2e] pre-load robot_telemetry = 0
+[e2e] load send lower bound = 20000 (half of theoretical 40000)
+[e2e] load ended (52.5s)
+[e2e] /healthz (after settle) = {"status": "ok", "db": "up", "written": 39864, "flushes": 80,
       "retries": 0, "rejected": 0, "queue_depth": 0, "mqtt_received": 39864, "mqtt_dropped": 0,
       "rows_submitted": 39864, "rows_written": 39864, "rows_skipped": 0}
-[e2e] 库内取证：after=39864 delta=39864 dup_pk_groups=0 pk=(time,robot_id) hypertable=1 tsdb=2.13.1
-[e2e] 指标命名探针通过：旧名前缀 0 命中，规范名 6 个在位
-e2e stage 全部通过：30k 落库断言通过 + 命名门禁在位。
+[e2e] in-DB forensics: after=39864 delta=39864 dup_pk_groups=0 pk=(time,robot_id) hypertable=1 tsdb=2.13.1
+[e2e] metric naming probe passed: legacy-name prefix 0 hits, canonical name 6 present
+e2e stage all passed: 30k landing assertion passed + naming gate present.
 ```
 
-| 指标 | 实测值 | 口径 |
+| Metric | Measured | Scope |
 | :--- | :--- | :--- |
-| `robot_telemetry` 新增行数 | **39864** | `>= 30000`（ISSUE #60） |
-| 起栈 / 压测时长 | 9.1s / 52.5s | 40s 受控时长 |
-| PK 冲突组 `GROUP BY time, robot_id HAVING count(*)>1` | **0** | 必须为 0 |
-| `rows_submitted` / `rows_written` / `rows_skipped` | 39864 / 39864 / **0** | 三者相等，skipped=0 |
-| `rejected` / `mqtt_dropped` | 0 / 0 | 无坏行 |
-| hypertable / PK / TimescaleDB | 1 / `(time,robot_id)` / **2.13.1** | 真 TimescaleDB，非 PG 替身 |
+| `robot_telemetry` new rows | **39864** | `>= 30000` (ISSUE #60) |
+| Stack-up / load duration | 9.1s / 52.5s | 40s controlled duration |
+| PK-conflict groups `GROUP BY time, robot_id HAVING count(*)>1` | **0** | must be 0 |
+| `rows_submitted` / `rows_written` / `rows_skipped` | 39864 / 39864 / **0** | all equal, skipped=0 |
+| `rejected` / `mqtt_dropped` | 0 / 0 | no bad rows |
+| hypertable / PK / TimescaleDB | 1 / `(time,robot_id)` / **2.13.1** | real TimescaleDB, not PG substitute |
 
-**这是 ISSUE #60「端到端 30,000 行落库」的第一份真实数字**（此前 `STATUS.md` §五、
-`docs/requirements/R-09-database-integration.md` §6 一直挂着「未验证」）。
+**This is the first real number for ISSUE #60's "end-to-end 30,000-row landing"** (previously `STATUS.md` §5, `docs/requirements/R-09-database-integration.md` §6 had long carried "unverified").
 
-## 与 `test_integration.sh`（订单 06）的关系
+## Relationship with `test_integration.sh` (Order 06)
 
-`test_integration.sh` 在**宿主机裸跑**且**无 Docker 就整体退出**，没有 CI 分支。
-本目录是它的容器化补充：入口（模拟器）也进容器，栈可一键重建，
-并显式区分「环境不具备 → skip」与「断言失败 → red」。两者不替代对方：
-前者是人工联调脚本，后者是可进 CI 的用例。
+`test_integration.sh` runs **bare on the host** and **exits entirely without Docker**, with no CI branch. This directory is its containerized complement: the entry (simulator) also enters a container, the stack can be rebuilt with one command, and it explicitly distinguishes "environment not ready → skip" from "assertion failure → red". The two don't replace each other: the former is a manual integration script, the latter a CI-able test case.

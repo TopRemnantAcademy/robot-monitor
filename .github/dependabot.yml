@@ -14,7 +14,7 @@ updates:
     ignore:
       - update-types: ["version-update:semver-major"]
     groups:
-      # @testing-library 套件一起升，避免单包漂移导致的类型不匹配。
+      # Bump @testing-library suite together to avoid type mismatches from single-package drift.
       testing-library:
         patterns:
           - "@testing-library/*"
@@ -28,28 +28,28 @@ updates:
       - "dependencies"
     ignore:
       - update-types: ["version-update:semver-major"]
-      # 钉死：bcrypt 5.x 删掉 __about__，passlib 探测失败 -> fastapi-users 登录 500；
-      # setuptools>=81 移除 pkg_resources，passlib import 失败 -> uvicorn 起不来。
-      # 二者升级必须先迁移 fastapi-users 到 pwdlib（见 requirements.txt 注释）。
+      # Pinned: bcrypt 5.x removed __about__, passlib detection fails -> fastapi-users login 500;
+      # setuptools>=81 removed pkg_resources, passlib import fails -> uvicorn won't start.
+      # Upgrading either requires migrating fastapi-users to pwdlib first (see requirements.txt comment).
       - dependency-name: "bcrypt"
       - dependency-name: "setuptools"
-      # 0.x 大版本跳变须刻意升级（dependabot 的 semver-major 对 0.x 分类不稳，显式钉死）：
-      # fastapi 0.110->0.162、uvicorn 0.28->0.54 都含破坏性变更；fastapi-users 12->15
-      # 切换 passlib->pwdlib，需配套鉴权层迁移。三者均在 ROADMAP 里作为 dedicated PR。
+      # 0.x major jumps must be deliberate (dependabot's semver-major classification is unstable for 0.x, so pin explicitly):
+      # fastapi 0.110->0.162 and uvicorn 0.28->0.54 both contain breaking changes; fastapi-users 12->15
+      # switches passlib->pwdlib and needs companion auth-layer migration. All three are dedicated PRs in ROADMAP.
       - dependency-name: "fastapi"
       - dependency-name: "fastapi-users"
       - dependency-name: "uvicorn"
-      # sqlalchemy 2.0.28->2.1.x 是 2.0->2.1 功能版（移除部分长期 deprecated API）。
-      # 本仓用 modern 2.0 风格（Mapped/mapped_column/async），大概率兼容，但本环境未实测，
-      # 先钉死 2.0.28，待专项 PR 在 CI 实测通过后再升（见 ROADMAP 依赖策略）。
+      # sqlalchemy 2.0.28->2.1.x is a 2.0->2.1 feature release (removes some long-deprecated APIs).
+      # This repo uses modern 2.0 style (Mapped/mapped_column/async), likely compatible, but not verified in this env,
+      # so pin 2.0.28 first and upgrade after a dedicated PR passes CI (see ROADMAP dependency strategy).
       - dependency-name: "sqlalchemy"
     groups:
-      # OpenTelemetry 是协调发布：API/SDK(exporter/instrumentation) 必须同版本。
-      # 分开升必冲突（ResolutionImpossible），故归为一组，一次 PR 全升。
+      # OpenTelemetry is a coordinated release: API/SDK (exporter/instrumentation) must share a version.
+      # Upgrading separately always conflicts (ResolutionImpossible), so group them and bump all in one PR.
       opentelemetry:
         patterns:
           - "opentelemetry*"
-      # pydantic / pydantic-settings 必须同步升（且需与 alert_engine 对齐）。
+      # pydantic / pydantic-settings must be upgraded together (and kept aligned with alert_engine).
       pydantic:
         patterns:
           - "pydantic*"

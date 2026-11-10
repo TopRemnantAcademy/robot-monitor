@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# G-7 补充实证：给 AgentVerse 一个"能用的本地 LLM"（OpenAI 兼容假服务），
-# 看它是否就能产出遥测 —— 排除"只是因为没 API key 所以失败"的质疑。
+# G-7 supplementary evidence: give AgentVerse a "working local LLM" (OpenAI-compatible fake service),
+# to see whether it can then produce telemetry -- ruling out the objection "it only failed because there was no API key".
 #
-# 结论（实测）：即便 LLM 可用，agent.step() 返回的仍是聊天文本 Message，
-# 不含任何 mock_fleet 遥测字段。AgentVerse 与遥测契约是不同层。
+# Conclusion (verified): even with a working LLM, agent.step() still returns a chat-text Message,
+# containing no mock_fleet telemetry fields. AgentVerse and the telemetry contract are different layers.
 set -uo pipefail
 AV_ROOT="${AV_ROOT:-/tmp/agentverse_probe}"
-[ -d "$AV_ROOT/agentverse" ] || { echo "[SKIP] 未找到 $AV_ROOT/agentverse"; exit 2; }
+[ -d "$AV_ROOT/agentverse" ] || { echo "[SKIP] $AV_ROOT/agentverse not found"; exit 2; }
 
 cat > /tmp/_g7_fake_openai.py <<'PY'
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -26,7 +26,7 @@ HTTPServer(("127.0.0.1", 8899), H).serve_forever()
 PY
 python3 /tmp/_g7_fake_openai.py & FAKE_PID=$!
 sleep 1
-echo "=== 本地 OpenAI 兼容假服务已起 (127.0.0.1:8899) ==="
+echo "=== local OpenAI-compatible fake service started (127.0.0.1:8899) ==="
 
 cd "$AV_ROOT"
 OPENAI_API_KEY=sk-local-fake OPENAI_BASE_URL=http://127.0.0.1:8899/v1 python3 - <<'PY'
@@ -34,7 +34,7 @@ import sys, asyncio, json, os
 sys.path.insert(0, os.getcwd())
 import logging, io, contextlib
 for n in ("agentverse", "openai", "httpx"): logging.getLogger(n).setLevel(logging.CRITICAL)
-# AgentVerse 会把完整 prompt 直接 print 到 stdout，这里重定向掉以保持探针输出可读
+# AgentVerse prints the full prompt straight to stdout; redirect it away so the probe output stays readable
 _buf = io.StringIO()
 from agentverse.initialization import prepare_task_config, load_agent, load_environment
 
@@ -42,8 +42,8 @@ cfg = prepare_task_config("nlp_classroom_3players", "agentverse/tasks/simulation
 a = load_agent(dict(cfg["agents"][0]))
 with contextlib.redirect_stdout(_buf):
     m = asyncio.run(a.astep("env desc"))
-print(f"[单 agent] astep 返回 content={m.content!r}")
-print(f"[单 agent] 语义槽 Action/Action Input 是 LLM 约定，不是遥测数值")
+print(f"[single agent] astep returned content={m.content!r}")
+print(f"[single agent] semantic slots Action/Action Input are an LLM convention, not telemetry values")
 
 N = 100
 agents = [load_agent({**cfg["agents"][0], "name": f"humanoid-{i+1:03d}"}) for i in range(N)]
@@ -51,13 +51,13 @@ env = load_environment({**cfg["environment"], "agents": agents})
 env.reset()
 with contextlib.redirect_stdout(_buf):
     msg = asyncio.run(env.step())
-print(f"[100 agent] 环境单步返回 {len(msg) if isinstance(msg, list) else 1} 条 Message（文本对话）")
+print(f"[100 agents] env single step returned {len(msg) if isinstance(msg, list) else 1} Message(s) (text dialogue)")
 TELE = {"robot_id","status_code","error_code","battery_pct","battery_temp","max_joint_temp",
         "joint_temperatures","joint_positions","joint_torques","ts"}
 got = json.loads(json.dumps(msg[0].dict(), default=str)) if isinstance(msg, list) and msg else {}
 hit = TELE & set(got.keys())
-print(f"[100 agent] 命中遥测契约字段: {sorted(hit) if hit else '无'}")
-print("[结论] LLM 可用时 AgentVerse 仍只产文本 Message；遥测需另一层从状态派生。")
+print(f"[100 agents] matched telemetry contract fields: {sorted(hit) if hit else 'none'}")
+print("[conclusion] even with a working LLM, AgentVerse still only emits text Messages; telemetry must be derived by another layer from state.")
 PY
 RC=$?
 kill $FAKE_PID 2>/dev/null

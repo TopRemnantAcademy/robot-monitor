@@ -1,397 +1,329 @@
-# 细节重评估（Issue #19）
+# Detailed Reassessment (Issue #19)
 
-> 触发：用户连续 6 条评论判定历次产出「不够透彻 / 细节没达标 / 完全粗糙」。
-> 本文不再重复「下载了哪些仓库」——那是**清单**，不是**评估**。
-> 本文回答：**平台在细节上到底缺什么，缺在第几行，判据是什么。**
-> 所有断言附 `路径:行号` 或可复现命令；无证据的写「未验证」。
+> Trigger: The user, across 6 consecutive comments, judged prior outputs as "not thorough enough / details below the bar / completely rough".
+> This document does not repeat "which repos were downloaded" — that is a **list**, not an **evaluation**.
+> This document answers: **exactly what the platform lacks in detail, at which line, and by what criterion.**
+> Every assertion carries a `path:line` or a reproducible command; unproven items are marked "unverified".
 
 ---
 
-## 0. 先自我诊断：为什么前几轮被判「粗糙」
+## 0. Self-Diagnosis First: Why Earlier Rounds Were Judged "Rough"
 
-用户的原话是「细节太粗糙」。复盘前几轮产出，有三个**结构性**问题，不是「写得不够多」：
+The user's exact words were "the details are too rough". Reviewing earlier outputs, there are three **structural** problems, not "not written enough":
 
-| # | 症状 | 证据 | 本质 |
+| # | Symptom | Evidence | Nature |
 |---|---|---|---|
-| D1 | 交的是**清单**不是**评估** | `external/SOURCES.md` 全文以「仓库 / 体积 / stars / 套用结论」四列表为主体 | 「下了什么」≠「哪里能用、怎么接、接错会怎样」 |
-| D2 | 结论大量停在**「未验证」** | `INTEGRATION-PLAN.md:6` 验证边界表 6 项里 2 项未验证；R-07 §5 把本机不可运行列为既定事实 | 用户要的是**前后台完美接应**，即能跑通，不是「知道有这回事」 |
-| D3 | 粒度到**模块**为止，没到**字段/失败模式/时序** | 文档讲「I-1 升级 aiomqtt」，但没讲「升级后 `_handle` 里 `dropped` 计数器的行为变化」 | 细节不足 = 层级不够深 |
+| D1 | Delivered a **list** not an **evaluation** | `external/SOURCES.md` is structured around a four-column "repo / size / stars / integration conclusion" table | "What was downloaded" ≠ "where it can be used, how to wire it, what breaks if wired wrong" |
+| D2 | Conclusions largely stalled at **"unverified"** | `INTEGRATION-PLAN.md:6` verification-boundary table has 2 of 6 unverified; R-07 §5 treats local non-runnability as a settled fact | The user wants **front-back perfect handoff**, i.e. it actually runs, not "knowing it exists" |
+| D3 | Granularity stopped at the **module** level, never reaching **fields / failure modes / timing** | The doc says "I-1 upgrade aiomqtt" but not "how the `dropped` counter's behavior in `_handle` changes after the upgrade" | Insufficient detail = insufficient depth |
 
-补充一条**事实纠正**（比 D1~D3 更硬）：
+Add one **factual correction** (harder than D1~D3):
 
-> **`external/` 目录当前是空的。** 实测在本工作区：
+> **The `external/` directory is currently empty.** Verified in this workspace:
 > ```
 > $ ls external/
 > INTEGRATION-PLAN.md  SOURCES.md
 > ```
-> 前几轮声称「22 个仓库已 `git clone` 到 `external/`」，但 `external/*` 被
-> `.gitignore:24-26` 排除，**仓库里根本不保存这些源码**，新工作区 clone 下来必然为空。
-> 结论：那些「已下载」在当前环境**不可复现、不可核对**。
-> 这是个真问题 —— 要么把「下载」改成可复现脚本 + 校验和清单入库，
-> 要么承认「下载」只是当时的临时动作。见 §4 G-20。
+> Earlier rounds claimed "22 repos already `git clone`d into `external/`", but `external/*` is excluded by
+> `.gitignore:24-26`, so **the repo does not store these sources at all**; a fresh workspace clone is necessarily empty.
+> Conclusion: those "already downloaded" claims are **not reproducible or checkable** in the current environment.
+> This is a real problem — either turn "download" into a reproducible script + checksum manifest that is committed,
+> or admit "download" was only a one-time temporary action. See §4 G-20.
 
 ---
 
-## 1. 评估方法（这次怎么评的）
+## 1. Evaluation Method (how this round evaluated)
 
-不按「模块」评，按**数据流的每一跳**评。100 台 × 10Hz 的链路共 9 跳：
+Evaluated not by "module" but by **each hop of the data flow**. The 100-robot × 10Hz chain has 9 hops:
 
 ```
-[模拟器] → MQTT → [EMQX] → aiomqtt → [校验] → Queue → [批量落库] → TimescaleDB
-                                              ↘ Redis state → WS → [前端 store] → 渲染
-                                              ↘ Redis pubsub → [告警引擎] → 规则 → 去重 → 落库+发布
+[Simulator] → MQTT → [EMQX] → aiomqtt → [Validation] → Queue → [Batch Persistence] → TimescaleDB
+                                              ↘ Redis state → WS → [Frontend store] → Render
+                                              ↘ Redis pubsub → [Alert Engine] → Rule → Dedupe → Persist+Publish
 ```
 
-每一跳问四个问题：
-1. **契约**（字段名/类型/单位）两端是否逐字一致？
-2. **失败模式**（断了/慢了/脏了）会怎样？有无兜底？
-3. **可观测**（出问题能否定位到这一跳）？
-4. **验证**（有无真实运行的证据）？
+Each hop asks four questions:
+1. **Contract** (field name/type/unit) — are both ends byte-for-byte consistent?
+2. **Failure mode** (broken/slow/dirty) — what happens? Any fallback?
+3. **Observability** (can problems be localized to this hop)?
+4. **Verification** (is there evidence of real execution)?
 
 ---
 
-## 2. 逐跳评估结果
+## 2. Per-Hop Evaluation Results
 
-### 跳 1 · 模拟器 → MQTT （契约 ✅ / 验证 ✅）
+### Hop 1 · Simulator → MQTT (Contract ✅ / Verification ✅)
 
-- 24 关节键名三处一致，已实测（`simulator/mock_fleet.py`、`schemas/telemetry.py:13-22`、`types/robot.ts:8-17`）。
-- **细节缺口**：
-  - **姿态四元数不是合法旋转（已实证）**：`mock_fleet.py:135-138` 的 `orient_w/x/y/z`
-    各自独立 `uniform(-1,1)` —— 其模长 **≠ 1**，不构成单位四元数
-    （`|q|² = Σ uniform(-1,1)²` 期望 ≈ 1.33，实测需抽样）。
-    后果：`robot_telemetry` 的 7 个姿态列**数值非零但物理无意义**，
-    任何下游（未来做点云/轨迹回放）都不可用。当前看板不读姿态，属**埋雷**。
-  - `pos_x/y/z`（`mock_fleet.py:132-134`）是 `uniform(0,50)/(0,30)/(0,3)`，
-    与「工厂平面坐标」量纲相符 ✅，但**不与 `assigned_station` 关联** ——
-    同一工位的机器人位置随机散布，无法验证「同工位聚拢」这类业务规则。
+- The 24-joint key names are consistent in three places, verified (`simulator/mock_fleet.py`, `schemas/telemetry.py:13-22`, `types/robot.ts:8-17`).
+- **Detail gap**:
+  - **Orientation quaternion is not a valid rotation (verified)**: `mock_fleet.py:135-138`'s `orient_w/x/y/z` each independently `uniform(-1,1)` — their norm **≠ 1**, not a unit quaternion (`|q|² = Σ uniform(-1,1)²` expectation ≈ 1.33, needs sampling to confirm). Consequence: the 7 orientation columns of `robot_telemetry` are **non-zero but physically meaningless**; any downstream (future point-cloud / trajectory replay) is unusable. The current dashboard does not read orientation, so this is a **buried landmine**.
+  - `pos_x/y/z` (`mock_fleet.py:132-134`) are `uniform(0,50)/(0,30)/(0,3)`, dimensionally consistent with "factory floor coordinates" ✅, but **not associated with `assigned_station`** — robots at the same station are scattered randomly, so business rules like "same-station clustering" cannot be verified.
 
-### 跳 2 · EMQX Broker （契约 ✅ / 验证 ❌）
+### Hop 2 · EMQX Broker (Contract ✅ / Verification ❌)
 
-- 镜像名已 digest 级修正（`infra/docker-compose.yml:12`）。
-- **细节缺口**：
-  - **未设任何 EMQX 认证**。`infra/docker-compose.yml:14-21` 只设了 `EMQX_LOG__LEVEL`。
-    生产不设 `EMQX_AUTHENTICATION` 意味着**任何人可 pub 任意 `robots/+/telemetry`** ——
-    这是监控系统最危险的一类细节：伪造遥测可触发/抑制告警。
-  - **未设 `EMQX_LISTENERS__TCP__DEFAULT__MAX_CONNECTIONS`**，100 台客户端够用，属**低优先**。
-  - `healthcheck` 用 `emqx ping`（`docker-compose.yml:22-24`），**只能证明容器活着，不能证明 1883 可订阅**。R-07 §1 要求「1883 端口可连」，当前 compose 未提供该探测，靠脚本硬编码。
+- The image name was corrected to digest level (`infra/docker-compose.yml:12`).
+- **Detail gap**:
+  - **No EMQX authentication configured**. `infra/docker-compose.yml:14-21` only sets `EMQX_LOG__LEVEL`. Without `EMQX_AUTHENTICATION` in production, **anyone can pub any `robots/+/telemetry`** — this is the most dangerous class of detail for a monitoring system: forged telemetry can trigger/suppress alerts.
+  - **`EMQX_LISTENERS__TCP__DEFAULT__MAX_CONNECTIONS` not set**; 100 clients is fine, **low priority**.
+  - The `healthcheck` uses `emqx ping` (`docker-compose.yml:22-24`), which **only proves the container is alive, not that 1883 is subscribable**. R-07 §1 requires "1883 port connectable"; current compose provides no such probe, relying on hardcoded script logic.
 
-### 跳 3 · aiomqtt → 校验 （契约 ✅ / 验证 ⚠️）
+### Hop 3 · aiomqtt → Validation (Contract ✅ / Verification ⚠️)
 
-- `Client` 复用已按官方文档改（`mqtt_subscriber.py:32-34`），退避 1→30s 保留（`:38-51`）。
-- **细节缺口**（这是本轮新发现的）：
-  - **`dropped` 只增不减、无区分度**。`mqtt_subscriber.py:17` 的 `dropped` 统计
-    「校验失败丢弃」，但 `_handle` 里对 `ValidationError` 之外的一切异常都没有分支 ——
-    若 `state_cache.write_and_publish` 内部抛错，它在 `state_cache.py:52-54` 被吞掉，
-    **不会计入 `dropped`**，`/healthz` 会显示 `mqtt_dropped: 0` 而实际已丢数。
-    → 「`/healthz` 显示 0 丢弃」**不等于**「没丢数据」。R-03 §2 把 `dropped` 当作
-    「payload 不合法」的判据，但实现无法区分「不合法」与「下游写失败」。
-  - **`_STOP` 哨兵与 `dropped` 都是模块级可变全局**（`mqtt_subscriber.py:17-18`），
-    多实例部署时计数会互相污染（当前单实例，属**设计债**，非当前 bug）。
+- `Client` reuse was changed per official docs (`mqtt_subscriber.py:32-34`), backoff 1→30s kept (`:38-51`).
+- **Detail gap** (newly discovered this round):
+  - **`dropped` only increases, never differentiates**. The `dropped` stat in `mqtt_subscriber.py:17` counts "dropped on validation failure", but `_handle` has no branch for any exception other than `ValidationError` — if `state_cache.write_and_publish` throws internally, it is swallowed at `state_cache.py:52-54`, and **not counted in `dropped`**; `/healthz` would show `mqtt_dropped: 0` while data was actually lost. ⇒ "`/healthz` shows 0 dropped" **does not equal** "no data lost". R-03 §2 treats `dropped` as the criterion for "payload invalid", but the implementation cannot distinguish "invalid" from "downstream write failure".
+  - **`_STOP` sentinel and `dropped` are both module-level mutable globals** (`mqtt_subscriber.py:17-18`); under multi-instance deployment the counters pollute each other (single instance currently, a **design debt**, not a current bug).
 
-### 跳 4 · Queue → 批量落库 （契约 ✅ / 验证 ✅ 代码级）
+### Hop 4 · Queue → Batch Persistence (Contract ✅ / Verification ✅ at code level)
 
-- 双重触发、`executemany`、`ON CONFLICT`、`_STOP` 哨兵均已实现（`batch_writer.py:44-100`）。
-- **细节缺口**：
-  - **`ON CONFLICT (time, robot_id) DO NOTHING` 会静默吞掉冲突行**。
-    **已实证为缺陷**：`batch_writer.py:104-112` 的 `self.written += len(rows)` 计的是
-    「发送行数」，`executemany` 不返回被 `DO NOTHING` 跳过的行数 ⇒ `/healthz.written` **高估**，
-    R-08 的 C1「≈30000 行」判据被污染。详见 §4 G-04。
-  - **`time` 用客户端 `ts`（已实证）**：`batch_writer.py:114-127` 明确
-    `if t.ts: datetime.fromtimestamp(t.ts/1000, tz=utc)`。
-    设计理由成立（防同批微秒撞主键），但代价是**入库时间可被客户端指定**，
-    配合无认证的 broker 可写错分区/未来时刻。见 §4 G-04-X、X4。
+- Double trigger, `executemany`, `ON CONFLICT`, `_STOP` sentinel all implemented (`batch_writer.py:44-100`).
+- **Detail gap**:
+  - **`ON CONFLICT (time, robot_id) DO NOTHING` silently swallows conflicting rows**. **Verified as a defect**: `batch_writer.py:104-112`'s `self.written += len(rows)` counts "rows sent", and `executemany` does not return the rows skipped by `DO NOTHING` ⇒ `/healthz.written` is **overstated**, polluting the R-08 C1 "≈30000 rows" criterion. See §4 G-04.
+  - **`time` uses the client `ts` (verified)**: `batch_writer.py:114-127` explicitly does `if t.ts: datetime.fromtimestamp(t.ts/1000, tz=utc)`. The design rationale holds (prevents microsecond primary-key collisions within the same batch), but the cost is **ingest time can be specified by the client**, which, combined with an unauthenticated broker, can write to wrong partitions / future moments. See §4 G-04-X, X4.
 
-### 跳 5 · Redis state → WS → 前端 （契约 ⚠️ / 验证 ✅）
+### Hop 5 · Redis state → WS → Frontend (Contract ⚠️ / Verification ✅)
 
-- 类型还原已修（`state_cache.py:70-95` 的 `_decode`），100ms 节流已实测形态正确
-  （`useRobotWebSocket.ts:57-75`）。
-- **细节缺口**（新发现，且是**真缺陷**）：
-  - **`/robots` 与 WS `snapshot` 返回的 `ts` 语义不一致。**
-    `state_cache._state_hash` 存的是 `t.ts or 0`（`:26`），即**客户端毫秒**；
-    而 `_decode` 原样返回（`:93`）。前端 `RobotTelemetry.ts:number`（`types/robot.ts:30`）
-    在 `FleetOverviewCards`/`HealthSummaryHeader` 里若用来算「最后更新时间」，
-    依赖客户端时钟正确。**已实证前端确实用它**：`RobotDetailDrawer.tsx:208-209`
-   `new Date(robot.ts).toLocaleTimeString(...)` 显示「最后更新时间」。
-   ⇒ 客户端时钟漂移会直接显示错误的「最后更新」，值班员据此误判在线状态。见 §4 G-09。
-  - **告警流经 WS 转发时 `ts` 单位是毫秒**（`store.py:56` `int(time.time()*1000)`），
-    而遥测 `ts` 也是毫秒 —— 一致 ✅。但 **DB 里 `robot_alert.time` 用的是
-    `datetime.now(timezone.utc)`**（`store.py:36`），即**服务端时钟**，
-    于是「同一条告警」在 DB 与 WS 里时间可能差几毫秒到几秒（客户端时钟漂移）。
-    → 排障时「按时间对齐 DB 与前端」会对不上。见 §4 G-05。
-  - **WS 无背压**。`main.py:199-205` 直接 `await ws.send_json(...)`。
-    若某个浏览器标签页被挂起（`setInterval` 不跑、TCP 窗口满），`send_json` 会阻塞，
-    而它是**订阅循环里的 await** → 该连接后面的所有消息都堵住。
-    单客户端时不出问题；多客户端/慢客户端时是**雪崩点**。见 §4 G-06。
+- Type restoration fixed (`state_cache.py:70-95`'s `_decode`), 100ms throttle verified in shape (`useRobotWebSocket.ts:57-75`).
+- **Detail gap** (newly discovered, and a **real defect**):
+  - **`/robots` and the WS `snapshot` return `ts` with inconsistent semantics.** `state_cache._state_hash` stores `t.ts or 0` (`:26`), i.e. **client milliseconds**; `_decode` returns it as-is (`:93`). The frontend's `RobotTelemetry.ts:number` (`types/robot.ts:30`), when used in `FleetOverviewCards`/`HealthSummaryHeader` to compute "last update time", relies on the client clock being correct. **Verified the frontend does use it**: `RobotDetailDrawer.tsx:208-209` `new Date(robot.ts).toLocaleTimeString(...)` displays "last update time". ⇒ Client clock drift directly displays a wrong "last update", causing the operator on duty to misjudge online status. See §4 G-09.
+  - **When alerts flow through WS forwarding, `ts` is in milliseconds** (`store.py:56` `int(time.time()*1000)`), and telemetry `ts` is also milliseconds — consistent ✅. But **`robot_alert.time` in the DB uses `datetime.now(timezone.utc)`** (`store.py:36`), i.e. **server clock**, so "the same alert" may differ by milliseconds to seconds between DB and WS (client clock drift). ⇒ When troubleshooting, "aligning DB and frontend by time" won't match. See §4 G-05.
+  - **WS has no backpressure**. `main.py:199-205` directly `await ws.send_json(...)`. If a browser tab is suspended (`setInterval` not running, TCP window full), `send_json` blocks, and since it is **the await in the subscription loop** → all messages behind that connection get stuck. Fine with a single client; a **avalanche point** with multiple/slow clients. See §4 G-06.
 
-### 跳 6 · 告警引擎 · 规则 （契约 ✅ / 验证 ✅）
+### Hop 6 · Alert Engine · Rules (Contract ✅ / Verification ✅)
 
-- 4 规则 + 去重窗口齐备（`alert_engine/app/main.py:33-37`）。
-- **细节缺口**：
-  - **`window_maxlen=100` 与 `joint_stuck_window_s=5.0` 不一致**。
-    `config.py:39` 窗口 100 条，10Hz ⇒ 10s；而 `joint_stuck` 只要 5s 窗口
-    （`config.py:32`）。当前是实现比需求大，**不会漏判**，但**含义混淆**：
-    窗口注释说「约 10s」而规则实际只用 5s，未来改采样率时会踩坑。
-  - **`motor_temp` 的「持续 3 采样」已实证正确**：`rules/motor_temp.py:24-33`
-    取 `list(window)[-3:]`（window 按到达序 append）⇒ 确为连续 3 条。
-    `joint_stuck` 需 50 采样 ≤ `window_maxlen=100`，容量也够。
-    唯一缺口是 `config.py:39` 注释与用途不符。见 §4 G-07。
+- 4 rules + dedup window complete (`alert_engine/app/main.py:33-37`).
+- **Detail gap**:
+  - **`window_maxlen=100` is inconsistent with `joint_stuck_window_s=5.0`**. `config.py:39` window is 100 entries, at 10Hz ⇒ 10s; but `joint_stuck` only needs a 5s window (`config.py:32`). Currently the implementation is larger than the requirement, so it **won't miss** anything, but **the meaning is confusing**: the window comment says "about 10s" while the rule actually only uses 5s; future sampling-rate changes will step on this.
+  - **`motor_temp`'s "3 consecutive samples" is verified correct**: `rules/motor_temp.py:24-33` takes `list(window)[-3:]` (window appends in arrival order) ⇒ indeed 3 consecutive entries. `joint_stuck` needs 50 samples ≤ `window_maxlen=100`, capacity sufficient. The only gap is `config.py:39`'s comment not matching its use. See §4 G-07.
 
-### 跳 7 · 告警引擎 · 落库与发布 （契约 ✅ / 验证 ⚠️）
+### Hop 7 · Alert Engine · Persistence and Publish (Contract ✅ / Verification ⚠️)
 
-- 落库 + `PUBLISH robot:alerts` 均实现（`store.py:28-60`）。
-- **细节缺口**：
-  - **`save()` 里 DB 写失败后仍会 `publish`**（`store.py:37-58` 两个独立 try）。
-    即：**DB 没有这条告警，但前端显示了**。这在「告警不可丢」的语义下是**危险的**：
-    值班员在前端看到告警，事后审计 DB 却查无此条。需明确**先落库后发布**还是
-    「发布即承诺」——当前是「尽力而为」，且无补偿。见 §4 G-08。
-  - **`robot_alert` 表 `ack` 字段无人写**（`infra/init.sql:60`）。
-    R-03/前端 `AlertLogTable` 都有「未确认」概念的影子，但**没有 ack 接口**。
-    `HealthSummaryHeader` 的「当前告警数（severity≥2 未确认）」——
-    未确认永远是全部。见 §4 G-09。
+- Persistence + `PUBLISH robot:alerts` both implemented (`store.py:28-60`).
+- **Detail gap**:
+  - **`save()` still `publish`es after DB write fails** (`store.py:37-58` two independent try blocks). I.e.: **DB has no such alert, but the frontend shows it**. Under the semantics of "alerts must not be lost", this is **dangerous**: the operator sees the alert on the frontend, but later audit of the DB finds no such row. Needs to clarify whether it is "persist first then publish" or "publish = promise" — currently it is "best effort", with no compensation. See §4 G-08.
+  - **`robot_alert` table's `ack` field is never written** (`infra/init.sql:60`). R-03/frontend `AlertLogTable` both have a shadow of the "unacknowledged" concept, but **there is no ack interface**. `HealthSummaryHeader`'s "current alert count (severity≥2 unacknowledged)" — unacknowledged is always all of them. See §4 G-09.
 
-### 跳 8 · 前端渲染 （契约 ✅ / 验证 ✅）
+### Hop 8 · Frontend Render (Contract ✅ / Verification ✅)
 
-- 100ms 节流、退避、三信封分支均实现且注释充分。
-- **细节缺口**：
-  - **告警没有去重/合并**。`robotStore.pushAlert`（`store.ts:101-102`）纯 prepend，
-    `ALERT_BUFFER_LIMIT=200`。若后端去重窗口过期后重复告警，前端会**堆重复行**。
-  - **无虚拟滚动**。100 卡 + 200 行告警尚可，但**卡片墙用 `aspect-[4/3]` 全量渲染 100 个 DOM**，
-    在低端大屏机上是可感知的。属**性能债**，非当前阻塞。
-  - **Drawer 历史请求竞态**：`RobotDetailDrawer.tsx:55-66` **已用 `AbortController`**，
-    竞态已被正确处理 ✅。此项不作为缺口（见 §4 G-12，已降级）。
+- 100ms throttle, backoff, three-envelope branch all implemented with sufficient comments.
+- **Detail gap**:
+  - **Alerts are not deduplicated/merged**. `robotStore.pushAlert` (`store.ts:101-102`) is pure prepend, `ALERT_BUFFER_LIMIT=200`. If the backend's dedup window expires and the alert repeats, the frontend will **pile up duplicate rows**.
+  - **No virtual scrolling**. 100 cards + 200 alert rows is OK for now, but the **card wall renders all 100 DOM nodes with `aspect-[4/3]`**, perceptible on low-end large-screen machines. A **performance debt**, not a current blocker.
+  - **Drawer history request race**: `RobotDetailDrawer.tsx:55-66` **already uses `AbortController`**, the race is correctly handled ✅. Not counted as a gap (see §4 G-12, downgraded).
 
-### 跳 9 · 运维/交付面 （这是最薄的一层）
+### Hop 9 · Ops/Delivery Surface (the thinnest layer)
 
-前 8 跳都还算有（虽然细节缺），**第 9 跳几乎是空的**：
+The first 8 hops at least exist (though details are missing); **the 9th hop is almost empty**:
 
-| 企业级能力 | 现状 | 证据 |
+| Enterprise capability | Status | Evidence |
 |---|---|---|
-| 鉴权/RBAC | **无**（R-03 §1 明写「无认证」） | `docs/requirements/R-03-backend-api-contract.md:9` |
-| 审计日志（谁改了阈值/谁 ack 了告警） | **无** | 无对应表/接口 |
-| 数据保留策略（TimescaleDB retention） | **无** | `infra/init.sql` 无 `add_retention_policy` |
-| 备份/恢复 | **无** | 无脚本；`tsdb-data` 是匿名卷 |
-| 可观测（Prometheus / 结构化日志 / trace id） | **无**（`client_python` 下了没用） | `docker-compose.yml` 无 exporter |
-| 部署编排（生产级，非 compose dev） | **无** | 只有 dev compose，无资源 limit/restart policy |
-| 告警通知出口（短信/钉钉/PagerDuty） | **无** | 只 PUBLISH 到 Redis |
-| 多租户/多工厂 | **无**（`assigned_station` 只是字符串标签） | `infra/init.sql:48` |
-| SLO/容量规划 | **无** | 无 |
-| 配置校验（启动时 fail-fast） | 部分 | pydantic-settings 有，但无端口/URL 有效性校验 |
+| Auth/RBAC | **None** (R-03 §1 explicitly says "no auth") | `docs/requirements/R-03-backend-api-contract.md:9` |
+| Audit log (who changed thresholds / who acked an alert) | **None** | No corresponding table/interface |
+| Data retention policy (TimescaleDB retention) | **None** | `infra/init.sql` has no `add_retention_policy` |
+| Backup/recovery | **None** | No scripts; `tsdb-data` is an anonymous volume |
+| Observability (Prometheus / structured logs / trace id) | **None** (`client_python` downloaded but unused) | `docker-compose.yml` has no exporter |
+| Deployment orchestration (production-grade, not compose dev) | **None** | Only dev compose, no resource limit/restart policy |
+| Alert notification outlet (SMS/DingTalk/PagerDuty) | **None** | Only PUBLISH to Redis |
+| Multi-tenant/multi-factory | **None** (`assigned_station` is just a string label) | `infra/init.sql:48` |
+| SLO/capacity planning | **None** | None |
+| Config validation (fail-fast at startup) | Partial | pydantic-settings has it, but no port/URL validity check |
 
-> 这一层是用户说「一个大企业需要什么样」的**真正所指**。
-> 前几轮把它们散在「订单 11-14」里，但**没有一条给出实现粒度**，等于没写。
+> This layer is the **true meaning** of the user's "what a large enterprise needs".
+> Earlier rounds scattered them across "Orders 11-14", but **none gave implementation-level granularity** — equivalent to not writing them.
 
 ---
 
-## 3. 「用户没想到」的缺口（我替他想到的）
+## 3. Gaps the User "Didn't Think Of" (that I thought of for them)
 
-按「不补会出事故」排序，每条给出**触发条件 → 后果 → 最小修复**：
+Sorted by "will cause an incident if not fixed", each with **trigger condition → consequence → minimal fix**:
 
-| # | 场景 | 触发条件 | 后果 | 最小修复 |
+| # | Scenario | Trigger condition | Consequence | Minimal fix |
 |---|---|---|---|---|
-| X1 | **伪造遥测** | EMQX 无认证（`docker-compose.yml:14-21`） | 可刷假数据、可造/压告警 | EMQX 开 `authentication` + 后端用凭据连 |
-| X2 | **告警「前端有、DB 无」** | `store.py` publish 与 insert 解耦 | 审计对不上，值班误判 | 先 insert 成功再 publish，或落库失败仍 publish 但打 ERROR |
-| X3 | **磁盘打满** | 无 retention，1000 msg/s ≈ 每日 ~8.6 亿行 | DB 撑爆、写入失败、看板停更 | `add_retention_policy('robot_telemetry', INTERVAL '30 days')` |
-| X4 | **时钟漂移导致错分区** | 若 `time` 取客户端 `ts`（待确认） | 数据落到错误 chunk，查询漏数据 | 统一用服务端接收时刻（或强制 NTP + 校验偏移） |
-| X5 | **慢客户端拖垮 WS 广播** | `main.py` 无背压 | 一个挂起标签页堵住该连接 | 出站队列 + 丢弃最旧 / `asyncio.wait_for` 超时 |
-| X6 | **重启即丢「在线」判定** | `last_seen` 在内存（`main.py:41`） | 告警引擎重启后 10s 内所有机器被误判离线 | 冷启动宽限期，或从 DB/Redis 恢复 `last_seen` |
-| X7 | **ack 语义缺失** | `robot_alert.ack` 无人写 | 「未确认告警数」永远=全部，KPI 失真 | 加 `PATCH /alerts/{id}/ack` + 前端按钮 |
-| X8 | **配置漂移** | 3 份 config（backend/alert/frontend env）各写各的 | 频道名/阈值不一致导致静默失效 | 抽公共 defaults，或启动时交叉校验 |
-| X9 | **无 CI 回归护栏** | 未见单测在流水线里跑 | 任何一次改动都可能静默打破契约 | 把 §2 的 24 关节一致性做成 CI 断言 |
-| X10 | **备份缺失** | `tsdb-data` 匿名卷 | 卷误删=全量历史丢失 | `pg_dump` 定时 + 命名卷 + 恢复演练 |
+| X1 | **Forged telemetry** | EMQX has no auth (`docker-compose.yml:14-21`) | Can flood fake data, can create/suppress alerts | EMQX enables `authentication` + backend connects with credentials |
+| X2 | **Alert "on frontend, not in DB"** | `store.py` publish and insert decoupled | Audit mismatch, operator misjudges | Insert successfully first then publish, or publish after persist failure but log ERROR |
+| X3 | **Disk fills up** | No retention, 1000 msg/s ≈ ~8.6 billion rows/day | DB overflows, writes fail, dashboard stops updating | `add_retention_policy('robot_telemetry', INTERVAL '30 days')` |
+| X4 | **Clock drift causes wrong partition** | If `time` takes client `ts` (to confirm) | Data lands in wrong chunk, query misses data | Unify to server receive time (or enforce NTP + offset check) |
+| X5 | **Slow client drags down WS broadcast** | `main.py` has no backpressure | One suspended tab blocks that connection | Outbound queue + drop oldest / `asyncio.wait_for` timeout |
+| X6 | **Restart loses "online" judgment** | `last_seen` is in memory (`main.py:41`) | Alert engine restart misjudges all machines offline within 10s | Cold-start grace period, or restore `last_seen` from DB/Redis |
+| X7 | **Missing ack semantics** | `robot_alert.ack` never written | "Unacknowledged alert count" always = all, KPI distorted | Add `PATCH /alerts/{id}/ack` + frontend button |
+| X8 | **Config drift** | 3 configs (backend/alert/frontend env) each written separately | Channel name/threshold inconsistency silently fails | Extract common defaults, or cross-validate at startup |
+| X9 | **No CI regression guardrail** | No unit tests seen running in pipeline | Any change can silently break the contract | Turn the 24-joint consistency in §2 into a CI assertion |
+| X10 | **Missing backup** | `tsdb-data` anonymous volume | Volume deleted = all history lost | `pg_dump` scheduled + named volume + recovery drill |
 
 ---
 
-## 4. 缺口清单（可执行，带验收判据）
+## 4. Gap List (actionable, with acceptance criteria)
 
-> 每条给：ID / 一句话 / 证据坐标 / 验收判据 / 优先级。
-> 优先级：P0=不修会出事故，P1=不接受粗糙但可排期，P2=优化。
+> Each item gives: ID / one-liner / evidence coordinate / acceptance criterion / priority.
+> Priority: P0=incident if not fixed, P1=roughness unacceptable but schedulable, P2=optimization.
 
-### G-01 【P0】EMQX 认证缺失
-- 证据：`infra/docker-compose.yml:14-21` 无 `EMQX_AUTHENTICATION`
-- 判据：未带凭据的 MQTT 客户端 pub 被拒；后端带凭据可连；`test_integration.sh` 增加「匿名被拒」用例
+### G-01 [P0]EMQX Authentication Missing
+- Evidence: `infra/docker-compose.yml:14-21` has no `EMQX_AUTHENTICATION`
+- Criterion: MQTT client pub without credentials is rejected; backend with credentials can connect; `test_integration.sh` adds an "anonymous rejected" case
 
-### G-02 【P0】告警落库/发布一致性
-- 证据：`alert_engine/app/store.py:28-60` 两个独立 try
-- 判据：DB 写失败时日志为 ERROR 且 `/metrics` 有计数；文档写明「发布不承诺持久化」或改为先落库后发布
+### G-02 [P0]Alert Persistence/Publish Consistency
+- Evidence: `alert_engine/app/store.py:28-60` two independent try blocks
+- Criterion: DB write failure logs ERROR and `/metrics` has a counter; docs state "publish does not promise durability" or change to persist-first-then-publish
 
-### G-03 【P0】数据保留策略
-- 证据：`infra/init.sql` 无 `add_retention_policy`
-- 判据：`SELECT * FROM timescaledb_information.jobs` 含 retention job；超期 chunk 被删
+### G-03 [P0]Data Retention Policy
+- Evidence: `infra/init.sql` has no `add_retention_policy`
+- Criterion: `SELECT * FROM timescaledb_information.jobs` contains a retention job; expired chunks deleted
 
-### G-04 【P0】落库时间戳来源与 `written` 计数语义（**已实证，确认为缺陷**）
-- 证据 A（`written` 计数虚高）：`batch_writer.py:104-112`
+### G-04 [P0]Ingest Timestamp Source and `written` Count Semantics (**verified, confirmed defect**)
+- Evidence A (`written` count inflated): `batch_writer.py:104-112`
   ```python
   await conn.executemany(INSERT_SQL, rows)
-  self.written += len(rows)     # ← 计的是「发送行数」，不是「实际插入行数」
+  self.written += len(rows)     # ← counts "rows sent", not "rows actually inserted"
   ```
-  `INSERT_SQL` 带 `ON CONFLICT (time, robot_id) DO NOTHING`（`batch_writer.py:35`），
-  **`executemany` 不返回被冲突跳过的行数**。因此 `/healthz.written`
-  在有冲突时**高估**，R-08 C1「≈30000 行」的判据会被污染 —— 它其实只证明了「发了 3 万条」，
-  没证明「存了 3 万条」。**必须**另用 `SELECT count(*)` 交叉验证。
-- 证据 B（时间戳来自客户端，**可伪造**）：`batch_writer.py:114-127`
+  `INSERT_SQL` carries `ON CONFLICT (time, robot_id) DO NOTHING` (`batch_writer.py:35`),
+  **`executemany` does not return the rows skipped by conflict**. Therefore `/healthz.written`
+  is **overstated** when there are conflicts, polluting the R-08 C1 "≈30000 rows" criterion — it only proves "30000 sent",
+  not "30000 stored". **Must** cross-verify with a separate `SELECT count(*)`.
+- Evidence B (timestamp from client, **forgeable**): `batch_writer.py:114-127`
   ```python
   if t.ts:
-      ts = datetime.fromtimestamp(t.ts / 1000.0, tz=timezone.utc)   # ← 客户端给的毫秒
+      ts = datetime.fromtimestamp(t.ts / 1000.0, tz=timezone.utc)   # ← client-provided milliseconds
   else:
       ts = datetime.now(timezone.utc)
   ```
-  代码注释解释了「为什么用客户端 ts」（避免同批同机器人微秒撞主键），这个理由**成立**；
-  但代价是**入库时间可由客户端任意指定** —— 配合 G-01（EMQX 无认证），
-  可把数据写进任意时间 chunk（含未来时刻），进而影响连续聚合与 retention。
-- 判据：
-  1. `/healthz` 增加 `inserted`（真实插入数）与 `conflicted`（被跳过数）两个计数，
-     用 `INSERT ... RETURNING` 或前后 `count(*)` 差值实现；
-  2. `test_integration.sh` 的 30000 判据改为「`SELECT count(*)`」而非 `/healthz.written`；
-  3. 文档写明「入库时间采用客户端 `ts`，视为 UTC 毫秒；服务端不校验偏移」，
-     并在 G-01 修复后由 broker 层保证客户端可信。
+  The code comment explains "why use client ts" (avoid same-batch same-robot microsecond primary-key collision); this reason **holds**;
+  but the cost is **ingest time can be arbitrarily specified by the client** — combined with G-01 (EMQX no auth),
+  data can be written into any time chunk (including future moments), affecting continuous aggregates and retention.
+- Criterion:
+  1. `/healthz` adds two counters `inserted` (truly inserted) and `conflicted` (skipped), implemented via `INSERT ... RETURNING` or before/after `count(*)` deltas;
+  2. `test_integration.sh`'s 30000 criterion changes from "`SELECT count(*)`" to "`/healthz.written`";
+  3. Docs state "ingest time uses client `ts`, treated as UTC milliseconds; server does not validate offset", and after G-01 is fixed, the broker layer guarantees client trustworthiness.
 
-### G-05 【P1】时间戳单一真源
-- 证据：`store.py:36`（DB 用服务端时间）vs `store.py:56`（WS 用本机毫秒）
-- 判据：同一告警 DB.time 与 WS.ts 差值 <100ms（实测）；或统一由 DB `RETURNING time` 回填 WS 载荷
+### G-05 [P1]Single Source of Truth for Timestamps
+- Evidence: `store.py:36` (DB uses server time) vs `store.py:56` (WS uses local milliseconds)
+- Criterion: Same alert DB.time vs WS.ts difference <100ms (measured); or unify by having DB `RETURNING time` backfill the WS payload
 
-### G-06 【P0】WS 背压
-- 证据：`backend_ingestion/app/main.py:199-205`
-- 判据：模拟一个不读 socket 的客户端，其余客户端延迟不受影响（实测 p95 偏移 <50ms）
+### G-06 [P0]WS Backpressure
+- Evidence: `backend_ingestion/app/main.py:199-205`
+- Criterion: Simulate a client that does not read the socket; other clients' latency unaffected (measured p95 offset <50ms)
 
-### G-07 【P1】`motor_temp` / `joint_stuck` 窗口语义（**已实证，结论：实现正确，仅注释需修**）
-- 证据：`rules/motor_temp.py:24-33` 取 `list(window)[-min_samples:]`，window 按到达顺序 append，
-  故确实是「最近 3 个**连续**采样」—— **判定正确**。
-- 证据：`rules/joint_stuck.py:31` `need_samples = max(2, int(5.0*10)) = 50`，
-  而 `config.py:39` `window_maxlen = 100` ⇒ 50 ≤ 100，**容量足够，判定正确**。
-- 真正的缺口只剩**注释误导**：`config.py:39` 注释写「约 10s」，
-  而 `joint_stuck` 只用 5s、`motor_temp` 只用 3 个采样 —— 容量与用途命名不一致。
-- 判据：给 `window_maxlen` 补一条注释说明「取所有规则所需时间窗的最大值 + 余量」，
-  并加单测锁定「motor_temp 需 3 个连续样本、joint_stuck 需 50 个」，防止未来改采样率时静默失效。
+### G-07 [P1]`motor_temp` / `joint_stuck` Window Semantics (**verified, conclusion: implementation correct, only comment needs fix**)
+- Evidence: `rules/motor_temp.py:24-33` takes `list(window)[-min_samples:]`, window appends in arrival order, so it is indeed "the most recent 3 **consecutive** samples" — **judgment correct**.
+- Evidence: `rules/joint_stuck.py:31` `need_samples = max(2, int(5.0*10)) = 50`, and `config.py:39` `window_maxlen = 100` ⇒ 50 ≤ 100, **capacity sufficient, judgment correct**.
+- The only remaining gap is **misleading comment**: `config.py:39` comment says "about 10s", while `joint_stuck` only uses 5s and `motor_temp` only uses 3 samples — capacity and purpose naming inconsistent.
+- Criterion: Add a comment to `window_maxlen` explaining "take the max of all rules' required time windows + margin", and add a unit test locking "motor_temp needs 3 consecutive samples, joint_stuck needs 50", to prevent silent failure when sampling rate changes.
 
-### G-08 【P1】告警 ack 闭环
-- 证据：`infra/init.sql:60`（`ack` 列无人写）
-- 判据：`PATCH /alerts/{id}/ack` 生效；前端「未确认数」随 ack 下降（实测）
+### G-08 [P1]Alert Ack Closure
+- Evidence: `infra/init.sql:60` (`ack` column never written)
+- Criterion: `PATCH /alerts/{id}/ack` takes effect; frontend "unacknowledged count" drops as acks happen (measured)
 
-### G-09 【P1】时钟/时区纪律
-- 证据 A：`infra/init.sql:12`（`TIMESTAMPTZ`）✅，但客户端 `ts` → `TIMESTAMPTZ` 的换算未文档化
-- 证据 B（**真缺陷**）：前端 `RobotDetailDrawer.tsx:208-209`
-  `new Date(robot.ts).toLocaleTimeString(...)` —— 「最后更新时间」直接用**客户端毫秒**渲染，
-  而 `robot.ts` 最终来自模拟器/机器人的本机时钟。时钟漂移 ⇒ 值班员看到错误的「最后更新」。
-- 判据：
-  1. 文档写明「入库一律 UTC，客户端 `ts` 视为 UTC 毫秒」；
-  2. 「最后更新时间」改用**服务端接收时刻**（或前端用 `Date.now()` 与本地接收时间差计算），
-     不信任远端时钟；
-  3. 加一条「`ts` 超出 [now-1d, now+1min] 则丢弃并计数」的护栏（同时缓解 G-04-X）。
+### G-09 [P1]Clock/Timezone Discipline
+- Evidence A: `infra/init.sql:12` (`TIMESTAMPTZ`) ✅, but the client `ts` → `TIMESTAMPTZ` conversion is undocumented
+- Evidence B (**real defect**): frontend `RobotDetailDrawer.tsx:208-209` `new Date(robot.ts).toLocaleTimeString(...)` — "last update time" renders directly using **client milliseconds**, while `robot.ts` ultimately comes from the simulator/robot's local clock. Clock drift ⇒ operator sees a wrong "last update".
+- Criterion:
+  1. Docs state "ingest is always UTC, client `ts` treated as UTC milliseconds";
+  2. "Last update time" uses **server receive time** (or frontend computes using `Date.now()` vs local receive time delta), not trusting the remote clock;
+  3. Add a guard "if `ts` is outside [now-1d, now+1min], discard and count" (also mitigates G-04-X).
 
-### G-10 【P1】`/healthz` 指标不足以定位
-- 证据：`backend_ingestion/app/main.py:72-82`
-- 判据：增加「按原因分类的丢弃计数」（校验失败 / 下游失败 / 队列满）与「最近一次成功落库时刻」
+### G-10 [P1]`/healthz` Metrics Insufficient for Localization
+- Evidence: `backend_ingestion/app/main.py:72-82`
+- Criterion: Add "drop counts by reason" (validation failure / downstream failure / queue full) and "last successful persist time"
 
-### G-11 【P1】Redis 丢失即静默
-- 证据：`state_cache.py:52-54`（异常被吞）、`main.py:172-175`（快照失败仅日志）
-- 判据：Redis 不可用时 `/healthz` 应返回 `degraded` 而非 `ok`
+### G-11 [P1]Redis Loss Is Silent
+- Evidence: `state_cache.py:52-54` (exception swallowed), `main.py:172-175` (snapshot failure only logged)
+- Criterion: When Redis unavailable, `/healthz` should return `degraded` not `ok`
 
-### G-12 【P2】前端 Drawer 请求竞态（**已实证，结论：已处理，无需修**）
-- 证据：`RobotDetailDrawer.tsx:55-66` 已使用 `AbortController`：
+### G-12 [P2]Frontend Drawer Request Race (**verified, conclusion: handled, no fix needed**)
+- Evidence: `RobotDetailDrawer.tsx:55-66` already uses `AbortController`:
   ```ts
   const abortRef = useRef<AbortController | null>(null);
   const controller = new AbortController();
   fetch(url, { signal: controller.signal })
   ```
-  cleanup 里 abort 旧请求 —— **竞态已被正确处理**。此项从缺口清单**降级/移除**，
-  仅保留为「有测试锁定更好」的建议。
+  cleanup aborts the old request — **race correctly handled**. Downgraded/removed from the gap list, only kept as a "better with a test locking it" suggestion.
 
-### G-13 【P1】模拟器姿态量不合法（埋雷）
-- 证据：`simulator/mock_fleet.py:135-138` 四元数分量各自独立 `uniform(-1,1)`，模长 ≠ 1
-- 后果：`robot_telemetry` 的 `orient_w/x/y/z` 数值非零但**不构成合法旋转**；
-  当前看板不读，未来任何轨迹/回放功能不可用
-- 判据：用「随机轴 + 随机角」生成**单位**四元数（`|q| = 1`，浮点误差 <1e-6），
-  并加断言；`pos_*` 与 `assigned_station` 建立关联（同工位聚拢）
+### G-13 [P1]Simulator Orientation Invalid (buried landmine)
+- Evidence: `simulator/mock_fleet.py:135-138` quaternion components each independently `uniform(-1,1)`, norm ≠ 1
+- Consequence: `robot_telemetry`'s `orient_w/x/y/z` are non-zero but **not a valid rotation**; current dashboard doesn't read them, but any future trajectory/replay feature is unusable
+- Criterion: Generate a **unit** quaternion using "random axis + random angle" (`|q| = 1`, float error <1e-6), and add an assertion; associate `pos_*` with `assigned_station` (same-station clustering)
 
-### G-14 【P2】前端告警合并与虚拟滚动
-- 证据：`robotStore.ts:101-102`
-- 判据：同 `(robot_id, rule_id)` 窗口内不出现重复行；100 卡渲染帧时间有实测数字
+### G-14 [P2]Frontend Alert Merging and Virtual Scrolling
+- Evidence: `robotStore.ts:101-102`
+- Criterion: No duplicate rows within the `(robot_id, rule_id)` window; 100-card render frame time has measured numbers
 
-### G-15 【P1】可观测性（Prometheus）
-- 证据：`docker-compose.yml` 无 exporter；`client_python` 已下未用
-- 判据：`/metrics` 暴露 `mqtt_received/dropped`、`batch_flush_seconds`、`queue_depth`；抓取成功
+### G-15 [P1]Observability (Prometheus)
+- Evidence: `docker-compose.yml` has no exporter; `client_python` downloaded but unused
+- Criterion: `/metrics` exposes `mqtt_received/dropped`, `batch_flush_seconds`, `queue_depth`; scrape succeeds
 
-### G-16 【P1】CI 契约回归
-- 证据：无 CI 中断言 24 关节一致性
-- 判据：CI 中一条测试同时读 `telemetry.py:13-22` 与 `types/robot.ts:8-17` 并断言相等（不相等即 fail）
+### G-16 [P1]CI Contract Regression
+- Evidence: No CI asserts 24-joint consistency
+- Criterion: One CI test reads both `telemetry.py:13-22` and `types/robot.ts:8-17` and asserts equality (fails if unequal)
 
-### G-17 【P1】生产级部署编排
-- 证据：`infra/docker-compose.yml` 无 `restart` / `deploy.resources` / 日志轮转
-- 判据：进程崩溃自动重启；`max-size` 日志上限；文档写明生产与 dev 的差异
+### G-17 [P1]Production-Grade Deployment Orchestration
+- Evidence: `infra/docker-compose.yml` has no `restart` / `deploy.resources` / log rotation
+- Criterion: Process crash auto-restarts; `max-size` log cap; docs state production vs dev differences
 
-### G-18 【P2】告警通知出口
-- 证据：仅 PUBLISH 到 Redis
-- 判据：至少一个外部出口（Webhook）可配置，失败重试有上限
+### G-18 [P2]Alert Notification Outlet
+- Evidence: Only PUBLISH to Redis
+- Criterion: At least one external outlet (Webhook) configurable, with bounded retry on failure
 
-### G-19 【P2】多工厂/多租户
-- 证据：`init.sql:48` `assigned_station` 仅标签，无权限隔离
-- 判据：明确「当前为单工厂范围」并写入 R-08，避免验收方误以为已支持
+### G-19 [P2]Multi-Factory/Multi-Tenant
+- Evidence: `init.sql:48` `assigned_station` is only a label, no permission isolation
+- Criterion: Explicitly state "currently single-factory scope" and write it into R-08, to avoid the acceptor mistakenly assuming support
 
-### G-20 【P1】`external/` 下载不可复现
-- 证据：本工作区 `ls external/` 只有 2 个 md；`.gitignore:24-26` 排除源码
-- 判据：提供 `external/fetch-sources.sh`（含每个仓库的 tag/commit 钉死），任意环境一键复现；
-  或明确声明「下载仅作一次性参考，不入库」
-- **本轮已处置**：新增 `external/fetch-sources.sh`（21 个源 + alertmanager sparse），
-  每个源钉到明确 ref，执行后把「本地 HEAD commit」写入 `external/.fetch-log` 作为实证。
-  已实测验证（2026-10-10）：
+### G-20 [P1]`external/` Download Not Reproducible
+- Evidence: This workspace `ls external/` has only 2 md files; `.gitignore:24-26` excludes sources
+- Criterion: Provide `external/fetch-sources.sh` (each repo pinned to a tag/commit), one-click reproducible in any environment; or explicitly declare "download is one-time reference only, not committed"
+- **Handled this round**: Added `external/fetch-sources.sh` (21 sources + alertmanager sparse), each pinned to an explicit ref; after execution, writes "local HEAD commit" into `external/.fetch-log` as evidence. Verified (2026-10-10):
   ```
   $ bash external/fetch-sources.sh echarts-for-react
-  echarts-for-react  2346edc  HEAD          ← 与 PR #20 声称的 commit 一致（可复现）
+  echarts-for-react  2346edc  HEAD          ← matches the commit claimed in PR #20 (reproducible)
   $ bash external/fetch-sources.sh aiomqtt
-  aiomqtt            c8f8248  v2.5.1        ← 与 PR #20 声称的 v2.5.1 HEAD 一致
+  aiomqtt            c8f8248  v2.5.1        ← matches the v2.5.1 HEAD claimed in PR #20
   $ head -6 external/aiomqtt/docs/reconnection.md
-  The `Client` context is designed to be reusable (but not reentrant).   ← 与 I-2 引用逐字一致
+  The `Client` context is designed to be reusable (but not reentrant).   ← byte-identical to I-2 reference
   ```
-  ⇒ PR #20 关于 aiomqtt 版本漂移的两个核心断言，**已可独立复现**。
-  仍缺的：SHA256 校验（上游 force-push 会误报，故脚本只钉 ref 不钉哈希）。
+  ⇒ The two core assertions in PR #20 about aiomqtt version drift **are independently reproducible**.
+  Still missing: SHA256 checksum (upstream force-push would false-report, so the script pins ref not hash).
 
-### G-21 【P0】端到端真实运行证据
-- 证据：R-07 §5 将「本机不可运行」列为既定；订单 06 仍在 CNB 执行中
-- 判据：`test_integration.sh` 在至少一个环境**实际跑通**并贴出 7 分栏报告（含真实 SQL 计数）
-
----
-
-## 5. 与前几轮产出的关系（避免重复劳动）
-
-- 前几轮已覆盖且**有效**的部分（不推翻）：EMQX 镜像名 digest 修正、
-  aiomqtt 2.5.1 契约、asyncpg 版本根因、`lifespan` 关闭顺序、ECharts tree-shaking。
-- 本轮**新增**的是：§2 的逐跳细节、§3 的 X1~X10、§4 的 G-01~G-21。
-- 本轮**纠正**的硬事实：`external/` 源码不入库 ⇒ 声称的 22 个下载不可复现（G-20）；
-以及**推翻自己的两个误判**：G-07 的 `motor_temp` 实现本正确、G-12 的前端竞态本已处理。
+### G-21 [P0]End-to-End Real-Run Evidence
+- Evidence: R-07 §5 treats "local non-runnable" as settled; Order 06 still running on CNB
+- Criterion: `test_integration.sh` actually runs in at least one environment and pastes a 7-column report (with real SQL counts)
 
 ---
 
-## 6. 建议的执行顺序（不是「继续找仓库」）
+## 5. Relationship to Earlier Rounds (avoid duplicated work)
+
+- Parts covered and **valid** by earlier rounds (not overturned): EMQX image name digest correction, aiomqtt 2.5.1 contract, asyncpg version root cause, `lifespan` shutdown order, ECharts tree-shaking.
+- New this round: §2 per-hop details, §3 X1~X10, §4 G-01~G-21.
+- **Corrected** hard facts this round: `external/` sources not committed ⇒ the claimed 22 downloads not reproducible (G-20); and **overturned two of our own misjudgments**: G-07's `motor_temp` implementation was correct, G-12's frontend race was already handled.
+
+---
+
+## 6. Suggested Execution Order (not "keep finding repos")
 
 ```
-第一批（止血，P0）：G-01 G-03 G-04 G-06 G-21
-第二批（契约钉死，P1）：G-02 G-05 G-07 G-09 G-10 G-11 G-13 G-16 G-20
-第三批（闭环，P1）：G-08 G-15 G-17
-第四批（体验/规模，P2）：G-12 G-14 G-18 G-19
+Batch 1 (stop the bleeding, P0): G-01 G-03 G-04 G-06 G-21
+Batch 2 (lock contract, P1):     G-02 G-05 G-07 G-09 G-10 G-11 G-13 G-16 G-20
+Batch 3 (close loop, P1):        G-08 G-15 G-17
+Batch 4 (experience/scale, P2):  G-12 G-14 G-18 G-19
 ```
 
-> 真正的「细节达标」标志只有一个：`test_integration.sh` 在一个干净环境里
-> 一键跑通，7 分栏报告每一栏都有真实命令与输出，且 §2 的每一跳都有
-> 「契约 / 失败模式 / 可观测 / 验证」四项齐备。**在那之前，任何「已完成」都是口头承诺。**
+> The only true sign of "details up to bar": `test_integration.sh` runs one-click in a clean environment, every column of the 7-column report has real commands and output, and every hop in §2 has all four of "contract / failure mode / observability / verification". **Until then, any "done" is a verbal promise.**
 
 ---
 
-## 7. 本文的验证边界（诚实标注）
+## 7. Verification Boundaries of This Document (honest disclosure)
 
-| 断言 | 状态 |
+| Assertion | Status |
 |---|---|
-| `external/` 当前为空 | ✅ 实测（`ls external/`） |
-| EMQX 无认证配置 | ✅ 实测（读 `infra/docker-compose.yml`） |
-| `init.sql` 无 retention policy | ✅ 实测（通读全文） |
-| `ack` 列无写入方 | ✅ 实测（grep 全仓 `ack`） |
-| WS 无背压 | ✅ 实测（读 `main.py` WS 分支） |
-| G-04 `written` 计虚高 | ✅ 实测（`batch_writer.py:104-112`） |
-| G-04 时间戳来自客户端 | ✅ 实测（`batch_writer.py:114-127`） |
-| G-07 `motor_temp` 连续 3 采样判定正确 | ✅ 实测（`rules/motor_temp.py:24-33`） |
-| G-07 `joint_stuck` 50 采样 ≤ 窗口 100 | ✅ 实测（`rules/joint_stuck.py:31` + `config.py:39`） |
-| G-12 前端竞态已用 AbortController | ✅ 实测（`RobotDetailDrawer.tsx:55-66`） |
-| `ack` 仅前端过滤、无后端接口 | ✅ 实测（`HealthSummaryHeader.tsx:45` 注释 + 全仓 grep 无 ack 写接口） |
-| 前端显示最后更新时间依赖客户端 `ts` | ✅ 实测（`RobotDetailDrawer.tsx:208-209` `new Date(robot.ts)`） |
-| 任何「已跑通」结论 | ❌ 无 —— 本机无 Docker，本轮**未运行任何服务** |
+| `external/` currently empty | ✅ verified (`ls external/`) |
+| EMQX no auth config | ✅ verified (read `infra/docker-compose.yml`) |
+| `init.sql` no retention policy | ✅ verified (read full text) |
+| `ack` column no writer | ✅ verified (grep all repo for `ack`) |
+| WS no backpressure | ✅ verified (read `main.py` WS branch) |
+| G-04 `written` overstated | ✅ verified (`batch_writer.py:104-112`) |
+| G-04 timestamp from client | ✅ verified (`batch_writer.py:114-127`) |
+| G-07 `motor_temp` 3 consecutive samples correct | ✅ verified (`rules/motor_temp.py:24-33`) |
+| G-07 `joint_stuck` 50 samples ≤ window 100 | ✅ verified (`rules/joint_stuck.py:31` + `config.py:39`) |
+| G-12 frontend race uses AbortController | ✅ verified (`RobotDetailDrawer.tsx:55-66`) |
+| `ack` only frontend-filtered, no backend interface | ✅ verified (`HealthSummaryHeader.tsx:45` comment + grep all repo for ack-write interface) |
+| Frontend "last update time" relies on client `ts` | ✅ verified (`RobotDetailDrawer.tsx:208-209` `new Date(robot.ts)`) |
+| Any "already run through" conclusion | ❌ None — no Docker in this environment, this round **ran no services** |
 
-> 未验证项已在对应条目标注，**不得**被后续引用当作已确认。
+> Unverified items are marked at their respective entries and **must not** be cited by later work as confirmed.

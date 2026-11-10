@@ -1,30 +1,31 @@
-# postgres-exporter 自定义查询：把 pgBackRest 备份状态变成 Prometheus 指标（订单 31 §T3）
+# postgres-exporter custom query: turn pgBackRest backup status into Prometheus metrics (order 31 §T3)
 #
-# 数据来源：monitor.pgbackrest_backup_status 视图（见同目录 monitor.sql），
-# 其底层是官方 `pgbackrest --output=json info` 稳定接口。
+# Data source: the monitor.pgbackrest_backup_status view (see monitor.sql in this dir),
+# whose underlying source is the official `pgbackrest --output=json info` stable interface.
 #
-# 为什么用 postgres-exporter 而不是新起一个 exporter：
-#   订单 31 §T3 要求「复用既有告警通道，不要另造一套」。#59 的 robot_alert_store_errors_total
-#   就是经 postgres_exporter → Prometheus 规则 → Alertmanager → webhook 这条链。
-#   备份状态同样落在 Postgres 里，自然复用同一条 exporter。
+# Why postgres-exporter rather than a new exporter:
+#   Order 31 §T3 requires 'reuse the existing alert channel, don't build a separate one'. #59's
+#   robot_alert_store_errors_total already flows through postgres_exporter → Prometheus rule →
+#   Alertmanager → webhook. Backup status also lives in Postgres, so naturally reuses the same exporter.
 #
-# 挂载方式（见 infra/observability/docker-compose.observability.yml 的
-#   PG_EXPORTER_EXTEND_QUERY_PATH 与 --extend.query-path 参数）。
+# Mount method (see PG_EXPORTER_EXTEND_QUERY_PATH and --extend.query-path in
+#   infra/observability/docker-compose.observability.yml).
 #
-# ⚠️ 上游状态：`--extend.query-path` 在 postgres_exporter 已标记 DEPRECATED
-#    （README「Adding new metrics via a config file (DEPRECATED)」段），
-#    官方建议改用内置 collector 函数或 sql_exporter。此处沿用是因为：
-#      (a) v0.17.1 仍支持，未移除（README 选项表仍列出 --extend.query-path）；
-#      (b) 引入 sql_exporter 会新增一个服务，与「复用既有通道」相悖。
-#    若将来该 flag 被移除，迁移点仅此一处（视图 monitor.pgbackrest_backup_status 不变）。
+# ⚠️ Upstream status: `--extend.query-path` is marked DEPRECATED in postgres_exporter
+#    (README "Adding new metrics via a config file (DEPRECATED)" section), and the official recommendation
+#    is to switch to a built-in collector function or sql_exporter. We keep it here because:
+#      (a) v0.17.1 still supports it, not removed (the README option table still lists --extend.query-path);
+#      (b) introducing sql_exporter would add a new service, contradicting 'reuse the existing channel'.
+#    If the flag is removed in the future, the only migration point is here (the view
+#    monitor.pgbackrest_backup_status stays unchanged).
 #
-# 指标语义：
+# Metric semantics:
 #   pgbackrest_backup_last_success_timestamp_seconds
-#       最近一次成功备份的 stop 时刻（epoch 秒）。规则用 time() - 它 判定"过期"。
+#       stop moment (epoch seconds) of the last successful backup. Rules use time() - it to judge "stale".
 #   pgbackrest_backup_last_errored
-#       最近一次备份 error 标记（0=完好 1=不完整）。>0 即告警。
+#       error flag of the last backup (0=intact, 1=incomplete). >0 triggers an alert.
 #   pgbackrest_stanza_status_code
-#       官方 info 的 stanza status.code（0=ok，非 0=仓库/stanza 异常）。
+#       official info's stanza status.code (0=ok, non-zero=repo/stanza anomaly).
 pgbackrest_backup_status:
   query: |
     SELECT
@@ -37,13 +38,13 @@ pgbackrest_backup_status:
   metrics:
     - stanza:
         usage: "LABEL"
-        description: "pgBackRest stanza 名"
+        description: "pgBackRest stanza name"
     - last_success_timestamp_seconds:
         usage: "GAUGE"
-        description: "最近一次成功备份的 stop 时刻（epoch 秒）"
+        description: "stop moment (epoch seconds) of the last successful backup"
     - last_errored:
         usage: "GAUGE"
-        description: "最近一次备份是否带 error 标记（1=不完整）"
+        description: "whether the last backup carries an error flag (1=incomplete)"
     - status_code:
         usage: "GAUGE"
-        description: "官方 info 的 stanza status.code（0=ok）"
+        description: "official info's stanza status.code (0=ok)"

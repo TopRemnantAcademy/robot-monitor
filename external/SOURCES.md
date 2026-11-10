@@ -1,32 +1,30 @@
-# 外部参考源（download first, don't hand-write）
+# External reference sources (download first, don't hand-write)
 
-本目录存放**实际下载**的第三方/官方仓库，用于对照实现、避免凭空手写。
-目录本身已加入 `.gitignore`（不把第三方源码灌入主仓），但**本文件入库**，
-以便 CNB NPC 与人工审阅者能看到参考来源及其对照结论。
+This directory holds **actually downloaded** third-party/official repos, used to cross-check implementations and avoid hand-writing from scratch.
+The directory itself is in `.gitignore` (third-party source is not poured into the main repo), but **this file is committed**, so CNB NPC and human reviewers can see the sources and their comparison conclusions.
 
-下载方式一律为 `git clone --depth 1 <url>`，来源均为 GitHub 官方组织仓库。
+All downloads use `git clone --depth 1 <url>`, sourced from official GitHub org repos.
 
 ---
 
-## 1. `mqtt-to-timescaledb` — EMQX 官方
+## 1. `mqtt-to-timescaledb` — EMQX official
 
-- 来源：`https://github.com/emqx/mqtt-to-timescaledb`（EMQX 官方组织 `emqx`）
-- 下载：`git clone --depth 1 https://github.com/emqx/mqtt-to-timescaledb.git`
-- 体积：1.1 MB ｜ 关键文件：`create-table.sql`、`docker-compose.yml`、`emqx/cluster.hocon`
-- License：随仓库保留
+- Source: `https://github.com/emqx/mqtt-to-timescaledb` (EMQX official org `emqx`)
+- Download: `git clone --depth 1 https://github.com/emqx/mqtt-to-timescaledb.git`
+- Size: 1.1 MB | Key files: `create-table.sql`, `docker-compose.yml`, `emqx/cluster.hocon`
+- License: retained with the repo
 
-### 对照结论
+### Comparison conclusion
 
-| 项 | 官方写法 | 本仓库 | 判定 |
+| Item | Official approach | This repo | Verdict |
 |---|---|---|---|
-| EMQX 镜像 | `emqx/emqx-enterprise:5.0.3`（企业版）<br>开源版为 `emqx/emqx` | `emqx/emqx:5.6` | ✅ 等价，保留 |
+| EMQX image | `emqx/emqx-enterprise:5.0.3` (enterprise)<br>open-source edition is `emqx/emqx` | `emqx/emqx:5.6` | ✅ equivalent, kept |
 
-### 1.1 ⚠️ 撤稿：此前「`emqx:5.6` 是非 EMQX 镜像」的结论是**错的**
+### 1.1 ⚠️ Retraction: the earlier conclusion that "`emqx:5.6` is a non-EMQX image" is **wrong**
 
-2026-10-10 曾按 digest 差异判定「裸名 `emqx:5.6` 解析到非 EMQX 镜像」。
-**该结论已作废**，原因是**对比方法本身有误**，与镜像无关：
+On 2026-10-10 we judged by digest difference that "the bare name `emqx:5.6` resolves to a non-EMQX image". **That conclusion is void**, because **the comparison method itself was wrong**, unrelated to the image:
 
-**错误 1 —— 拿「子 manifest 的 digest」当「镜像 id」，再跨仓库比**
+**Error 1 — treating a "child manifest's digest" as the "image id", then comparing across repos**
 
 ```
 library/emqx:5.6  index digest              = sha256:4cbb5792d0fd17e02f3003cda571aeca343d954f05215f8ab20a5a3b21603755
@@ -34,25 +32,23 @@ library/emqx:5.6  index digest              = sha256:4cbb5792d0fd17e02f3003cda57
 emqx/emqx:5.6     index digest              = sha256:b14a3c6d04f680869e3ca181b552c9338b7cd20c2d43d8af6c1e3b8aec48a0cc
 ```
 
-文档里被写成「`emqx:5.6` → `06f2341d…`」的，其实是 `library/emqx` 的**子 manifest**digest，
-却被拿去和 `emqx/emqx` 的 **index** digest 比。粒度不同，必然"对不上"。
+What the docs wrote as "`emqx:5.6` → `06f2341d…`" is actually `library/emqx`'s **child manifest** digest, but it was compared against `emqx/emqx`'s **index** digest. Different granularity, so they inevitably "don't match".
 
-**错误 2 —— 忽略了「同一镜像两个发布通道」这一事实**
+**Error 2 — ignored the fact that "one image has two release channels"**
 
-`library/emqx` **就是**由 `emqx/emqx-docker` 构建的（Docker Official Images）：
+`library/emqx` **is** built from `emqx/emqx-docker` (Docker Official Images):
 
 ```
 $ curl https://raw.githubusercontent.com/docker-library/official-images/master/library/emqx
   Maintainers: Rory Z (@rory-z), Ivan Dyachkov (@id)
-  GitRepo: https://github.com/emqx/emqx-docker.git     ← 与 emqx/emqx 同源
+  GitRepo: https://github.com/emqx/emqx-docker.git     ← same origin as emqx/emqx
   Tags: 5.7.2, 5.7      Directory: 5.7
   Tags: 5.8.8, 5.8, 5, latest   Directory: 5.8
 ```
 
-两个通道的 index digest 不同是**构造方式不同导致的必然结果**（bashbrew 重新构建 vs 官方 CI）。
-EMQX 官方 README 也把 `emqx/emqx` 与 `emqx`(=library/emqx) 并列推荐。
+The two channels' differing index digests are an **inevitable result of different build methods** (bashbrew rebuild vs official CI). The EMQX official README also recommends `emqx/emqx` and `emqx` (=library/emqx) side by side.
 
-**正面证据：`library/emqx:5.6` 确实是 EMQX 5.6.1**
+**Positive evidence: `library/emqx:5.6` is indeed EMQX 5.6.1**
 
 ```
 $ curl -H "Authorization: Bearer $T"     https://registry-1.docker.io/v2/library/emqx/blobs/sha256:3a5ff702742d32ef92978cc8fe0122f1a127f136e7c006de0a807b0c7f7324b9
@@ -63,131 +59,114 @@ $ curl -H "Authorization: Bearer $T"     https://registry-1.docker.io/v2/library
   config.ExposedPorts = 1883 / 8883 / 18083 / 4370 / 5369 / 8083 / 8084
 ```
 
-与 `emqx/emqx-docker` 5.6 分支 `Dockerfile`（`ENV EMQX_VERSION=5.6.1`、同 Entrypoint/Cmd、
-同 EXPOSE 列表）**逐行吻合**。
+It matches the `emqx/emqx-docker` 5.6 branch `Dockerfile` (`ENV EMQX_VERSION=5.6.1`, same Entrypoint/Cmd, same EXPOSE list) **line by line**.
 
-**那为什么本仓库仍保留 `emqx/emqx:5.6`？**（此判断有依据，非因循守旧）
+**So why does this repo still keep `emqx/emqx:5.6`?** (this judgment is justified, not mere inertia)
 
-`library/emqx` 当前**只维护 5.7 / 5.8**（上方 official-images 文件的 Tags 段实证）。
-`library/emqx:5.6` 是 Docker Hub 上遗留的**非受管 tag**，仍在但不会再获得
-安全更新，也不会随 official-images 流程重新发布。
-在 5.6 这一档上，`emqx/emqx:5.6` 才是持续发布的**可追溯来源**。
+`library/emqx` currently **only maintains 5.7 / 5.8** (proven by the Tags section of the official-images file above). `library/emqx:5.6` is a legacy **unmaintained tag** on Docker Hub — it still exists but will no longer receive security updates, nor be re-published through the official-images process.
+At the 5.6 tier, `emqx/emqx:5.6` is the continuously-published **traceable source**.
 
-> 教训：digest 只能用来判断「字节是否相同」，**不能**用来判断「是不是同一个项目」。
-> 跨发布通道比 digest 之前，先确认两者的**构建来源**是否同一。
+> Lesson: a digest can only tell whether "the bytes are identical", **not** whether "it's the same project". Before comparing digests across release channels, first confirm the two's **build source** is the same.
 
-**未采纳的官方写法（有意为之，非疏漏）**
+**Official approaches not adopted (intentional, not an oversight)**
 
-**未采纳的官方写法（有意为之，非疏漏）**
+**Official approaches not adopted (intentional, not an oversight)**
 
-- 官方 `create_hypertable('energy_log','timestamp','factory_id',4)` 第 4 参是
-  **space partition 数**，面向「设备数为列」的宽表。本仓库是窄表
-  （每台机器人每时刻一行），未使用 space partition。
-- 官方示例走 **EMQX Rule Engine 直写 TimescaleDB**。该能力属 EMQX **企业版**，
-  本仓库锁定开源版（`emqx/emqx`），故保留 FastAPI(aiomqtt) 中转路线 ——
-  中转是必需的：Redis 状态缓存、告警判定、WS 推送都在这一层完成。
-- 官方示例无连续聚合、无主键；本仓库两者都有（CAgg 供看板，PK 供去重）。
-- 官方 compose 顶层声明了 `networks: emqx-net` 但无任何 service 引用 —— 属官方冗余，未模仿。
+- The official `create_hypertable('energy_log','timestamp','factory_id',4)` 4th param is the **space-partition count**, aimed at wide tables where "devices are columns". This repo uses a narrow table (one row per robot per timestamp), so it does not use space partitions.
+- The official example uses the **EMQX Rule Engine to write TimescaleDB directly**. That capability belongs to EMQX **Enterprise**; this repo is locked to the open-source edition (`emqx/emqx`), so it keeps the FastAPI(aiomqtt) relay route — the relay is necessary: Redis state cache, alert evaluation, and WS push all happen at this layer.
+- The official example has no continuous aggregates and no primary key; this repo has both (CAgg for the dashboard, PK for dedup).
+- The official compose declares `networks: emqx-net` at the top level but no service references it — official redundancy, not imitated.
 
 ---
 
-## 2. `tsbs` — TimescaleDB 官方压测套件
+## 2. `tsbs` — TimescaleDB official stress suite
 
-- 来源：`https://github.com/timescale/tsbs`（Timescale 官方组织 `timescale`，★1451）
-- 下载：`git clone --depth 1 https://github.com/timescale/tsbs.git`
-- 体积：3.0 MB
-- 用途：**订单 06（集成与压测）** 的写入吞吐基线参考。
-  `cmd/` 下提供 `tsbs_load_timescaledb` 等 loader，`pkg/targets/` 定义时序数据模型。
-- 当前状态：已下载，**尚未使用**。订单 06 派单时应要求 NPC 先读
-  `tsbs/README.md` 与 `docs/` 下的压测方法，再决定是复用其 loader
-  还是沿用本仓库自有的 `simulator/`（后者更能精确产生 24 关节人形机器人负载）。
+- Source: `https://github.com/timescale/tsbs` (Timescale official org `timescale`, ★1451)
+- Download: `git clone --depth 1 https://github.com/timescale/tsbs.git`
+- Size: 3.0 MB
+- Purpose: write-throughput baseline reference for **Order 06 (integration & stress)**. `cmd/` provides loaders like `tsbs_load_timescaledb`, and `pkg/targets/` defines time-series data models.
+- Current status: downloaded, **not yet used**. When Order 06 is dispatched, the NPC should be asked to first read `tsbs/README.md` and the stress methodology under `docs/`, then decide whether to reuse its loader or stick with this repo's own `simulator/` (the latter produces 24-joint humanoid-robot load more precisely).
 
 ---
 
 ---
 
-## 3. 第二批：按需求点全量下载（2026-10-10）
+## 3. Second batch: full download by requirement point (2026-10-10)
 
-**套用与连接计划见 `external/INTEGRATION-PLAN.md`**（本文只记录来源与取舍）。
+**Adoption and integration plan: see `external/INTEGRATION-PLAN.md`** (this doc only records sources and trade-offs).
 
-| 需求点 | 仓库 | 体积 | stars | 套用结论 |
+| Requirement | Repo | Size | stars | Adoption conclusion |
 |---|---|---|---|---|
-| Broker 层压测 | `emqx/emqtt-bench` | 350 KB | 568 | 订单 06 接入，与 `mock_fleet.py` 互补（见 I-4） |
-| MQTT 客户端契约 | `empicano/aiomqtt` | 430 KB | 577 | 契约核对 → I-1 升级、I-2 实例复用 |
-| 前端状态管理 | `pmndrs/zustand` | 3.6 MB | 58801 | 版本核对，**决定不升级**（见 I-3 决策表） |
-| 异步 Redis 用法 | `redis/redis-py` | 18 MB | 13647 | 版本核对，**决定不升级** |
-| 全栈结构参考 | `fastapi/full-stack-fastapi-template` | 3.5 MB | 45929 | 结构对照 |
-| 告警设计标准 | `prometheus/alertmanager`（sparse `docs/`） | 816 KB | 8642 | 对照发现缺「抑制」机制（I-5） |
-| 指标暴露 | `prometheus/client_python` | 14 MB | 4380 | 订单 06 可选 |
+| Broker-layer stress | `emqx/emqtt-bench` | 350 KB | 568 | adopted by Order 06, complements `mock_fleet.py` (see I-4) |
+| MQTT client contract | `empicano/aiomqtt` | 430 KB | 577 | contract check → I-1 upgrade, I-2 instance reuse |
+| Frontend state management | `pmndrs/zustand` | 3.6 MB | 58801 | version check, **decided not to upgrade** (see I-3 decision table) |
+| Async Redis usage | `redis/redis-py` | 18 MB | 13647 | version check, **decided not to upgrade** |
+| Full-stack structure reference | `fastapi/full-stack-fastapi-template` | 3.5 MB | 45929 | structure comparison |
+| Alert design standard | `prometheus/alertmanager` (sparse `docs/`) | 816 KB | 8642 | comparison found a missing "inhibition" mechanism (I-5) |
+| Metric exposure | `prometheus/client_python` | 14 MB | 4380 | optional for Order 06 |
 
-> ⚠️ `aiomqtt` 仓库已从 `sbtinstruments/aiomqtt` **迁移至 `empicano/aiomqtt`**
-> （实证：`gh api repos/sbtinstruments/aiomqtt` 返回 `empicano/aiomqtt`）。
-> PyPI 包名 `aiomqtt` 未变，`requirements.txt` 无需改包名。
+> ⚠️ The `aiomqtt` repo has moved from `sbtinstruments/aiomqtt` **to `empicano/aiomqtt`** (proven: `gh api repos/sbtinstruments/aiomqtt` returns `empicano/aiomqtt`). The PyPI package name `aiomqtt` is unchanged, so `requirements.txt` needs no package-name change.
 
-### 同上：搜索过但**不下**的（体积/价值比不划算或已被包管理器覆盖）
+### Same as above: searched but **not downloaded** (poor size/value ratio or already covered by the package manager)
 
-| 仓库 | 体积 | 理由 |
+| Repo | Size | Reason |
 |---|---|---|
-| `grafana/grafana` | **2011 MB** | 体量致命；本项目自研看板，Grafana 是替代方案不是依赖 |
-| `apache/echarts` | 264 MB | 已由 npm 引入，实证 `frontend_dashboard/node_modules/echarts` 存在 |
-| `pydantic/pydantic` | 458 MB | pip 已引入，458 MB 换类型注解细节不划算 |
-| `timescale/timescaledb` | 65 MB | 主体是 C 扩展源码，本项目只需 SQL 层契约（已由官方示例覆盖） |
-| `fastapi/fastapi` | 53 MB | pip 已引入，6 MB 的 template 已覆盖结构需求 |
+| `grafana/grafana` | **2011 MB** | size is fatal; this project builds its own dashboard; Grafana is an alternative, not a dependency |
+| `apache/echarts` | 264 MB | already pulled in via npm; proven `frontend_dashboard/node_modules/echarts` exists |
+| `pydantic/pydantic` | 458 MB | already pulled in via pip; 458 MB for type-annotation details isn't worth it |
+| `timescale/timescaledb` | 65 MB | the bulk is C-extension source; this project only needs the SQL-layer contract (already covered by the official example) |
+| `fastapi/fastapi` | 53 MB | already pulled in via pip; the 6 MB template already covers structure needs |
 
-> **原则**：已由包管理器（npm/pip）引入的依赖**不再 clone 源码**。
-> clone 只用于拿「包里没有的东西」—— 部署契约、最佳实践文档、压测工具。
-
----
+> **Principle**: dependencies already pulled in by a package manager (npm/pip) are **not cloned as source**. `clone` is only used to get "things not in the package" — deployment contracts, best-practice docs, stress tools.
 
 ---
 
-## 4. 第三批：补齐数据层与前端桥接的遗漏（2026-10-10 全量复扫）
+## 4. Third batch: fill gaps in the data layer and frontend bridging (2026-10-10 full re-scan)
 
-复扫发现**核心数据层依赖此前完全没有参考源** —— `asyncpg` 是批量落库的命脉。
+The re-scan found the **core data-layer dependency had no reference source at all** — `asyncpg` is the lifeblood of batch storage.
 
-| 需求点 | 仓库 | 体积 | stars | 套用结论 |
+| Requirement | Repo | Size | stars | Adoption conclusion |
 |---|---|---|---|---|
-| **异步 PG 驱动** | `MagicStack/asyncpg` | 2.0 MB | 8105 | **I-6 必升 0.29.0 → 0.30+**，见下 |
-| 前端图表桥接 | `hustcc/echarts-for-react` | 292 KB | 5005 | 直接依赖核对 |
-| WS 底层实现 | `Kludex/starlette` | 7.0 MB | 12654 | WebSocket 契约核对 |
-| DB 迁移 | `sqlalchemy/alembic` | 4.1 MB | 4438 | 未来迁移方案评估 |
-| MQTT 底层客户端 | `eclipse-paho/paho.mqtt.python` | 1.3 MB | 2429 | aiomqtt 的下层依赖 |
+| **Async PG driver** | `MagicStack/asyncpg` | 2.0 MB | 8105 | **I-6 must upgrade 0.29.0 → 0.30+**, see below |
+| Frontend chart bridging | `hustcc/echarts-for-react` | 292 KB | 5005 | direct dependency check |
+| WS underlying implementation | `Kludex/starlette` | 7.0 MB | 12654 | WebSocket contract check |
+| DB migration | `sqlalchemy/alembic` | 4.1 MB | 4438 | future migration-scheme evaluation |
+| MQTT underlying client | `eclipse-paho/paho.mqtt.python` | 1.3 MB | 2429 | aiomqtt's lower-level dependency |
 
-### ⭐ 关键发现：`asyncpg` 0.29.0 是「本机无法验证」的**根因**，不是环境限制
+### ⭐ Key finding: `asyncpg` 0.29.0 is the **root cause** of "can't verify locally", not an environment limitation
 
-| 版本 | 发布日 | Python 支持 |
+| Version | Release date | Python support |
 |---|---|---|
-| `v0.29.0`（我们锁的） | 2023-11-05 | `requires-python = '>=3.8.0'`，**无 3.13 classifier** |
+| `v0.29.0` (our pinned) | 2023-11-05 | `requires-python = '>=3.8.0'`, **no 3.13 classifier** |
 | `v0.30.0` | 2024-10-20 | **"Support Python 3.13 and PostgreSQL 17"** |
 | `v0.31.0` | 2025-11-24 | + Python 3.14 |
-| `v0.32.0`（最新） | 2026-10-06 | + Python 3.15 |
+| `v0.32.0` (latest) | 2026-10-06 | + Python 3.15 |
 
-HEAD 版 `pyproject.toml` classifiers 实证列出 `3.9/3.10/3.11/3.12/3.13/3.14`。
+The HEAD `pyproject.toml` classifiers empirically list `3.9/3.10/3.11/3.12/3.13/3.14`.
 
-此前把「`asyncpg==0.29.0` 在 Python 3.13 编译失败（`_PyLong_AsByteArray` 签名变更）」
-归为**环境错误**，实为**版本过旧**。升 0.30+ 后该阻塞消失。
+Previously we attributed "`asyncpg==0.29.0` fails to compile on Python 3.13 (`_PyLong_AsByteArray` signature change)" to an **environment error**, but it was actually **too-old a version**. The blocker disappears after upgrading to 0.30+.
 
-### ⭐ 附带发现：PyPI 403 可用镜像源绕过
+### ⭐ Side finding: PyPI 403 can be bypassed with a mirror source
 
-本机 `files.pythonhosted.org` 返回 403，但**清华镜像源可用**：
+Locally `files.pythonhosted.org` returns 403, but the **Tsinghua mirror works**:
 
 ```bash
 pip install -i https://pypi.tuna.tsinghua.edu.cn/simple asyncpg
-# 实测：Python 3.13.14 + asyncpg 0.32.0 安装成功并可 import，耗时 29s（有 wheel）
+# measured: Python 3.13.14 + asyncpg 0.32.0 installed successfully and importable, 29s (had a wheel)
 ```
 
-这意味着此前标注「未验证（本机无法运行）」的后端项，**现在可以真实运行验证了**。
+This means backend items previously marked "unverified (can't run locally)" **can now actually be run and verified**.
 
-### 第三批中不下的
+### Not downloaded in the third batch
 
-| 仓库 | 体积 | 理由 |
+| Repo | Size | Reason |
 |---|---|---|
-| `puppeteer/puppeteer` | **1533 MB** | 体量致命；已由 npm 引入（`frontend_dashboard/node_modules`） |
-| `redis/redis` | 212 MB | 我们只用客户端；`redis-py` 已覆盖需求 |
+| `puppeteer/puppeteer` | **1533 MB** | size is fatal; already pulled in via npm (`frontend_dashboard/node_modules`) |
+| `redis/redis` | 212 MB | we only use the client; `redis-py` already covers the need |
 
 ---
 
-## 复现命令
+## Reproduction commands
 
 ```bash
 mkdir -p external && cd external
@@ -208,31 +187,29 @@ git clone --depth 1 https://github.com/sqlalchemy/alembic.git
 git clone --depth 1 https://github.com/eclipse-paho/paho.mqtt.python.git
 ```
 
-> 另注：`encode/uvicorn` 仓库已迁至 **`Kludex/uvicorn`**（实证：API 返回 `Kludex/uvicorn`）。
+> Note: the `encode/uvicorn` repo has moved to **`Kludex/uvicorn`** (proven: API returns `Kludex/uvicorn`).
 
 ---
 
-## 搜索过但**判定不值得下载**的仓库（留档，避免重复搜索）
+## Repos searched but **judged not worth downloading** (archived to avoid re-searching)
 
-| 仓库 | stars | 不下载的理由 |
+| Repo | stars | Reason not to download |
 |---|---|---|
-| `zmops/zeus-iot` | 729 | 完整 IoT 平台，体量与依赖远超本项目需求 |
-| `KouShenhai/KCloud-Platform-IoT` | 674 | 同上，Java 技术栈，与本项目 Python/TS 不符 |
-| `dave-wind/awesome-python` | — | 仅单个 `app.py` 示例，无 schema/compose 参考价值 |
-| `innovaassolutions/MQTTtoMCP` | — | 耦合 OpenAI/GPT 查询层，与本项目无关 |
-| `robot fleet monitoring dashboard` 类（`Panca2022/Robot-Monitor-Dashboard` 等） | 0–2 | 玩具项目，stars 过低，代码质量无保障 |
+| `zmops/zeus-iot` | 729 | full IoT platform; size and dependencies far exceed this project's needs |
+| `KouShenhai/KCloud-Platform-IoT` | 674 | same as above, Java stack, incompatible with this project's Python/TS |
+| `dave-wind/awesome-python` | — | only a single `app.py` example; no schema/compose reference value |
+| `innovaassolutions/MQTTtoMCP` | — | coupled to an OpenAI/GPT query layer, unrelated to this project |
+| `robot fleet monitoring dashboard`-type (`Panca2022/Robot-Monitor-Dashboard` etc.) | 0–2 | toy projects, stars too low, no code-quality guarantee |
 
-> 原则：宁可少下载，也不把低质量代码当作「参考」引入。
-> 参考源必须是**官方组织仓库**或经 digest/stars 实证的高质量仓库。
+> Principle: better to download less than to import low-quality code as "reference". A reference source must be an **official org repo** or a high-quality repo proven by digest/stars.
 
 ---
 
-## 5. 第四批：全量执行下载 + 版本漂移实证（2026-10-10 复扫）
+## 5. Fourth batch: full download execution + version-drift evidence (2026-10-10 re-scan)
 
-按 §1–§4 清单**全量执行** `git clone --depth 1`，14/14 全部成功。
-体积与 stars 预期一致，无一个失败。实测清单（`git rev-parse --short HEAD`）：
+Per the §1–§4 list, **fully executed** `git clone --depth 1`, 14/14 all succeeded. Sizes and stars matched expectations, none failed. Actual list (`git rev-parse --short HEAD`):
 
-| 仓库 | 体积 | HEAD | 远程 |
+| Repo | Size | HEAD | Remote |
 |---|---|---|---|
 | `emqx/mqtt-to-timescaledb` | 1.2 MB | `ee24974` | emqx/mqtt-to-timescaledb |
 | `timescale/tsbs` | 2.9 MB | `8323e59` | timescale/tsbs |
@@ -241,7 +218,7 @@ git clone --depth 1 https://github.com/eclipse-paho/paho.mqtt.python.git
 | `pmndrs/zustand` | 3.6 MB | `d7a5583` | pmndrs/zustand |
 | `redis/redis-py` | 18 MB | `22d47b5` | redis/redis-py |
 | `fastapi/full-stack-fastapi-template` | 3.6 MB | `7257e60` | fastapi/full-stack-fastapi-template |
-| `prometheus/alertmanager`（sparse docs） | 892 KB | `e7a4afd` | prometheus/alertmanager |
+| `prometheus/alertmanager` (sparse docs) | 892 KB | `e7a4afd` | prometheus/alertmanager |
 | `prometheus/client_python` | 14 MB | `9cd073c` | prometheus/client_python |
 | `MagicStack/asyncpg` | 2.0 MB | `13b0191` | MagicStack/asyncpg |
 | `hustcc/echarts-for-react` | 372 KB | `2346edc` | hustcc/echarts-for-react |
@@ -249,138 +226,119 @@ git clone --depth 1 https://github.com/eclipse-paho/paho.mqtt.python.git
 | `sqlalchemy/alembic` | 4.1 MB | `1bc21b8` | sqlalchemy/alembic |
 | `eclipse-paho/paho.mqtt.python` | 1.4 MB | `b48baee` | eclipse-paho/paho.mqtt.python |
 
-### ⚠️ 实证发现：`aiomqtt` 的 `--depth 1` 已漂移到 v3.0.0-alpha.1
+### ⚠️ Empirical finding: `aiomqtt`'s `--depth 1` has drifted to v3.0.0-alpha.1
 
-| 项 | 事实 | 证据 |
+| Item | Fact | Evidence |
 |---|---|---|
-| 裸 `--depth 1` 拉到的 HEAD | **`3.0.0-alpha.1`**（v3 重写线） | `pyproject.toml` `version = "3.0.0-alpha.1"` |
-| v3 的破坏性变更 | 弃用 paho-mqtt 改 `mqtt5`；`Client` 参数全 keyword-only；`MqttError` 被 `ConnectError` 等替代；`reconnect=True` 成为内建能力 | `CHANGELOG.md` `## [3.0.0-alpha.1]` 段 |
-| 本项目锁定版本 | **`2.5.1`**（`backend_ingestion/requirements.txt`） | `==` 锁死 |
-| `INTEGRATION-PLAN.md` 的 I-1/I-2 证据 | 引 `docs/reconnection.md`（v2.5.1 路径） | 裸 clone **找不到该文件** |
+| HEAD pulled by bare `--depth 1` | **`3.0.0-alpha.1`** (v3 rewrite line) | `pyproject.toml` `version = "3.0.0-alpha.1"` |
+| v3 breaking changes | deprecated paho-mqtt for `mqtt5`; `Client` params all keyword-only; `MqttError` replaced by `ConnectError` etc.; `reconnect=True` becomes built-in | `CHANGELOG.md` `## [3.0.0-alpha.1]` section |
+| This project's pinned version | **`2.5.1`** (`backend_ingestion/requirements.txt`) | locked with `==` |
+| I-1/I-2 evidence in `INTEGRATION-PLAN.md` | references `docs/reconnection.md` (v2.5.1 path) | a bare clone **can't find that file** |
 
-**处置**：已将 `external/aiomqtt` 显式 checkout 到 `v2.5.1` 标签
-（`git fetch --depth 1 origin refs/tags/v2.5.1:refs/tags/v2.5.1 && git checkout v2.5.1`，
-HEAD 变为 `c8f8248`）。切回后 `docs/reconnection.md` 与
-`docs/alongside-fastapi-and-co.md` **均存在**，I-2 引用的
-「reusable (but not reentrant)」原文落在 `docs/reconnection.md:5` —— 与计划一致。
+**Handling**: explicitly checked out `external/aiomqtt` to the `v2.5.1` tag (`git fetch --depth 1 origin refs/tags/v2.5.1:refs/tags/v2.5.1 && git checkout v2.5.1`, HEAD becomes `c8f8248`). After switching back, both `docs/reconnection.md` and `docs/alongside-fastapi-and-co.md` **exist**, and I-2's quoted "reusable (but not reentrant)" text lands at `docs/reconnection.md:5` — consistent with the plan.
 
-> 教训：`--depth 1` 只钉住"当下 HEAD"，不钉住版本。参考源若被用于核对某个
-> **锁定版本**的 API，必须 `checkout <tag>`，否则下次复扫会静默拿到新主线的
-> 破坏性变更，导致 file:line 证据失效。
+> Lesson: `--depth 1` only pins "today's HEAD", not the version. If a reference source is used to check a **pinned version**'s API, you must `checkout <tag>`; otherwise the next re-scan silently picks up the new mainline's breaking changes, invalidating file:line evidence.
 
-### 其余仓库的关键文件抽验（全部命中）
+### Key-file spot-checks for the remaining repos (all hit)
 
-| 仓库 | 抽验文件 | 结果 |
+| Repo | Spot-checked file | Result |
 |---|---|---|
-| `mqtt-to-timescaledb` | `create-table.sql`、`docker-compose.yml`、`emqx/cluster.hocon` | ✅ 存在 |
-| `tsbs` | `README.md`、`cmd/`、`docs/` | ✅ 存在 |
-| `emqtt-bench` | `README.md` 含 `--prometheus` | ✅ `README.md:101` |
-| `alertmanager` | `docs/configuration.md` 含 `inhibit_rules` | ✅ `:165-167` |
-| `asyncpg` | `pyproject.toml` classifiers 含 3.13/3.14 | ✅ `:26-27` |
-| `starlette` | `starlette/websockets.py` | ✅ 存在 |
-| `paho.mqtt.python` | `src/paho/mqtt/client.py` | ✅ 存在 |
-| `echarts-for-react` / `zustand` / `redis-py` / `alembic` / `full-stack-fastapi-template` | `package.json` / `redis/asyncio/client.py` / `setup.cfg` / `README.md` | ✅ 存在 |
+| `mqtt-to-timescaledb` | `create-table.sql`, `docker-compose.yml`, `emqx/cluster.hocon` | ✅ exists |
+| `tsbs` | `README.md`, `cmd/`, `docs/` | ✅ exists |
+| `emqtt-bench` | `README.md` contains `--prometheus` | ✅ `README.md:101` |
+| `alertmanager` | `docs/configuration.md` contains `inhibit_rules` | ✅ `:165-167` |
+| `asyncpg` | `pyproject.toml` classifiers include 3.13/3.14 | ✅ `:26-27` |
+| `starlette` | `starlette/websockets.py` | ✅ exists |
+| `paho.mqtt.python` | `src/paho/mqtt/client.py` | ✅ exists |
+| `echarts-for-react` / `zustand` / `redis-py` / `alembic` / `full-stack-fastapi-template` | `package.json` / `redis/asyncio/client.py` / `setup.cfg` / `README.md` | ✅ exists |
 
-## 6. 第五批：从零重扫（含「完全替换」候选）—— 2026-10-10
+## 6. Fifth batch: re-scan from scratch (incl. 'full replacement' candidates) —— 2026-10-10
 
-> ⚠️ **本节（§6）是「评估候选池 / 研究笔记」，不是「已下载清单」。**
-> 下列仓库**均未克隆到本仓磁盘**——磁盘只含 `fetch-sources.sh` 的 22 个源（§5 + §7）。
-> 它们是按 32 项审计逐条回溯上游时**评估过**的替代/补充方案。若未来决定采用，
-> 必须先加入 `external/fetch-sources.sh` 的 `SOURCES` 数组并实际 clone，再据此更新本节。
+> ⚠️ **This section (§6) is an "evaluation candidate pool / research notes", not a "downloaded list".** The repos below **have not been cloned to this repo's disk** — the disk only contains the 22 sources from `fetch-sources.sh` (§5 + §7). They are alternative/supplementary options **evaluated** while tracing upstream for each of the 32 audit items. If you decide to adopt one in the future, you must first add it to the `SOURCES` array in `external/fetch-sources.sh` and actually clone it, then update this section accordingly.
 
-> **本轮方法变了**。前四批是「看名字猜需求」，本轮按 **32 项审计**里
-> 每一条**尚未有参考源的需求点**逐条回溯上游，并且**主动找更完美的替代品**
-> （不是补缺，是问「现在选的这个是不是最好的」）。
->
-> 判定口径：①需求点是否真的存在（有 `file:line` 或审计编号支撑）
-> ②仓库是否活跃（`pushed_at`）③是否有官方发布镜像/可直接跑（决定「下载」还是「装服务」）
-> ④是否有更优替代（可替换现有依赖）。
+> **This round changed the method.** The first four batches "guessed needs from names"; this round traces upstream item-by-item for every requirement point in the **32-item audit** that still lacked a reference source, and **actively seeks more perfect replacements** (not filling gaps, but asking "is the current pick the best").
 
-### 6.1 候选源（评估中，尚未克隆到本仓）
+> Judgment criteria: ① does the requirement point really exist (backed by `file:line` or an audit number) ② is the repo active (`pushed_at`) ③ is there an official release image / can it run directly (decides "download" vs "deploy a service") ④ is there a better alternative (can replace an existing dependency).
 
-> 下表是**评估候选**，并非「已下载」。本仓磁盘只含 `fetch-sources.sh` 的 22 个源（§5 + §7）。
-> 真要采用，须先加入 `fetch-sources.sh` 的 `SOURCES` 数组并实际 clone。
+### 6.1 Candidate sources (under evaluation, not yet cloned to this repo)
 
-| # | 需求点（对应审计/缺口） | 仓库 | 体积 | HEAD | 关键实证 |
+> The table below is **evaluation candidates**, not "downloaded". This repo's disk only contains the 22 sources from `fetch-sources.sh` (§5 + §7). To actually adopt, you must first add to the `SOURCES` array in `fetch-sources.sh` and actually clone.
+
+| # | Requirement point (corresponding audit/gap) | Repo | Size | HEAD | Key evidence |
 |---|---|---|---|---|---|
-| N1 | MQTT 缺口→OTel 采集管线（#32 数据新鲜度 / 统一遥测） | `open-telemetry/opentelemetry-python` | 12 MB | `c4d8ff6` | `opentelemetry-sdk/` 存在 |
-| N2 | 前端 RUM/追踪（审计「前端无观测」） | `open-telemetry/opentelemetry-js` | 22 MB | `e5db961` | `api/`、`e2e-tests/` |
-| N3 | 采集器/边缘转发（统一 metrics+logs+trace） | `open-telemetry/opentelemetry-collector` | 22 MB | `e85aabc` | 官方 collector |
-| N4 | 采集器发行版（配置化 pipeline，含 Docker） | `grafana/alloy` | 69 MB | `eabe529` | `collector/README.md`、`docs/` |
-| N5 | **PG 指标**（护栏「无 metrics 出口」的直接解） | `prometheus-community/postgres_exporter` | 1.4 MB | `fb6be9d` | `README.md:252` `DATA_SOURCE_NAME` |
-| N6 | **Redis 指标**（Redis 是单点，必须可观测） | `oliver006/redis_exporter` | 1.2 MB | `6de1e8b` | `README.md:197` `REDIS_ADDR`、`:216` `/metrics` |
-| N7 | **可写断言的压测**（R-07/R-08「可判定」） | `grafana/k6` | 75 MB | `b408672` | `go.mod` `go.k6.io/k6/v2` |
-| N8 | k6 的 MQTT 扩展（补上「MQTT 能压」） | `pmalhaire/xk6-mqtt` | 312 KB | — | 312 KB，`git ls-remote` 17 refs |
-| N9 | **认证/RBAC**（审计「grep auth 零命中」） | `fastapi-users/fastapi-users` | 1.2 MB | `e9c57ff` | `__init__.py` `15.0.5`；`pyproject.toml:133` `fastapi>=0.65.2` |
-| N10 | 企业级 SSO（预留，非默认） | `keycloak/keycloak` | 205 MB | `eb6d2dde` | Java，官方镜像 |
-| N11 | 轻量 SSO（单厂更划算） | `casdoor/casdoor` | 38 MB | `43a6aab` | Go+Vue |
-| N12 | **事件/告警闭环**（ack + 升级 + 值班） | `keephq/keep` | 133 MB | — | `providers/` 含 `slack/teams/telegram/webhook/ntfy` |
-| N13 | Alertmanager 本体（抑制/静默真实现） | `prometheus/alertmanager` | 7.1 MB | `e7a4afd` | `docs/configuration.md` `inhibit_rules` |
-| N14 | 告警 → 企业 IM 桥（Python，可裁剪） | `idealista/prom2teams` | 1.0 MB | `aaecfd5` | Teams webhook 转发 |
-| N15 | 状态页/公告（运维对外） | `openstatusHQ/openstatus` | 218 MB | — | `docker-compose.yaml` |
-| N16 | **Pydantic 契约生成**（防 24 关节人肉比对） | `koxudaxi/datamodel-code-generator` | 99 MB | `7ae9017` | `README.md:327` `--url ... --output model.py` |
-| N17 | **TS 契约生成**（同一 OpenAPI → `types/robot.ts`） | `openapi-ts/openapi-typescript` | 90 MB | `d46a319` | 生成 `types`/`openapi-fetch` |
-| N18 | 单测框架（审计 #18「数字不可重复」） | `pytest-dev/pytest` | 12 MB | `4fa645f` | 官方 |
-| N19 | 前端测试（E2E 真跑大屏） | `microsoft/playwright` | 108 MB | `d9f2fd3` | 官方 |
-| N20 | 组件测试 + Mock（审计 #23/#31） | `vitest-dev/vitest`、`testing-library/react-testing-library`、`mswjs/msw` | 70/1.4/6.9 MB | — | 官方 |
+| N1 | MQTT gap → OTel collection pipeline (#32 data freshness / unified telemetry) | `open-telemetry/opentelemetry-python` | 12 MB | `c4d8ff6` | `opentelemetry-sdk/` exists |
+| N2 | frontend RUM/tracing (audit "frontend unobservable") | `open-telemetry/opentelemetry-js` | 22 MB | `e5db961` | `api/`, `e2e-tests/` |
+| N3 | collector/edge forwarding (unified metrics+logs+trace) | `open-telemetry/opentelemetry-collector` | 22 MB | `e85aabc` | official collector |
+| N4 | collector distribution (config-driven pipeline, with Docker) | `grafana/alloy` | 69 MB | `eabe529` | `collector/README.md`, `docs/` |
+| N5 | **PG metrics** (direct fix for guardrail "no metrics export") | `prometheus-community/postgres_exporter` | 1.4 MB | `fb6be9d` | `README.md:252` `DATA_SOURCE_NAME` |
+| N6 | **Redis metrics** (Redis is a single point, must be observable) | `oliver006/redis_exporter` | 1.2 MB | `6de1e8b` | `README.md:197` `REDIS_ADDR`, `:216` `/metrics` |
+| N7 | **stress testing with writable assertions** (R-07/R-08 "judgeable") | `grafana/k6` | 75 MB | `b408672` | `go.mod` `go.k6.io/k6/v2` |
+| N8 | k6 MQTT extension (fill "MQTT can be stressed") | `pmalhaire/xk6-mqtt` | 312 KB | — | 312 KB, `git ls-remote` 17 refs |
+| N9 | **auth/RBAC** (audit "grep auth zero hits") | `fastapi-users/fastapi-users` | 1.2 MB | `e9c57ff` | `__init__.py` `15.0.5`; `pyproject.toml:133` `fastapi>=0.65.2` |
+| N10 | enterprise SSO (reserved, not default) | `keycloak/keycloak` | 205 MB | `eb6d2dde` | Java, official image |
+| N11 | lightweight SSO (cheaper for a single factory) | `casdoor/casdoor` | 38 MB | `43a6aab` | Go+Vue |
+| N12 | **event/alert closed-loop** (ack + escalation + on-call) | `keephq/keep` | 133 MB | — | `providers/` includes `slack/teams/telegram/webhook/ntfy` |
+| N13 | Alertmanager proper (inhibition/silence truly implemented) | `prometheus/alertmanager` | 7.1 MB | `e7a4afd` | `docs/configuration.md` `inhibit_rules` |
+| N14 | alert → enterprise IM bridge (Python, trimmable) | `idealista/prom2teams` | 1.0 MB | `aaecfd5` | Teams webhook forwarding |
+| N15 | status page / announcements (ops-facing) | `openstatusHQ/openstatus` | 218 MB | — | `docker-compose.yaml` |
+| N16 | **Pydantic contract generation** (avoid manual 24-joint comparison) | `koxudaxi/datamodel-code-generator` | 99 MB | `7ae9017` | `README.md:327` `--url ... --output model.py` |
+| N17 | **TS contract generation** (same OpenAPI → `types/robot.ts`) | `openapi-ts/openapi-typescript` | 90 MB | `d46a319` | generates `types`/`openapi-fetch` |
+| N18 | unit-test framework (audit #18 "numbers must not repeat") | `pytest-dev/pytest` | 12 MB | `4fa645f` | official |
+| N19 | frontend testing (E2E actually runs the wall) | `microsoft/playwright` | 108 MB | `d9f2fd3` | official |
+| N20 | component testing + Mock (audit #23/#31) | `vitest-dev/vitest`, `testing-library/react-testing-library`, `mswjs/msw` | 70/1.4/6.9 MB | — | official |
 
-### 6.2 数据生命周期与灾备（补齐审计 #7/#28）
+### 6.2 Data lifecycle & disaster recovery (fill audits #7/#28)
 
-| # | 需求点 | 仓库 | 体积 | 关键实证 |
+| # | Requirement point | Repo | Size | Key evidence |
 |---|---|---|---|---|
-| N21 | 保留/压缩/连续聚合（每天 ~130 GB 定时炸弹） | `timescale/timescaledb` | 64 MB | `add_retention_policy` / `add_compression_policy` 主体 |
-| N22 | 高级时序函数（gapfill 等，看板可用） | `timescale/timescaledb-toolkit` | 3.9 MB | 扩展 SQL 函数 |
-| N23 | PG 备份 | `pgbackrest/pgbackrest`（**源码仓，非镜像仓**） | 22 MB | 官方源码。⚠️ 2026-10-11 实测 `pgbackrest/pgbackrest` **无 Docker 镜像**（Docker Hub 返回 object not found）；灾备镜像须自建于 PGDG 包，见 `infra/ops/pgbackrest/Dockerfile` 与 `docs/DR-RUNBOOK.md §1` |
-| N24 | WAL 归档备份（云对象存储） | `wal-g/wal-g` | 35 MB | 官方 |
+| N21 | retention/compression/continuous-aggregate (a ~130 GB time bomb per day) | `timescale/timescaledb` | 64 MB | `add_retention_policy` / `add_compression_policy` body |
+| N22 | advanced time-series functions (gapfill etc., usable by dashboard) | `timescale/timescaledb-toolkit` | 3.9 MB | extended SQL functions |
+| N23 | PG backup | `pgbackrest/pgbackrest` (**source repo, not image repo**) | 22 MB | official source. ⚠️ 2026-10-11 measured `pgbackrest/pgbackrest` **has no Docker image** (Docker Hub returns object not found); DR image must be self-built on the PGDG package, see `infra/ops/pgbackrest/Dockerfile` and `docs/DR-RUNBOOK.md §1` |
+| N24 | WAL archive backup (cloud object storage) | `wal-g/wal-g` | 35 MB | official |
 
-### 6.3 替代评估（**「即使完全替换也要找到更完美的」**）
+### 6.3 Replacement evaluation (**"even a full replacement must find something more perfect"**)
 
-| 现有选择 | 候选替代 | 结论 | 依据 |
+| Current choice | Candidate replacement | Conclusion | Basis |
 |---|---|---|---|
-| `emqtt-bench`（Erlang，只吐数字、难写断言） | **`k6` + `xk6-mqtt`** | ✅ **建议替换/并列采用** | k6 是 Go 自带 JS 断言 + 官方发布；`emqtt-bench` 需 OTP 27.2+ 编译。R-07 要「可判定」，k6 直接满足 |
-| `mock_fleet.py` 纯自研 | `k6` 亦可生成负载 | ➖ **保留自研** | 24 关节真实 payload 只有自研能精确产生（I-4 判断不变） |
-| `grafana/oncall`（前轮已推荐） | — | ❌ **撤回** | **实证：`README.md:3` 原文 "entered maintenance mode on 2025-03-11 and was archived on 2026-03-24"** |
-| 无值班/升级机制 | `keephq/keep` | ✅ 新引入 | 活的、多 provider、docker-compose 可直跑 |
-| `zustand`（已决定不升） | `tanstack/query` | ➖ **补充而非替换** | query 管服务端状态/缓存/重试，与 zustand 管客户端状态互补，不互相替代 |
-| 无错误边界（审计 #23） | `react-error-boundary` | ✅ 小成本直用 | 2.4 MB，官方推荐姿势 |
-| `alert_engine` 自研规则引擎 | `prometheus/prometheus` 规则 | ❌ **不替换** | 规则引擎要判「机器人」，Prometheus 判「平台」。**同名不同层**（前轮已结论） |
-| 自研 `deduplicator.py` | Alertmanager `inhibit_rules` | ➖ 学语义不换实现 | 已按 I-5 抄语义；引 Alertmanager 实例反而多一层运维 |
+| `emqtt-bench` (Erlang, only spits numbers, hard to write assertions) | **`k6` + `xk6-mqtt`** | ✅ **suggest replacing/using alongside** | k6 is Go with built-in JS assertions + official releases; `emqtt-bench` needs OTP 27.2+ to compile. R-07 wants "judgeable", k6 satisfies directly |
+| `mock_fleet.py` purely in-house | `k6` can also generate load | ➖ **keep in-house** | only in-house can precisely produce the 24-joint real payload (I-4 judgment unchanged) |
+| `grafana/oncall` (recommended in a prior round) | — | ❌ **withdrawn** | **proven: `README.md:3` original text "entered maintenance mode on 2025-03-11 and was archived on 2026-03-24"** |
+| no on-call/escalation mechanism | `keephq/keep` | ✅ newly introduced | alive, multi-provider, docker-compose runnable |
+| `zustand` (decided not to upgrade) | `tanstack/query` | ➖ **complement, not replace** | query manages server state/cache/retry, complements zustand's client-state management, not a replacement |
+| no error boundary (audit #23) | `react-error-boundary` | ✅ small-cost direct use | 2.4 MB, official recommended posture |
+| `alert_engine` in-house rule engine | `prometheus/prometheus` rules | ❌ **do not replace** | the rule engine judges "robots", Prometheus judges "the platform". **Same name, different layer** (concluded in a prior round) |
+| in-house `deduplicator.py` | Alertmanager `inhibit_rules` | ➖ learn semantics, don't swap implementation | already copied semantics per I-5; pulling in an Alertmanager instance adds an ops layer |
 
-### 6.4 本轮**发现的陷阱**（实证，不是推测）
+### 6.4 Pitfalls **discovered this round** (empirical, not speculation)
 
-1. **`victoriametrics/victoria-metrics` 是 404**（`curl -sI` → `HTTP/2 404`）。
-   前轮 `INTEGRATION-PLAN.md` 已注明「ls-remote 失败已划掉」，**本轮复核确认死链**，非临时网络问题。
-   正确仓库是 `VictoriaMetrics/VictoriaMetrics`（1777 refs）—— 但我们**不引入**（判：与 Prometheus 功能重叠，见 §5.5）。
-2. **Grafana OnCall OSS 已归档**（见 §5.3）。
-3. `git ls-remote` 遇大仓偶发 `refs=0`（如 `grafana/loki` 首次），**必须复核**，
-   否则会把活仓误判为死仓 —— 这是「可达性核对」本身的坑。
+1. **`victoriametrics/victoria-metrics` is a 404** (`curl -sI` → `HTTP/2 404`). A prior round's `INTEGRATION-PLAN.md` already noted "ls-remote failed, struck through", **this round re-confirmed it's a dead link**, not a transient network issue. The correct repo is `VictoriaMetrics/VictoriaMetrics` (1777 refs) — but we **don't introduce it** (judgment: overlaps with Prometheus, see §5.5).
+2. **Grafana OnCall OSS has been archived** (see §5.3).
+3. `git ls-remote` occasionally returns `refs=0` for large repos (e.g. first run on `grafana/loki`); **must re-check**, otherwise a live repo gets misjudged as dead — this is a pitfall of "reachability checking" itself.
 
-### 6.5 搜索过但**明确不下载**（本轮新增，附理由）
+### 6.5 Searched but **explicitly not downloaded** (new this round, with reasons)
 
-| 仓库 | 体积 | 不下的理由 |
+| Repo | Size | Reason not to download |
 |---|---|---|
-| `thingsboard/thingsboard` | 404 MB | **整平台（替代方案）**，非依赖；引入即推翻现有四层架构 |
-| `openremote/openremote` | 106 MB | 同上；已下载仅作**架构对照**（多租户/fleet 模型），不套用 |
-| `apache/bifromq` | 17 MB | 分布式 MQTT broker，**替代 EMQX**；100 台规模用不上分布式 |
-| `nanomq/nanomq` | 33 MB | 边缘 broker，**替代 EMQX**；EMQX 生态（Dashboard/Rule）更全 |
-| `illacloud/illa-builder` | 52 MB | 低代码看板，**替代自研大屏**；交付物就是自研 2D 看板，不用 |
-| `grafana/grafana` | 2064 MB | 前轮已判不下，本轮**维持** |
-| `grafana/loki` + `vectordotdev/vector` + `fluent/fluent-bit` | 442+73+243 MB | 日志栈。**价值真实**（审计 #27/#19 要「有日志可查」），但 700+ MB 换一份「怎么配」的文档不划算 —— **改为记录推荐配置**，需要时按官方镜像起服务 |
-| `openstatusHQ/openstatus` | 218 MB | 状态页是**对外**产品需求，本项目是对内大屏，属「增值」非「必需」—— 已下载留档，列为 P3 |
-| `chakra-ui/ark` | 134 MB | 无头 UI 原语，**替代手写组件**；当前 Tailwind 手写已过 tsc，收益 < 回归风险 |
-| `goauthentik/authentik` | 157 MB | SSO，与 Keycloak/Casdoor 三者取一已够，选更轻的 |
+| `thingsboard/thingsboard` | 404 MB | **whole platform (alternative)**, not a dependency; introducing it overturns the existing four-layer architecture |
+| `openremote/openremote` | 106 MB | same as above; downloaded only for **architecture comparison** (multi-tenant/fleet model), not adopted |
+| `apache/bifromq` | 17 MB | distributed MQTT broker, **replacement for EMQX**; a 100-robot scale doesn't need distributed |
+| `nanomq/nanomq` | 33 MB | edge broker, **replacement for EMQX**; EMQX's ecosystem (Dashboard/Rule) is more complete |
+| `illacloud/illa-builder` | 52 MB | low-code dashboard, **replacement for the in-house wall**; the deliverable is the in-house 2D dashboard, so not used |
+| `grafana/grafana` | 2064 MB | judged not to download in a prior round; this round **maintains** that |
+| `grafana/loki` + `vectordotdev/vector` + `fluent/fluent-bit` | 442+73+243 MB | log stack. **Real value** (audits #27/#19 want "logs to check"), but 700+ MB for a "how to configure" doc isn't worth it — **record recommended config instead**, spin up a service from the official image when needed |
+| `openstatusHQ/openstatus` | 218 MB | status page is an **external-facing** product requirement; this project is an internal wall, so it's "value-add" not "essential" — downloaded for archive, listed as P3 |
+| `chakra-ui/ark` | 134 MB | headless UI primitives, **replace hand-written components**; current Tailwind hand-writing already passes tsc, benefit < regression risk |
+| `goauthentik/authentik` | 157 MB | SSO; Keycloak/Casdoor/this one, picking one is enough, choose the lighter |
 
-> ⚠️ **本轮自纠**：初扫时下了 `ark-ui`/`fluent-bit`/`loki`/`authentik` 共 ~1 GB，
-> 复核后**按本仓既有原则（不把体量致命/替代方案引入）删除**，只留归因结论。
-> 已下载 ≠ 该下载，这条对 NPC 同样适用。
+> ⚠️ **Self-correction this round**: the first scan downloaded `ark-ui`/`fluent-bit`/`loki`/`authentik` (~1 GB total); after review we **deleted them per the repo's existing principle (don't introduce fatal-size / alternative solutions)**, keeping only the attribution conclusions. Downloaded ≠ should-have-been-downloaded; this also applies to NPCs.
 
 ---
 
-## 候选克隆命令（若决定采用，先加入 fetch-sources.sh 再执行——当前未克隆到本仓）
+## Candidate clone commands (if adopting, add to fetch-sources.sh first then run — currently not cloned to this repo)
 
 ```bash
 cd external
-# 可观测性
+# observability
 git clone --depth 1 https://github.com/grafana/alloy.git
 git clone --depth 1 https://github.com/open-telemetry/opentelemetry-collector.git
 git clone --depth 1 https://github.com/open-telemetry/opentelemetry-python.git
@@ -389,59 +347,57 @@ git clone --depth 1 https://github.com/prometheus-community/postgres_exporter.gi
 git clone --depth 1 https://github.com/oliver006/redis_exporter.git
 git clone --depth 1 https://github.com/grafana/k6.git
 git clone --depth 1 https://github.com/pmalhaire/xk6-mqtt.git
-# 认证 / 告警闭环
+# auth / alert closed-loop
 git clone --depth 1 https://github.com/fastapi-users/fastapi-users.git
 git clone --depth 1 https://github.com/keycloak/keycloak.git
 git clone --depth 1 https://github.com/casdoor/casdoor.git
 git clone --depth 1 https://github.com/keephq/keep.git
 git clone --depth 1 https://github.com/prometheus/alertmanager.git
 git clone --depth 1 https://github.com/idealista/prom2teams.git
-# 契约即代码
+# contract-as-code
 git clone --depth 1 https://github.com/koxudaxi/datamodel-code-generator.git
 git clone --depth 1 https://github.com/openapi-ts/openapi-typescript.git
-# 测试与质量
+# testing and quality
 git clone --depth 1 https://github.com/pytest-dev/pytest.git
 git clone --depth 1 https://github.com/microsoft/playwright.git
 git clone --depth 1 https://github.com/vitest-dev/vitest.git
 git clone --depth 1 https://github.com/testing-library/react-testing-library.git
 git clone --depth 1 https://github.com/mswjs/msw.git
-# 数据生命周期 / 灾备
+# data lifecycle / disaster recovery
 git clone --depth 1 https://github.com/timescale/timescaledb.git
 git clone --depth 1 https://github.com/timescale/timescaledb-toolkit.git
 git clone --depth 1 https://github.com/pgbackrest/pgbackrest.git
 git clone --depth 1 https://github.com/wal-g/wal-g.git
 ```
 
-### 本轮验证边界（诚实标注）
+### This round's verification boundaries (honestly labeled)
 
-| 结论 | 状态 |
+| Conclusion | Status |
 |---|---|
-| 20+ 候选**已评估**（仅研究，**未克隆到本仓**；真要采用须先加入 `fetch-sources.sh`） | ➖ 评估 |
-| `DATA_SOURCE_NAME` / `REDIS_ADDR` / `/metrics` 行号 | ✅ 实测（`grep -n`） |
-| `fastapi-users 15.0.5` 与 `fastapi>=0.65.2` 兼容区间 | ✅ 实测（源码） |
-| Grafana OnCall 已归档 | ✅ 实测（`README.md:3` 原文） |
-| `victoriametrics/victoria-metrics` 404 | ✅ 实测（`curl -sI`） |
-| **未跑通任何新源的服务** | ❌ 无 Docker 环境，未起 k6/keep/OTel |
-| **未实装 fastapi-users** | ❌ 未与 `fastapi==0.110.0` 做运行时联调 |
-| `xk6-mqtt` 是否兼容 k6 v2 线 | ❌ 未编译（需 Go） |
+| 20+ candidates **evaluated** (research only, **not cloned to this repo**; to adopt, add to `fetch-sources.sh` first) | ➖ evaluated |
+| `DATA_SOURCE_NAME` / `REDIS_ADDR` / `/metrics` line numbers | ✅ measured (`grep -n`) |
+| `fastapi-users 15.0.5` and `fastapi>=0.65.2` compatibility range | ✅ measured (source) |
+| Grafana OnCall archived | ✅ measured (`README.md:3` original) |
+| `victoriametrics/victoria-metrics` 404 | ✅ measured (`curl -sI`) |
+| **No new-source service was run end-to-end** | ❌ no Docker environment; k6/keep/OTel not started |
+| **`fastapi-users` not actually installed** | ❌ not runtime-integrated with `fastapi==0.110.0` |
+| whether `xk6-mqtt` is compatible with the k6 v2 line | ❌ not compiled (needs Go) |
 
 ---
 
-## 7. 本仓实际已克隆但未在上文逐条列出的参考源（补充对账）
+## 7. Reference sources actually cloned but not individually listed above (supplemental reconciliation)
 
-> 为与磁盘和 `fetch-sources.sh` 完全对账：§5 表列了 14 个，本仓磁盘共 22 个
-> （见 `fetch-sources.sh` 的 `SOURCES` 数组 + `alertmanager`）。下列 **8 个**在
-> `fetch-sources.sh` 中已声明并实际克隆，但 §1–§5 正文未逐条展开，补录于此：
+> For full reconciliation with disk and `fetch-sources.sh`: §5's table lists 14, this repo's disk has 22 total (see the `SOURCES` array in `fetch-sources.sh` + `alertmanager`). The following **8** are declared and actually cloned in `fetch-sources.sh` but not expanded individually in §1–§5; recorded here:
 
-| 仓库 | 归属层 | 用途 / 套用结论 |
+| Repo | Belongs to layer | Purpose / Adoption conclusion |
 |---|---|---|
-| `locustio/locust` | 压测 | 订单 06 可选负载工具，与 `emqtt-bench`/`mock_fleet.py` 互补（I-4） |
-| `python-websockets/websockets` | 后端运行时 | `aiomqtt` 下层 WS 契约核对；本仓 WS 推送参考 |
-| `Kludex/uvicorn` | 后端运行时 | ASGI server 契约核对（上游已迁至 `Kludex/uvicorn`） |
-| `sqlalchemy/sqlalchemy` | 后端运行时 | ORM 契约核对（`alembic` 的底层） |
-| `pydantic/pydantic-settings` | 后端运行时 | 配置层契约核对 |
-| `prometheus/node_exporter` | 基础设施 | 主机指标 exporter（compose 已引用） |
-| `timescale/timescaledb-docker` | 基础设施 | TimescaleDB 镜像/初始化契约（compose 已引用） |
-| `timescale/timescaledb-tune` | 基础设施 | PG/TimescaleDB 调优工具契约 |
+| `locustio/locust` | stress | optional load tool for Order 06, complements `emqtt-bench`/`mock_fleet.py` (I-4) |
+| `python-websockets/websockets` | backend runtime | `aiomqtt`'s lower-level WS contract check; this repo's WS push reference |
+| `Kludex/uvicorn` | backend runtime | ASGI server contract check (upstream moved to `Kludex/uvicorn`) |
+| `sqlalchemy/sqlalchemy` | backend runtime | ORM contract check (`alembic`'s foundation) |
+| `pydantic/pydantic-settings` | backend runtime | config-layer contract check |
+| `prometheus/node_exporter` | infrastructure | host-metrics exporter (already referenced by compose) |
+| `timescale/timescaledb-docker` | infrastructure | TimescaleDB image/init contract (already referenced by compose) |
+| `timescale/timescaledb-tune` | infrastructure | PG/TimescaleDB tuning-tool contract |
 
-> **对账结论**：磁盘 22 = `fetch-sources.sh` 22 = §5(14) + §7(8)。§6 所列 ~30 个为**评估候选**，不在磁盘。
+> **Reconciliation conclusion**: disk 22 = `fetch-sources.sh` 22 = §5(14) + §7(8). The ~30 listed in §6 are **evaluation candidates**, not on disk.
