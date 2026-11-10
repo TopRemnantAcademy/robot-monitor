@@ -11,12 +11,12 @@ CREATE TABLE IF NOT EXISTS robot_telemetry (
     robot_id          TEXT            NOT NULL,
     status_code       INTEGER         NOT NULL,   -- 0 离线 / 1 正常 / 2 预警 / 3 故障
     error_code        INTEGER         NOT NULL DEFAULT 0,
-    battery_pct       DOUBLE PRECISION NOT NULL,
+    battery_pct       DOUBLE PRECISION,
     battery_temp      DOUBLE PRECISION,
-    max_joint_temp    DOUBLE PRECISION NOT NULL,  -- 预计算：所有关节最高温
-    joint_temperatures JSONB          NOT NULL,
-    joint_positions     JSONB         NOT NULL,
-    joint_torques       JSONB         NOT NULL,
+    max_joint_temp    DOUBLE PRECISION,  -- 预计算：所有关节最高温（public/外部数据源可空）
+    joint_temperatures JSONB,
+    joint_positions     JSONB,
+    joint_torques       JSONB,
     pos_x DOUBLE PRECISION,
     pos_y DOUBLE PRECISION,
     pos_z DOUBLE PRECISION,
