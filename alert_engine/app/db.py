@@ -1,7 +1,8 @@
-"""告警引擎的 Redis / TimescaleDB 连接（与本服务同目录，独立于后端）。
+"""Redis / TimescaleDB connections for the alert engine (same directory as this service, independent of the backend).
 
-连接池由 `alert_engine/app/pool.py:create_pool()` 统一构造 —— 那里封装了
-asyncpg 0.32.0 把 `min_size` 从"预建条数"改成"空闲地板"的语义变化（订单 08 / I-6）。
+The connection pool is constructed uniformly by `alert_engine/app/pool.py:create_pool()` -- which
+encapsulates the asyncpg 0.32.0 semantic change of `min_size` from "pre-built count" to "idle floor"
+(order 08 / I-6).
 """
 
 from __future__ import annotations
@@ -16,18 +17,20 @@ from app.pool import create_pool
 
 _pool: asyncpg.Pool | None = None
 _redis: Redis | None = None
-# 建池必须串行化：`_pool is None` 是 check-then-act，而 `await create_pool(...)`
-# 会让出事件循环 —— 并发调用方全部看到 `_pool is None`，于是**各建一个池**。
+# Pool creation must be serialized: `_pool is None` is check-then-act, and `await create_pool(...)`
+# yields the event loop -- concurrent callers all see `_pool is None`, so **each builds its own pool**.
 #
-# 本机实测（PostgreSQL 15.19）：ticker 首轮给 100 台机器人各 spawn 一个
-# `update_online()`，100 个协程同时进 `get_pool()` → 建出 **100 个池**，
-# 每个池预建 `db_pool_size` 条连接 → 远超 `max_connections`，
-# 332 次 `TooManyConnectionsError`。故障态自相矛盾（`pg_stat_activity` 只有 8 条连接，
-# 因为连接根本没建成），根因是**池的数量**而不是池的大小。
-# 注（ISSUE #96）：现在 ticker 每轮**先调一次** `load_online_state()` 取回全网
-# 在线态（1 次往返，不按台数放大），`update_online()` 仅在状态变化时低频调用，
-# 上面的并发建池场景不复现；但这条锁是历史护栏，且 `consume()` 侧的告警落库
-# 仍可能并发（spawn 多个 emit），故保留。
+# Local measurement (PostgreSQL 15.19): on the first ticker round, spawn one `update_online()` per
+# 100 robots, 100 coroutines enter `get_pool()` simultaneously -> **100 pools** built,
+# each pre-building `db_pool_size` connections -> far exceeding `max_connections`,
+# 332 `TooManyConnectionsError`s. The failure state is self-contradictory (`pg_stat_activity` shows only 8
+# connections, because the connections were never actually built); the root cause is the **number of pools**,
+# not the pool size.
+# Note (ISSUE #96): now the ticker calls `load_online_state()` **once per round** to fetch the whole-network
+# online state (one round trip, not amplified by robot count), and `update_online()` is called infrequently
+# only on state changes, so the concurrent pool-creation scenario above no longer reproduces; but this lock is
+# a historical guardrail, and the alert persistence on the `consume()` side may still be concurrent
+# (spawning multiple emits), so it is kept.
 _pool_lock = asyncio.Lock()
 
 
@@ -36,15 +39,15 @@ async def get_pool() -> asyncpg.Pool:
     if _pool is not None:
         return _pool
     async with _pool_lock:
-        # 二次检查：等锁期间可能已有调用方把池建好了
+        # Double-check: while waiting for the lock, another caller may have already built the pool
         if _pool is None:
             _pool = await create_pool(
                 dsn=settings.database_url,
                 pool_size=settings.db_pool_size,
                 command_timeout=settings.db_command_timeout,
-                # 建池超时：不给的话走 connection.connect() 的默认 60s，
-                # 让「DB 未就绪」把启动/探活路径挂死（机制见 app/pool.py 的
-                # connect_timeout 注释与 backend_ingestion/app/db/session.py 模块头）。
+                # Pool-build timeout: if not set, falls back to connection.connect()'s default 60s,
+                # letting "DB not ready" hang the startup/liveness path (see the connect_timeout comment in
+                # app/pool.py and the module header of backend_ingestion/app/db/session.py).
                 connect_timeout=settings.db_connect_timeout_s,
             )
     return _pool

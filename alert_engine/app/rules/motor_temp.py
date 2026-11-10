@@ -1,4 +1,4 @@
-"""电机过热规则：任一关节 > 75°C 且**持续 ≥3 个采样点**（spec/02 §3）。"""
+"""Motor over-temperature rule: any joint > 75°C sustained for >=3 consecutive samples (spec/02 §3)."""
 
 from __future__ import annotations
 
@@ -21,8 +21,8 @@ class MotorTempRule(Rule):
         if len(window) < self.min_samples:
             return None
 
-        # 要求最近 min_samples 个采样点**每一个**都有关节超阈值，
-        # 避免单个尖峰（噪声）误报。
+        # Require EVERY one of the most recent min_samples samples to have a joint over threshold,
+        # to avoid a single spike (noise) causing a false positive.
         hot_joint, hot_val = None, None
         for w in list(window)[-self.min_samples:]:
             temps = w.get("joint_temperatures") or {}
@@ -37,7 +37,7 @@ class MotorTempRule(Rule):
             robot_id=state.get("robot_id", ""),
             rule_id=self.rule_id,
             severity=self.severity,
-            message=(f"电机过热：{hot_joint} {hot_val:.1f}°C 超过阈值 {self.threshold}°C"
-                     f"（连续 {self.min_samples} 个采样点）"),
+            message=(f"Motor over-temperature: {hot_joint} {hot_val:.1f}°C exceeds threshold "
+                     f"{self.threshold}°C (consecutive {self.min_samples} samples)"),
             detail={"joint": hot_joint, "temp": hot_val, "threshold": self.threshold},
         )

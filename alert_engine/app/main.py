@@ -1,23 +1,26 @@
-"""告警引擎入口（spec/02 §5）。
+"""Alert engine entry point (spec/02 §5).
 
-两条驱动线：
-1. **消费线**：订阅 Redis `robot:stream:all`，维护每台机器人滑动窗口，
-   依次跑 motor_temp / battery_low / joint_stuck 三条规则。
-2. **ticker 线**：每秒遍历 100 台机器人跑 offline 规则。
-   判据**优先读** `robot_metadata.is_online`（后端 metadata_writer 心跳写入，ISSUE #96）；
-   该列读不到时回落到内存 last_seen 时间差，避免部署初期误报。
-   —— **不依赖 Redis Key 过期事件**（keyspace notification 默认关闭）。
+Two driver lines:
+1. **Consume line**: subscribe to Redis `robot:stream:all`, maintain a sliding window per robot,
+   and run the motor_temp / battery_low / joint_stuck rules in sequence.
+2. **Ticker line**: every second iterate 100 robots and run the offline rule.
+   The criterion **prefers** `robot_metadata.is_online` (written by the backend metadata_writer
+   heartbeat, ISSUE #96); when that column is unavailable, fall back to the in-memory last_seen time
+   delta, to avoid false alarms early in deployment.
+   -- **Does not depend on Redis Key expiration events** (keyspace notification is off by default).
 
-告警先经**三层过滤**，顺序固定为 **silence → inhibition → dedup**
-（理由见 `emit()` 的 docstring），再由 store 写入 robot_alert 并 PUBLISH robot:alerts。
+Alerts go through **three layers of filtering**, in the fixed order **silence -> inhibition -> dedup**
+(see `emit()`'s docstring for the reason), then store writes robot_alert and PUBLISHes robot:alerts.
 
-另有一条 **escalation 线**（订单 17 T2）：周期性扫描"severity=3 且超时未 ack"
-的告警，标记 escalated 并重发，对应 Alertmanager 的 `repeat_interval` 语义。
+There is also an **escalation line** (order 17 T2): periodically scans alerts that are
+"severity=3 and unacked past timeout", marks them escalated and re-sends, matching Alertmanager's
+`repeat_interval` semantics.
 
-通知（钉钉/企微/通用 webhook）是**旁路**（R-15 / GAP-3）：落库与 WS 广播先完成，
-再对通知做**有界重试**（≤3 次、总耗时 ≤5s、指数退避），全失败则计数
-`robot_alert_notify_failed_total{reason}`。通知失败**绝不**阻塞、回滚或推迟
-告警落库 —— 外部系统故障不该让本系统丢数据。
+Notification (DingTalk/WeCom/generic webhook) is a **side path** (R-15 / GAP-3): persistence and WS
+broadcast complete first, then the notification is given **bounded retries** (<=3 attempts, total <=5s,
+exponential backoff); on total failure count `robot_alert_notify_failed_total{reason}`. A notification
+failure **never** blocks, rolls back, or delays alert persistence -- an external system's failure should
+not make this system lose data.
 """
 
 from __future__ import annotations
@@ -61,75 +64,79 @@ DEDUP_WINDOW = {r.rule_id: r.dedup_window_s for r in RULES}
 STREAM_RULES = [r for r in RULES if r.rule_id != "offline"]
 OFFLINE_RULE = next(r for r in RULES if r.rule_id == "offline")
 
-# 抑制的**源规则**：offline 告警活跃时，抑制同一机器人的其他告警。
-# 对应 Alertmanager 的 `inhibit_rules`：source=offline / equal=[robot_id]。
+# The **source rule** for inhibition: when an offline alert is active, inhibit this robot's other alerts.
+# Corresponds to Alertmanager's `inhibit_rules`: source=offline / equal=[robot_id].
 INHIBIT_SOURCE_RULE = "offline"
 
 windows: dict[str, deque] = {}
-# last_seen 仍由消费线维护，作为 offline 的**回落**判据（ISSUE #96：列不可用时）
-# 以及告警文案（"已 Ns 无遥测"）。
+# last_seen is still maintained by the consume line, as the **fallback** criterion for offline
+# (ISSUE #96: when the column is unavailable)
+# and for the alert text ("no telemetry for Ns").
 last_seen: dict[str, float] = {}
-# 本引擎按内存 last_seen 推算的在线态，仍按状态变化低频写 robot_metadata
-# （兼容 #61 既有路径）；同时供 inhibition（is_inhibited）使用。
+# The online state inferred by this engine from in-memory last_seen, still written to robot_metadata
+# at low frequency on state changes (compatible with #61's existing path); also used by inhibition (is_inhibited).
 online_state: dict[str, bool] = {}
 
-# 每台机器人当前活跃告警登记簿（订单 30）——severity 抑制的判据来源。
-# 与 online_state 同源：进程内派生状态，见 app/inhibition.py 的说明。
+# Per-robot active-alert registry (order 30) -- the criterion source for severity inhibition.
+# Same source as online_state: in-process derived state; see app/inhibition.py's notes.
 active_alerts = ActiveAlertRegistry()
 
 _tasks: set[asyncio.Task] = set()
 
-# 通知器：未配置 URL 时为 None（整条链路静默跳过）。
-# 在模块级装配属刻意的 fail-fast：kind 拼错时进程起不来，
-# 好过配置写错却在运行时静默不通知。
+# Notifier: None when no URL is configured (whole chain silently skipped).
+# Assembling at module level is a deliberate fail-fast: a misspelled kind prevents the process from
+# starting, which is better than misconfiguring and silently not notifying at runtime.
 _notifier = build_notifier(settings)
 
-# ---- 通知重试上限（R-15 T3）------------------------------------------------
-# 值是**硬上限**而非可调参数：需求 §6 明令「禁止无限重试 / 无上限等待」，
-# 写进配置就给了"把它调成 100 次"的机会，那不是本单想要的自由度。
-#   3 次：覆盖"限流一秒后自愈"这类瞬时故障；再多对群机器人无意义。
-#   5s  ：与 `WebhookNotifier.timeout_s`（单次 HTTP 超时）同量级 —— 即最坏
-#         情况下"一次尝试"的耗时上界，整体预算 = 3 × 单次预算，可算不失控。
-# 指数退避基 0.5s → 0.5 / 1.0（仅两次间隔），总睡眠 1.5s，占预算的 30%。
+# ---- Notification retry limits (R-15 T3) ------------------------------------------------
+# The values are **hard caps**, not tunable parameters: requirement §6 explicitly forbids "unbounded
+# retries / unbounded waiting", and putting them in config would give the chance to "tune it to 100
+# attempts", which is not the freedom this order wants.
+#   3 attempts: covers transient faults like "self-heals one second after rate-limiting"; more is
+#     meaningless for a group bot.
+#   5s: same order of magnitude as `WebhookNotifier.timeout_s` (single HTTP timeout) -- i.e. the worst
+#     case single-attempt time budget; total budget = 3 x single budget, calculable and not out of control.
+# Exponential backoff base 0.5s -> 0.5 / 1.0 (only two intervals), total sleep 1.5s, 30% of the budget.
 NOTIFY_MAX_ATTEMPTS = 3
 NOTIFY_TOTAL_BUDGET_S = 5.0
 NOTIFY_BACKOFF_BASE_S = 0.5
 
 
 def spawn(coro) -> None:
-    """后台执行告警落库/发布，不阻塞消费循环；同时保留引用防止被 GC。"""
+    """Run alert persistence/publish in the background without blocking the consume loop; also keep a reference to prevent GC."""
     t = asyncio.create_task(coro)
     _tasks.add(t)
     t.add_done_callback(_tasks.discard)
 
 
 def inhibition_reason(alert: Alert) -> InhibitionRecord | None:
-    """抑制判定，返回**可追溯凭证**；放行返回 None（订单 30：禁止静默丢弃）。
+    """Inhibition decision; returns a **traceable receipt**; returns None to pass (order 30: forbid silent dropping).
 
-    两级判定，任一命中即抑制（附不同的 `reason` 以便审计归因）：
+    Two levels of decision; a hit at either one inhibits (with a different `reason` for audit attribution):
 
-    1. **offline 层**（订单 10 既有）：机器人已判离线 → 抑制同机所有衍生告警。
-       `reason="offline"`。
-    2. **severity 层**（订单 30 新增）：同机存在更高 severity 的活跃告警 →
-       抑制本条。`reason="severity"`。
+    1. **offline layer** (order 10 existing): robot already judged offline -> inhibit all derivative
+       alerts on the same machine. `reason="offline"`.
+    2. **severity layer** (order 30 new): a higher-severity active alert exists on the same machine ->
+       inhibit this one. `reason="severity"`.
 
-    为什么把 offline 单列而不并入 severity 层：offline 是「整机失联」这一
-    **绝对根因**，其语义是「任何衍生告警都无价值」；而 severity 层是相对压制。
-    合并会让「离线时为何抑制 battery_low」与「高温时为何抑制低电量」的成因
-    在指标上同形，运维无法区分是掉线还是过热。二者 `reason` 必须可分辨。
+    Why keep offline separate rather than merging into the severity layer: offline is the "whole machine
+    lost contact" **absolute root cause**, whose semantics is "any derivative alert is worthless"; the
+    severity layer is relative suppression. Merging would make "why inhibit battery_low when offline" and
+    "why inhibit low battery when overheating" isomorphic on the metrics, and operators could not tell
+    whether it was a dropout or overheating. The two `reason`s must be distinguishable.
 
-    两个关键不变量（写错会吞掉真实告警）：
+    Two key invariants (getting them wrong swallows real alerts):
 
-    1. `online_state.get(rid) is False` —— 必须显式 `is False`，
-       不能用 `not online_state.get(rid)`。ticker 要跑满一轮才会给 100 台机器人
-       填值，启动初期字典为空，falsy 判定会把**所有**告警全判成被抑制。
-    2. **抑制源自身永不被抑制** —— offline 规则不被 offline 层压；
-       而 severity 层用 `exclude_rule` 排除自身，且要求 source 严格更高。
-       否则根因告警永远报不出来。
+    1. `online_state.get(rid) is False` -- must be an explicit `is False`,
+       not `not online_state.get(rid)`. The ticker must run a full round before filling values for the
+       100 robots; early at startup the dict is empty, and a falsy judgment would mark **all** alerts as inhibited.
+    2. **The inhibition source itself is never inhibited** -- the offline rule is not suppressed by the
+       offline layer; the severity layer uses `exclude_rule` to exclude itself and requires the source to
+       be strictly higher. Otherwise the root-cause alert is never reported.
     """
     rid = alert.robot_id
 
-    # ---- 第 1 级：offline ----
+    # ---- Level 1: offline ----
     if settings.inhibit_offline and alert.rule_id != INHIBIT_SOURCE_RULE:
         if online_state.get(rid) is False:
             return InhibitionRecord(
@@ -141,7 +148,7 @@ def inhibition_reason(alert: Alert) -> InhibitionRecord | None:
                 reason="offline",
             )
 
-    # ---- 第 2 级：severity（高等级抑制同机低等级）----
+    # ---- Level 2: severity (higher severity inhibits lower on the same machine) ----
     if settings.inhibit_severity:
         rec = evaluate_severity_inhibition(
             alert, active_alerts, min_source_severity=MIN_SOURCE_SEVERITY
@@ -153,25 +160,25 @@ def inhibition_reason(alert: Alert) -> InhibitionRecord | None:
 
 
 def is_inhibited(alert: Alert) -> bool:
-    """抑制判定的布尔门面（保持既有调用方/测试兼容）。
+    """Boolean facade for the inhibition decision (keep existing caller/test compatibility).
 
-    实现委托给 `inhibition_reason()`；需要凭证时直接调后者。
+    Implementation delegates to `inhibition_reason()`; call the latter directly when the receipt is needed.
     """
     return inhibition_reason(alert) is not None
 
 
-# ---------------------------------------------------------------- 通知（旁路）
+# ---------------------------------------------------------------- notification (side path)
 
 async def _send_with_retry(notifier, alert: Alert) -> tuple[bool, str | None]:
-    """有界重试投递。返回 `(是否成功, 失败 reason)`。
+    """Bounded-retry delivery. Returns `(success, failure reason)`.
 
-    上限来自模块常量（见其注释）：**最多 `NOTIFY_MAX_ATTEMPTS` 次**、
-    且**总耗时不超过 `NOTIFY_TOTAL_BUDGET_S`**。两个上限都要，
-    因为单看次数不够 —— 每次 HTTP 自带 `timeout_s`，次数 × 单次超时
-    就是最坏耗时；单看耗时不够 —— 预算用尽后要能给出"试了几次"。
-    退避用指数（`base * 2**i`），且**每次睡眠前重算剩余预算**，
-    保证 `asyncio.sleep` 不会把总耗时顶穿（"睡过头"是无限等待的温和版本，
-    同样是需求 §6 禁止的）。
+    The caps come from module constants (see their comments): **at most `NOTIFY_MAX_ATTEMPTS` attempts**,
+    and **total time not exceeding `NOTIFY_TOTAL_BUDGET_S`**. Both caps are needed, because attempts
+    alone are insufficient -- each HTTP carries its own `timeout_s`, and attempts x single timeout is the
+    worst-case time; time alone is insufficient -- after the budget is exhausted we must be able to say
+    "tried N times". Backoff is exponential (`base * 2**i`), and the remaining budget is **recomputed
+    before each sleep**, ensuring `asyncio.sleep` never pushes the total time over (sleeping "too long"
+    is the gentle version of unbounded waiting, also forbidden by requirement §6).
     """
     started = time.monotonic()
     last_reason: str | None = None
@@ -181,16 +188,16 @@ async def _send_with_retry(notifier, alert: Alert) -> tuple[bool, str | None]:
             if await notifier.send(alert):
                 return True, None
         except Exception as exc:
-            # 通知器契约是"永不外抛"（webhook.py:send 自带 try/except），
-            # 这里再兜一层是**纵深防御**：只要有一次漏出去，异常会顺着
-            # `spawn` 的任务冒到事件循环，把本单最核心的不变量
-            # 「通知失败不影响落库/广播」破坏掉。代价是一行 except。
+            # The notifier contract is "never raises outward" (webhook.py:send has its own try/except),
+            # this extra layer is **defense in depth**: if one ever leaks, the exception would bubble up
+            # through the `spawn` task to the event loop and break this order's core invariant
+            # "notification failure does not affect persistence/broadcast". The cost is one except line.
             log.exception("notifier raised despite contract: %s/%s",
                           alert.robot_id, alert.rule_id)
             last_reason = classify_notify_reason(exc)
         else:
-            # 走 else 分支 = send() 正常返回 False（内部已吞异常），
-            # reason 由通知器旁注在 `last_reason` 上（见 webhook.py 的说明）。
+            # Taking the else branch = send() returned False normally (already swallowed the exception
+            # internally); reason is annotated by the notifier on `last_reason` (see webhook.py's notes).
             last_reason = getattr(notifier, "last_reason", None) or "unknown"
 
         if attempt == NOTIFY_MAX_ATTEMPTS:
@@ -199,8 +206,9 @@ async def _send_with_retry(notifier, alert: Alert) -> tuple[bool, str | None]:
         backoff = NOTIFY_BACKOFF_BASE_S * (2 ** (attempt - 1))
         remaining = NOTIFY_TOTAL_BUDGET_S - (time.monotonic() - started)
         if remaining <= backoff:
-            # 预算不足以再等一轮退避 → 放弃重试，直接用当前 reason 计数。
-            # 这不是"提前失败"，而是"再等就超预算"，故 break 而非 sleep(0)。
+            # Budget insufficient for another backoff round -> give up retrying, count directly with the
+            # current reason. This is not "early failure" but "waiting longer would exceed the budget",
+            # hence break rather than sleep(0).
             log.warning("notify retry budget exhausted after %d attempt(s) on %s/%s",
                         attempt, alert.robot_id, alert.rule_id)
             break
@@ -210,40 +218,42 @@ async def _send_with_retry(notifier, alert: Alert) -> tuple[bool, str | None]:
 
 
 def classify_notify_reason(exc: BaseException) -> str:
-    """把通知器意外抛出的异常归类。
+    """Classify an exception unexpectedly raised by the notifier.
 
-    正常路径上 `webhook.py:send()` 不会外抛，reason 由通知器自己给出；
-    本函数只服务 `_send_with_retry` 的兜底分支 —— 但**不能省略**：
-    兜底分支也必须产出合法标签，否则 `metrics.notify_failed.labels(reason=...)`
-    会被塞进异常类名之类的高基数取值。委托给通知器的同一张分类表
-    （`classify_exception`），保证"谁分类"只有一处实现。
+    On the normal path `webhook.py:send()` never raises outward; reason is given by the notifier itself;
+    this function only serves `_send_with_retry`'s fallback branch -- but it **cannot be omitted**:
+    the fallback branch must also produce a legal label, otherwise `metrics.notify_failed.labels(reason=...)`
+    would be fed high-cardinality values like exception class names. Delegates to the notifier's same
+    classification table (`classify_exception`), guaranteeing "who classifies" has only one implementation.
     """
     return classify_exception(exc)
 
 
 async def _notify(alert: Alert) -> None:
-    """通知**旁路任务**：投递 + 计数，失败只记指标/日志，永不外抛。
+    """Notification **side-path task**: delivery + counting; on failure only record metric/log, never raise outward.
 
-    为什么是 TODO 里的"后台任务"而不是在 `emit()` 里 `await`（关键决策）：
-      `emit()` 跑在 `spawn()` 出来的消费任务里，而它的**下一件事**就是回去
-      `pubsub.listen()` 取下一条消息。若在这里 await 通知（哪怕是有界重试），
-      最坏 5s 内该协程无法取消息 —— 100 台 @10Hz 的流会在 Redis 缓冲里积压，
-      而"通知慢"（外部系统）就这样变成了"告警消费慢"（本系统）。
-      本单的硬门槛是**通知失败不得阻塞告警落库/广播**；把通知整体挪出主链路，
-      是把这条门槛从"尽量"变成"结构上不可能违反"。
-      代价：一条告警的通知与它的落库不再严格同一时刻完成，可接受 ——
-      通知本就是"尽力而为"（需求 §3）。
+    Why a "background task" in the TODO rather than `await` inside `emit()` (key decision):
+      `emit()` runs in the consume task spawned by `spawn()`, and its **next thing** is to go back to
+      `pubsub.listen()` for the next message. If we await the notification here (even bounded retries),
+      the worst case is that this coroutine cannot fetch messages for 5s -- a 100-machine @10Hz stream
+      would pile up in the Redis buffer, and "slow notification" (external system) thus becomes
+      "slow alert consumption" (this system).
+      This order's hard gate is **notification failure must not block alert persistence/broadcast**;
+      moving the notification entirely out of the main chain turns this gate from "best effort" into
+      "structurally impossible to violate".
+      Cost: one alert's notification and its persistence no longer complete at strictly the same instant,
+      acceptable -- notification is inherently "best effort" (requirement §3).
     """
-    # 在 await 之前取快照：重试期间 `_notifier` 可能被替换（测试会 monkeypatch），
-    # 本任务应始终对"当时的那个通知器"负责。
+    # Take a snapshot before await: during retries `_notifier` may be replaced (tests monkeypatch it),
+    # this task should always be responsible for "the notifier at that time".
     notifier = _notifier
     if notifier is None:
         return
     try:
         ok, reason = await _send_with_retry(notifier, alert)
     except asyncio.CancelledError:
-        raise                     # 取消是控制流，不是投递失败，不得计成失败
-    except Exception as exc:      # pragma: no cover - 纵深防御，正常不可达
+        raise                     # cancel is control flow, not delivery failure; must not be counted as failure
+    except Exception as exc:      # pragma: no cover - defense in depth, normally unreachable
         log.exception("notify task crashed: %s/%s", alert.robot_id, alert.rule_id)
         ok, reason = False, classify_notify_reason(exc)
 
@@ -251,137 +261,150 @@ async def _notify(alert: Alert) -> None:
         metrics.notify_sent.labels(kind=getattr(notifier, "kind", "unknown")).inc()
         return
 
-    # 失败：计数必须落在**封闭 reason 集合**内（`NotifyError` 已做归一，
-    # 这里再兜一次 None/空串，防止标签出现空值）。
+    # Failure: the count must land within the **closed reason set** (`NotifyError` already normalized,
+    # here we guard None/empty string once more, to prevent an empty label).
     metrics.notify_failed.labels(reason=reason or "unknown").inc()
-    # 失败已由通知器逐次 `log.exception` 打出，这里补一行**结论级**日志：
-    # 记明"最终放弃了、重试了几次"，否则日志里只有 3 条同样的失败栈，
-    # 读者无法区分"失败但重试成功"与"彻底失败"（指标能区分，人肉看日志不能）。
+    # The failure has already been printed per-attempt by the notifier's `log.exception`; here we add a
+    # **conclusion-level** log line: record "finally gave up, retried N times", otherwise the log would
+    # only have 3 identical failure stacks, and the reader could not distinguish "failed but retried
+    # successfully" from "totally failed" (metrics can distinguish, human reading logs cannot).
     log.error("notify giving up after retries: reason=%s %s/%s",
               reason or "unknown", alert.robot_id, alert.rule_id)
 
 
 async def emit(alert: Alert) -> None:
-    """告警出口。三层过滤，**顺序不可调换**：silence → inhibition → dedup。
+    """Alert exit. Three-layer filtering, **order must not be swapped**: silence -> inhibition -> dedup.
 
-    为什么必须是这个顺序（订单 17 T3 要求写清理由）：
+    Why this order (order 17 T3 requires the reasons written out):
 
-    1. **silence 最先**。静默是运维显式下达的"此刻不要打扰我"指令，
-       优先级高于一切自动判定。若放在 inhibition/dedup 之后，会带来两个后果：
-       - 被静默的告警仍会**写 dedup Key**，于是静默解除后的第一秒内，
-         本该报出的告警被"静默期内留下的去重窗口"二次压制 —— 静默产生了
-         它在语义上不该有的后效。
-       - 静默的意图是"不处理"，而 inhibition/dedup 都需要先读状态（Redis/内存），
-         多一次无谓的判定。
-    2. **inhibition 次之**。抑制是"根因已知，衍生告警无价值"（机器人离线时，
-       电量低/关节卡死不必报）。它必须在 dedup **之前**，否则衍生告警会先
-       占掉 dedup 窗口，等根因恢复后真实告警可能被去重挡掉 —— 订单 10 的
-       原设计即如此（`emit` 里 inhibition 在 `should_emit` 之前），本单保留。
-    3. **dedup 最后**。去重窗口是一次"计数副作用"（写 Redis Key），
-       只有确定这条告警真的要发出去，才配消耗窗口。前两层都不该浪费它。
+    1. **silence first**. Silence is an operator-explicit "do not disturb me right now" command,
+       higher priority than any automatic judgment. If placed after inhibition/dedup, two consequences:
+       - silenced alerts would still **write the dedup Key**, so within the first second after silence is
+         lifted, the alert that should have fired is "secondarily suppressed" by the dedup window left
+         during the silence -- silence produces an after-effect it should not have semantically.
+       - the intent of silence is "do not process", while inhibition/dedup both need to read state first
+         (Redis/in-memory), one more needless judgment.
+    2. **inhibition second**. Inhibition is "root cause known, derivative alerts worthless" (when a robot
+       is offline, low battery / joint stuck need not be reported). It must be **before** dedup, otherwise
+       derivative alerts would occupy the dedup window first, and after the root cause recovers the real
+       alert might be blocked by dedup -- order 10's original design was like this (`emit` had inhibition
+       before `should_emit`), this order keeps it.
+    3. **dedup last**. The dedup window is a one-time "counting side effect" (writing a Redis Key);
+       only when it is determined that this alert really must be sent does it deserve to consume the window.
+       The first two layers should not waste it.
 
-    换言之：silence 决定"要不要看"，inhibition 决定"这条有没有价值"，
-    dedup 决定"这条本窗口内发过没有"。由粗到细，每层只处理"上一层放行"的告警。
+    In other words: silence decides "whether to look", inhibition decides "whether this one has value",
+    dedup decides "whether this window already sent one". From coarse to fine, each layer only handles
+    the alerts "passed by the layer above".
     """
     if await is_silenced(alert):
-        # 静默计数单独埋点：与抑制同理，`alerts_emitted` 的下降必须可归因
-        # —— 是静默挡掉的，还是抑制挡掉的，运维动作完全不同。
+        # Silence counting is a separate metric: same as inhibition, the **drop** in `alerts_emitted`
+        # must be attributable -- was it silenced or inhibited? The ops actions are completely different.
         metrics.alerts_silenced.labels(rule_id=alert.rule_id).inc()
         log.debug("alert silenced: %s %s (silence key active)", alert.robot_id,
                   alert.rule_id)
         return
-    # 先问布尔门面（保持既有 monkeypatch 接缝），命中再取凭证。
-    # 两步而非直接 `inhibition_reason()`：`is_inhibited` 是订单 10/17/24
-    # 测试与外部约定的稳定接缝，直接绕过它会让既有 spy 失效。
+    # Ask the boolean facade first (keep the existing monkeypatch seam), fetch the receipt on a hit.
+    # Two steps rather than a direct `inhibition_reason()`: `is_inhibited` is the stable seam for
+    # order 10/17/24 tests and external contracts; bypassing it directly would invalidate existing spies.
     if is_inhibited(alert):
         record = inhibition_reason(alert)
-        # 抑制计数必须单独埋：否则 `alerts_emitted` 的**下降**无法归因 ——
-        # 到底是机器人真的健康了，还是被抑制层挡掉了。二者运维含义完全不同。
-        # 订单 30 追加 `reason` 维度：offline 与 severity 的运维动作不同
-        # （前者查网络/电源，后者查根因告警是否已处置）。
-        # record 可能为 None：仅当 `is_inhibited` 被外部 monkeypatch 成恒真、
-        # 而真实判定放行时才会发生（测试接缝场景）。此时降级为 reason="unknown"，
-        # 不掩盖调用，也不抛异常中断告警链路。
+        # Inhibition counting must be separate: otherwise the **drop** in `alerts_emitted` cannot be
+        # attributed -- did the robot actually become healthy, or was it blocked by the inhibition layer?
+        # The two have completely different ops meanings.
+        # Order 30 added the `reason` dimension: offline and severity have different ops actions
+        # (the former checks network/power, the latter checks whether the root-cause alert was handled).
+        # record may be None: only happens when `is_inhibited` is monkeypatch'd to always-true externally
+        # while the real decision passes (test seam scenario). Degrade to reason="unknown", neither
+        # masking the call nor throwing to interrupt the alert chain.
         reason = record.reason if record is not None else "unknown"
         metrics.alerts_suppressed.labels(
             rule_id=alert.rule_id, reason=reason
         ).inc()
-        # 禁止静默丢弃：DEBUG 是给"能拿到日志的人"，运维在 INFO 级/告警台
-        # 看不到 DEBUG。故抑制凭证用 WARNING 单行输出，含 source 与 target，
-        # 可直接 grep `inhibition` 追出"这条为什么没出去"。
+        # Forbid silent dropping: DEBUG is for "those who can get the logs"; ops at INFO level / the alert
+        # console cannot see DEBUG. Hence the inhibition receipt is output as a single WARNING line,
+        # containing source and target, directly grep-able via `inhibition` to trace "why didn't this go out".
         log.warning(
             "alert inhibited: %s",
             record.as_log_fields() if record is not None
             else f"reason=unknown robot={alert.robot_id} target={alert.rule_id}(sev{alert.severity})",
         )
-        # 订单 35：把抑制凭证**落库**（不推 WS、不通知），使 `GET /alerts` 可查。
-        # 订单 30 的"不静默丢弃"此前只到日志与指标为止 —— 告警台看不到被压制的行，
-        # 值班员得换到日志系统才能回答"这台机器当时还报了什么"。
-        # 旁路语义：落库失败只记指标+日志（见 store.save_suppressed），不影响主链路；
-        # 与 `save()` 一样 spawn 成后台任务，不阻塞消费线。
+        # Order 35: **persist** the inhibition receipt (no WS push, no notification), so `GET /alerts` can query it.
+        # Order 30's "no silent dropping" previously only went as far as logs and metrics -- the alert
+        # console could not see the suppressed row; the on-duty staff had to switch to the log system to
+        # answer "what else did this machine report at the time".
+        # Side-path semantics: persistence failure only records metric+log (see store.save_suppressed),
+        # does not affect the main chain; same as `save()`, spawn into a background task, does not block
+        # the consume line.
         if record is not None:
             spawn(save_suppressed(alert, record))
         return
     window = DEDUP_WINDOW.get(alert.rule_id, 60)
     if await should_emit(alert, window):
         await save(alert)
-        # 登记为活跃告警（订单 30）：本条已发出，即成为同机后续低等级告警的
-        # 抑制源候选。放在 save 之后 —— 只有真的发出去的告警才配当根因。
+        # Register as an active alert (order 30): this one has been sent, so it becomes a candidate
+        # inhibition source for this machine's later lower-severity alerts. Placed after save -- only
+        # alerts that truly went out deserve to be the root cause.
         active_alerts.register(alert)
         metrics.alerts_emitted.labels(rule_id=alert.rule_id).inc()
         log.info("alert: %s %s sev=%d %s", alert.robot_id, alert.rule_id,
                  alert.severity, alert.message)
-        # 推到工厂侧群机器人（钉钉/企微/通用）。
-        # 放在 save 之后：先落库保证审计，再通知。被抑制的告警在上面已 return，
-        # 不会走到这里。
+        # Push to the factory-side group bot (DingTalk/WeCom/generic).
+        # Placed after save: persist first to guarantee audit, then notify. Suppressed alerts already
+        # returned above, will not reach here.
         #
-        # R-15（GAP-3）：由 `await _notifier.send(...)` 改为 `spawn(_notify(...))`，
-        # 理由见 `_notify` 的 docstring —— 通知链路上的等待（含重试）绝不允许
-        # 占用告警消费循环。失败在 `_notify` 内终结（只计数 + 日志），
-        # 结构上不可能回滚或阻塞上面已完成的 `save()` / 广播。
+        # R-15 (GAP-3): changed from `await _notifier.send(...)` to `spawn(_notify(...))`,
+        # reason see `_notify`'s docstring -- the wait on the notification chain (including retries) must
+        # never occupy the alert consume loop. Failure terminates inside `_notify` (only count + log),
+        # structurally impossible to roll back or block the already-completed `save()` / broadcast above.
         if _notifier is not None:
             spawn(_notify(alert))
 
 
-# ---------------------------------------------------------------- 消费线
+# ---------------------------------------------------------------- consume line
 
-# `pubsub.listen()` 的**断连类**异常元组（R-14）。
+# The **disconnection-class** exception tuple for `pubsub.listen()` (R-14).
 #
-# ⚠️ 这里必须同时列 `RedisError` 与内建 `ConnectionError/OSError/TimeoutError`，
-# 二者**不构成继承关系**：本机实测（redis 5.0.3）
-#     >>> issubclass(redis.exceptions.ConnectionError, ConnectionError)  # 内建
+# Beware: here we must list both `RedisError` and the built-in `ConnectionError/OSError/TimeoutError`,
+# the two **do not form an inheritance relationship**: local measurement (redis 5.0.3)
+#     >>> issubclass(redis.exceptions.ConnectionError, ConnectionError)  # built-in
 #     False
-#     >>> issubclass(redis.exceptions.TimeoutError, TimeoutError)        # 内建
+#     >>> issubclass(redis.exceptions.TimeoutError, TimeoutError)        # built-in
 #     False
-# redis-py 自己的 `exceptions.ConnectionError` / `TimeoutError` 都只继承
-# `RedisError -> Exception`，是**与内建同名但无关**的类。只捕内建 `ConnectionError`
-# 会漏掉 redis 驱动实际抛出的那个，等于没修；只捕 `RedisError` 又会漏掉
-# 底层 socket 直抛的 `OSError`（hiredis 路径）。故两组都列。
-# 用元组而非在 `consume()` 内 `except` 叠加：只捕一次，避免"哪个 except 先命中"
-# 的隐式顺序依赖。
+# redis-py's own `exceptions.ConnectionError` / `TimeoutError` only inherit
+# `RedisError -> Exception`, they are **same-named but unrelated** classes to the built-in ones. Catching
+# only the built-in `ConnectionError` would miss the one redis driver actually throws, equal to not fixing;
+# catching only `RedisError` would miss the underlying socket-directly-thrown `OSError` (hiredis path).
+# So both groups are listed.
+# Use a tuple rather than stacking `except` inside `consume()`: catch only once, avoid the implicit
+# order dependency of "which except hits first".
 REDIS_DISCONNECT_ERRORS = (RedisError, ConnectionError, OSError, TimeoutError)
 
-# 重连退避参数（秒）：1s 起步、逐次翻倍、30s 封顶。
-# 为什么不无限翻倍：100 台 × 10Hz 的下游是**有界**负载，退避只需躲开
-# "Redis 正在重启"的抖动窗口；封顶 30s 保证 Redis 恢复后最坏 30s 内自愈，
-# 不会因为退避涨到几小时而变成"事实上的永久停订阅"（那与不修无差别）。
+# Reconnect backoff params (seconds): start at 1s, double each time, cap at 30s.
+# Why not double without bound: the 100-machine x 10Hz downstream is a **bounded** load, and backoff
+# only needs to dodge the "Redis is restarting" jitter window; capping at 30s guarantees that at worst
+# 30s after Redis recovers it self-heals, and will not become a "de facto permanent unsubscribe" because
+# backoff grew to hours (which would be no different from not fixing).
 RECONNECT_BACKOFF_INITIAL_S = 1.0
 RECONNECT_BACKOFF_MAX_S = 30.0
 
 
 async def consume() -> None:
-    """消费 `robot:stream:all`，Redis 断连时**协程内**退避重连（R-14）。
+    """Consume `robot:stream:all`, with **in-coroutine** backoff reconnect on Redis disconnection (R-14).
 
-    R-14 之前的结构是 `subscribe` 后直接 `async for msg in pubsub.listen()`，
-    `listen()` 抛出的断连异常会逃出本协程 → 经 `amain()` 的 `asyncio.gather`
-    向上传播 → 整条协程树失败、进程退出；即便容器有 restart，`ticker()`
-    与 `escalation_loop()` 这两个**本身没坏**的兄弟协程也被同一 gather 连带取消。
+    Before R-14 the structure was `subscribe` then directly `async for msg in pubsub.listen()`,
+    and the disconnection exception thrown by `listen()` would escape this coroutine -> propagate upward
+    through `amain()`'s `asyncio.gather` -> the entire coroutine tree fails and the process exits; even
+    though the container has restart, `ticker()` and `escalation_loop()` -- the two sibling coroutines
+    that were **not broken themselves** -- get cancelled by the same gather.
 
-    现在改为「自重启」结构：外层 `while True` 永不因断连而退出，内层只负责
-    跑一轮监听。断连时吞掉异常、按指数退避、**重建 pubsub 并重新 subscribe**
-    （订阅状态不跨连接保留，漏了这步就是静默不消费），然后 `continue` 下一轮。
+    Now changed to a "self-restart" structure: the outer `while True` never exits due to disconnection,
+    the inner only runs one round of listening. On disconnection, swallow the exception, back off
+    exponentially, **rebuild pubsub and re-subscribe** (subscription state is not retained across
+    connections; missing this step means silently not consuming), then `continue` to the next round.
 
-    铁律：异常**不得**逃出本协程（§6），也**不得**把重连失败再 `raise`（那等于没修）。
+    Iron rule: the exception must **not** escape this coroutine (§6), and must **not** re-`raise` the
+    reconnect failure (that would equal not fixing).
     """
     backoff = RECONNECT_BACKOFF_INITIAL_S
     while True:
@@ -393,13 +416,16 @@ async def consume() -> None:
             async for msg in pubsub.listen():
                 if msg.get("type") != "message":
                     continue
-                # 退避复位点：**收到真实消息**这一刻是"这条链路真的在通"的唯一硬证据，
-                # 故复位必须挂这里，且只能挂这里：
-                #   - 若挂在 `subscribe()` 返回后：Redis 正在重启时 subscribe 能成、
-                #     随即断，退避会永远停在 1s → "指数退避"名存实亡，退化成每秒一次的
-                #     忙重试风暴（本机实测：连续 6 次断连的退避序列全是初始值）。
-                #   - 若挂在 `async for` 正常结束之后：以断连收场的那些轮根本走不到
-                #     那一行，而"投递过消息后断连"恰是最该复位的情形。
+                # Backoff reset point: the moment of **receiving a real message** is the only hard
+                # evidence that "this link is really up", so the reset must hang here, and only here:
+                #   - if hung after `subscribe()` returns: when Redis is restarting, subscribe can
+                #     succeed, then immediately disconnect, and backoff would stay at 1s forever ->
+                #     the "exponential backoff" exists in name only, degrading into a busy retry storm
+                #     every second (local measurement: 6 consecutive disconnection backoff sequences all
+                #     at the initial value).
+                #   - if hung after `async for` ends normally: those rounds that end in disconnection
+                #     never reach that line, and "disconnect after having delivered messages" is exactly
+                #     the case that most deserves a reset.
                 backoff = RECONNECT_BACKOFF_INITIAL_S
                 try:
                     data = json.loads(msg["data"])
@@ -422,37 +448,41 @@ async def consume() -> None:
                     if alert is not None:
                         spawn(emit(alert))
                     else:
-                        # 本轮该规则未命中 = 已恢复 → 清登记，否则它会永远当"根因"
-                        # 压制同机的其它告警（订单 30 关键点：不及时清除 = 永久误抑制）。
+                        # This round the rule did not hit = recovered -> clear registration, otherwise
+                        # it would forever act as the "root cause" suppressing this machine's other alerts
+                        # (order 30 key point: not clearing in time = permanent false inhibition).
                         active_alerts.clear(rid, rule.rule_id)
         except REDIS_DISCONNECT_ERRORS as exc:
-            # 只吞断连类异常；其余异常（真 bug）照旧逃出，不被这里掩盖成"假活"。
-            # 注意 except 挂在 `while True` 内、包住**整轮监听**（含 listen() 与消息处理），
-            # 而不是嵌在消息处理里 —— 否则 listen() 自身抛的断连就没兜底（这正是 R-14 的洞）。
+            # Only swallow disconnection-class exceptions; other exceptions (real bugs) escape as usual,
+            # not masked here into "fake alive".
+            # Note the except hangs inside `while True`, wrapping **the whole round of listening** (including
+            # listen() and message processing), rather than nested inside message processing -- otherwise
+            # the disconnection thrown by listen() itself would have no fallback (this is exactly R-14's hole).
             metrics.redis_reconnect.inc()
             log.warning(
-                "consume(): Redis 断连（%s: %s），%.1fs 后重连并重新 subscribe %s",
-                type(exc).__name__, exc, backoff, settings.chan_stream_all,
+                "consume(): Redis disconnected (%s: %s), reconnect + re-subscribe %s in %.1fs",
+                type(exc).__name__, exc, settings.chan_stream_all, backoff,
             )
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, RECONNECT_BACKOFF_MAX_S)
             continue
 
 
-# ---------------------------------------------------------------- ticker 线
+# ---------------------------------------------------------------- ticker line
 
 async def ticker() -> None:
-    """每秒一轮：跑 offline 规则（判据优先读 robot_metadata.is_online）+ 维护在线状态。
+    """One round per second: run the offline rule (criterion prefers robot_metadata.is_online) + maintain online state.
 
-    为什么先读一次库（ISSUE #96）
+    Why read the DB once first (ISSUE #96)
     -----------------------------
-    判据必须是「后端看到过这台机器人吗」，而不是「本进程内存里记的 last_seen」。
-    后者会在本引擎重启 / Redis pubsub 断连时悄悄失真（内存被清空 → 100 台集体
-    判离线）。故每轮先 `load_online_state()` 取回 100 行，再逐台判 offline：
-    每轮 **1 次**库往返，不按台数放大。
+    The criterion must be "has the backend seen this robot", not "the last_seen recorded in this
+    process's memory". The latter would quietly distort on this engine's restart / Redis pubsub
+    disconnection (memory cleared -> 100 machines collectively judged offline). So each round first
+    `load_online_state()` fetches 100 rows, then judges offline per machine: **one** DB round trip per
+    round, not amplified by machine count.
 
-    读不到（返回 {}）→ 传给规则的 `is_online` 是 None → 规则回落到 last_seen
-    时间差判定（迁移期安全网，见 `app/rules/offline.py`）。
+    When unreadable (returns {}), the `is_online` passed to the rule is None -> the rule falls back to
+    the last_seen time-delta judgment (migration-period safety net, see `app/rules/offline.py`).
     """
     while True:
         await asyncio.sleep(settings.tick_interval_s)
@@ -461,7 +491,7 @@ async def ticker() -> None:
         for rid in settings.robot_ids:
             ls = last_seen.get(rid)
             w = windows.get(rid) or deque()
-            is_online = db_state.get(rid)      # 缺行 / 读库失败 → None（回落）
+            is_online = db_state.get(rid)      # missing row / DB read failure -> None (fallback)
             try:
                 alert = OFFLINE_RULE.evaluate(
                     {"robot_id": rid, "is_online": is_online, "last_seen": ls}, w
@@ -472,8 +502,8 @@ async def ticker() -> None:
             if alert is not None:
                 spawn(emit(alert))
             else:
-                # 未再判离线 = 已恢复 → 清 offline 登记（否则它作为 sev3 抑制源
-                # 会一直压低同机的告警）。订单 30。
+                # No longer judged offline = recovered -> clear offline registration (otherwise, as a
+                # sev3 inhibition source, it would keep suppressing this machine's alerts). Order 30.
                 active_alerts.clear(rid, INHIBIT_SOURCE_RULE)
 
             online = ls is not None and (now - ls) <= settings.offline_after_s
@@ -481,32 +511,35 @@ async def ticker() -> None:
                 online_state[rid] = online
                 spawn(update_online(rid, online))
                 if not online:
-                    # 判离线即清该机**衍生**告警登记：此刻它们已无处置价值，
-                    # 留着只会与 offline 的抑制语义重叠，污染 severity 层的判据。
-                    # offline 自身的登记由上面的 emit 在抑制通过后写入。
+                    # Judged offline -> clear this machine's **derivative** alert registration: at this
+                    # moment they have no remediation value, keeping them only overlaps with the offline
+                    # inhibition semantics and pollutes the severity layer's criterion.
+                    # offline's own registration is written by the emit above after inhibition passes.
                     active_alerts.clear_robot(rid)
 
-        # 拉模型下 Gauge 必须在每轮刷新：没人替我们定期 set，
-        # 不刷新则抓到的永远是"上一次状态变化那一刻"的过期值。
+        # Under the pull model the Gauge must be refreshed every round: no one sets it periodically for
+        # us; without refresh the scraped value is forever the stale "moment of last state change".
         metrics.robots_online.set(sum(1 for v in online_state.values() if v))
 
 
 def _isolate(name: str, coro):
-    """把一条驱动线包成"崩溃只记日志、不掀翻兄弟"的协程（R-14 / T3）。
+    """Wrap a driver line into a coroutine that "crashes only logs, does not overturn siblings" (R-14 / T3).
 
-    为什么需要它：`asyncio.gather(consume(), ticker(), escalation_loop())` 的默认
-    语义是**任一子协程抛异常 → gather 立即上抛、其余子协程被取消**。于是
-    `consume()` 一次 Redis 闪断就能连带杀死 `ticker()`（离线检测）与
-    `escalation_loop()`（升级扫描）—— 这两个本身没坏。R-14 已在 `consume()` 内部
-    兜住断连类异常，本函数是针对**其它非断连的意外崩溃**的第二道隔离。
+    Why it is needed: `asyncio.gather(consume(), ticker(), escalation_loop())`'s default semantics is
+    **any child coroutine throws -> gather immediately raises, the rest of the child coroutines are
+    cancelled**. Thus one Redis blip in `consume()` can kill `ticker()` (offline detection) and
+    `escalation_loop()` (escalation scan) -- both not broken themselves. R-14 already catches
+    disconnection-class exceptions inside `consume()`; this function is the second layer of isolation
+    against **other non-disconnection unexpected crashes**.
 
-    取舍（必须写明，否则这就是把故障藏起来）：`gather` 默认的"快速失败+取消兄弟"
-    在这里**语义上是错的** —— 三条线是**互相独立的驱动线**，一条挂掉不构成
-    另两条该停的理由；容器 restart 才是"整体重启"的正确层级。代价是进程可能
-    "假活"（某条线死了但进程还在）。因此这里**必须**保证崩溃可见：
-    `log.critical` + `traceback`，让 `AlertEngineDown` 之外的日志告警能兜住它。
-    只捕 `Exception` 不捕 `BaseException`：`CancelledError` 必须照旧上抛，
-    否则 `amain()` 的 `finally` 取消 `_tasks` 时会被这里吞掉、关不干净。
+    Trade-off (must be written out, otherwise this is hiding the fault): gather's default "fail fast +
+    cancel siblings" is **semantically wrong** here -- the three lines are **mutually independent driver
+    lines**, one going down is not a reason the other two should stop; container restart is the correct
+    level for "overall restart". The cost is the process may "fake-live" (one line died but the process
+    is still up). Therefore here we **must** guarantee the crash is visible: `log.critical` + `traceback`,
+    so the log alert beyond `AlertEngineDown` can catch it.
+    Only catch `Exception`, not `BaseException`: `CancelledError` must still be raised, otherwise when
+    `amain()`'s `finally` cancels `_tasks` it would be swallowed here and not shut down cleanly.
     """
     async def _wrapped():
         try:
@@ -514,7 +547,7 @@ def _isolate(name: str, coro):
         except asyncio.CancelledError:
             raise
         except Exception:
-            log.critical("驱动线 %s 意外崩溃（其兄弟协程不受影响）", name,
+            log.critical("Driver line %s crashed unexpectedly (its sibling coroutines are unaffected)", name,
                          exc_info=True)
             return None
     return _wrapped()
@@ -522,9 +555,10 @@ def _isolate(name: str, coro):
 
 async def amain() -> None:
     try:
-        # escalation_loop 与另两条驱动线并发：它不对应"输入流"，而是周期性
-        # 扫描"已发出、severity=3、超时仍未 ack"的告警，重发升级（订单 17 T2）。
-        # 三条线各自隔离（R-14 / T3）：一条崩溃不再连带取消另外两条。
+        # escalation_loop runs concurrently with the other two driver lines: it does not correspond to an
+        # "input stream" but periodically scans alerts that are "sent, severity=3, unacked past timeout",
+        # re-sends escalation (order 17 T2).
+        # The three lines are each isolated (R-14 / T3): one crashing no longer cancels the other two.
         await asyncio.gather(
             _isolate("consume", consume()),
             _isolate("ticker", ticker()),
@@ -538,9 +572,10 @@ async def amain() -> None:
 
 
 def main() -> None:
-    # 先起 metrics HTTP 服务（独立线程，标准库 http.server），
-    # 保证 Prometheus 无论何时抓取都拿得到 up=1，而不是等 asyncio 循环先跑起来。
-    # 本服务不是 FastAPI，没有路由可挂 /metrics，故只能独立起端口。
+    # Start the metrics HTTP server first (separate thread, stdlib http.server),
+    # to guarantee Prometheus always gets up=1 whenever it scrapes, rather than waiting for the asyncio
+    # loop to start first.
+    # This service is not FastAPI and has no route to mount /metrics on, so it can only start an independent port.
     server = metrics.start(settings.metrics_port)
     try:
         asyncio.run(amain())

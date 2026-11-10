@@ -1,4 +1,4 @@
-"""告警引擎配置（阈值与窗口全部集中在此，spec/02 §3）。"""
+"""Alert engine configuration (all thresholds and windows centralized here, spec/02 §3)."""
 
 from __future__ import annotations
 
@@ -13,102 +13,110 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379"
     database_url: str = "postgresql://postgres:postgres@localhost:5432/robot_monitor"
 
-    # ---- DB 连接池（订单 17 发现：db.py 一直在读这两个键，config 却没定义）----
-    # `app/db.py:get_pool()` 引用 `settings.db_pool_size` / `settings.db_command_timeout`，
-    # 但本文件此前**没有**这两个字段 —— 于是任何走到 `get_pool()` 的路径（告警落库
-    # `store.save`、metadata 更新、本单的 escalation 扫描）都会抛
-    # `AttributeError: 'Settings' object has no attribute 'db_pool_size'`。
-    # 这是订单 08 引入 `app/pool.py` 时漏掉的配置项，本单为跑通 escalation 补齐。
-    # 命名与 `backend_ingestion/app/config.py` 对齐（db_pool_min_size 等），
-    # 但 pool.py 的入参名是 `pool_size`，故此处取 `db_pool_size`。
-    db_pool_size: int = 2          # 预建条数 = 空闲地板（见 app/pool.py:MAX_POOL_SIZE）
+    # ---- DB connection pool (order 17 found: db.py has been reading these two keys, but config didn't define them) ----
+    # `app/db.py:get_pool()` references `settings.db_pool_size` / `settings.db_command_timeout`,
+    # but this file previously had **no** such fields -- so any path reaching `get_pool()` (alert
+    # persistence `store.save`, metadata updates, this order's escalation scan) would throw
+    # `AttributeError: 'Settings' object has no attribute 'db_pool_size'`.
+    # This is a config item missed when order 08 introduced `app/pool.py`; this order adds it to get
+    # escalation running.
+    # Named to align with `backend_ingestion/app/config.py` (db_pool_min_size, etc.),
+    # but pool.py's parameter name is `pool_size`, hence `db_pool_size` here.
+    db_pool_size: int = 2          # pre-built count = idle floor (see app/pool.py:MAX_POOL_SIZE)
     db_command_timeout: float = 30.0
-    # 建池超时（秒），语义与默认值同 backend_ingestion/app/config.py:db_connect_timeout_s。
-    # 不给的话 init_size 的「建池即预连」会带上 connection.connect() 的默认 60s，
-    # DB 未就绪时把启动/探活路径挂死（机制见 app/pool.py:create_pool 的 connect_timeout 注释）。
+    # Pool-build timeout (seconds); semantics and default match backend_ingestion/app/config.py:db_connect_timeout_s.
+    # If not set, init_size's "pre-connect on pool creation" brings in connection.connect()'s default 60s,
+    # hanging the startup/liveness path when the DB is not ready (see app/pool.py:create_pool's connect_timeout comment).
     db_connect_timeout_s: float = 8.0
 
-    # ---- Redis 频道（与后端约定一致）----
+    # ---- Redis channels (consistent with backend convention) ----
     chan_stream_all: str = "robot:stream:all"
     chan_alerts: str = "robot:alerts"
 
-    # ---- motor_temp（spec/02：>75°C 且持续 ≥3 采样，severity 3，去重 60s）----
+    # ---- motor_temp (spec/02: >75°C for >=3 samples, severity 3, dedup 60s) ----
     motor_temp_c: float = 75.0
     motor_temp_min_samples: int = 3
     motor_temp_dedup_s: int = 60
 
-    # ---- battery_low（<15%，severity 2，去重 120s）----
+    # ---- battery_low (<15%, severity 2, dedup 120s) ----
     battery_low_pct: float = 15.0
     battery_low_dedup_s: int = 120
 
-    # ---- offline（无遥测 >10s，severity 3，去重 30s）----
+    # ---- offline (no telemetry >10s, severity 3, dedup 30s) ----
     offline_after_s: float = 10.0
     offline_dedup_s: int = 30
-    # 判据来源切换（ISSUE #96）：True 时离线判定优先读 `robot_metadata.is_online`
-    # （由后端 metadata_writer 心跳批量维护），读不到该值时才回落到 `last_seen`
-    # 时间差。False 则永远走时间差 —— 保留开关是为了「一句话回滚」，
-    # 而不是因为两套语义等价（它们不等价，回退即可复现旧行为）。
+    # Criterion source switch (ISSUE #96): when True, offline judgment prefers `robot_metadata.is_online`
+    # (batch-maintained by the backend metadata_writer heartbeat), falling back to the `last_seen`
+    # time delta only when that value is unavailable. False always uses the time delta -- the switch is
+    # kept for "one-line rollback", not because the two semantics are equivalent (they are not; rolling
+    # back reproduces the old behavior).
     offline_use_is_online: bool = True
 
-    # ---- joint_stuck（5s 内角度方差≈0 但扭矩超阈值，severity 2，去重 60s）----
+    # ---- joint_stuck (angle variance ~0 within 5s but torque over threshold, severity 2, dedup 60s) ----
     joint_stuck_window_s: float = 5.0
     joint_stuck_variance: float = 1e-6
     joint_stuck_torque: float = 8.0
     joint_stuck_dedup_s: int = 60
 
-    # ---- 抑制（inhibition，对照 Alertmanager 的 inhibit_rules）----
-    # 机器人已判离线（severity 3）时，抑制同一 robot_id 的其他告警：
-    # 机器都离线了，「电量低」「关节卡死」没有处置价值，根因就是离线。
-    # 留开关便于回滚与 A/B 对比；关闭后行为回到加抑制之前。
+    # ---- inhibition (offline, compared with Alertmanager's inhibit_rules) ----
+    # When a robot is judged offline (severity 3), inhibit its other alerts on the same robot_id:
+    # once the machine is offline, "low battery" / "joint stuck" have no remediation value -- the root
+    # cause IS the offline state.
+    # The switch is kept for easy rollback and A/B comparison; turning it off restores pre-inhibition behavior.
     inhibit_offline: bool = True
 
-    # ---- 抑制（severity 层，订单 30）----
-    # 「高等级告警抑制同一机器人上的低等级告警」：同机存在 sev3 活跃告警时，
-    # 其 sev2/sev1 告警不落库、不发布（根因在上，衍生症状无处置价值）。
-    # 与 inhibit_offline 解耦：可单独回滚任一层的 A/B，便于定位是哪层挡掉了告警。
-    # 阈值见 app/inhibition.py:MIN_SOURCE_SEVERITY（当前 3）。
+    # ---- inhibition (severity layer, order 30) ----
+    # "A higher-severity alert inhibits lower-severity alerts on the same robot": when a sev3 active alert
+    # exists on the same machine, its sev2/sev1 alerts are neither persisted nor published (the root cause
+    # is upstream; derivative symptoms have no remediation value).
+    # Decoupled from inhibit_offline: either layer's A/B can be rolled back independently, convenient for
+    # locating which layer blocked an alert.
+    # Threshold see app/inhibition.py:MIN_SOURCE_SEVERITY (currently 3).
     inhibit_severity: bool = True
 
-    # ---- 升级（escalation，对齐 Alertmanager 的 repeat_interval）----
-    # severity=3 且超过该秒数仍未 ack → 置 escalated=TRUE 并重发一次。
-    # 300s（5 分钟）取自派工单 T2；这是一个"值班员该响应了"的经验量级，
-    # 比它短会催得太急（现场巡检一次就可能超 1 分钟），长则失去催办意义。
+    # ---- escalation (aligned with Alertmanager's repeat_interval) ----
+    # severity=3 and past this many seconds without ack -> set escalated=TRUE and re-send once.
+    # 300s (5 minutes) comes from work order T2; it is an empirical scale of "the on-duty operator should
+    # have responded" -- shorter would nag too hard (a single on-site inspection can exceed 1 minute),
+    # longer would lose the point of escalation.
     escalate_after_s: int = 300
-    # 升级扫描周期。30s 是"及时性 vs 扫描开销"的折中：
-    #   - 300s 的阈值下，30s 抖动最多让升级晚 30s 发生，对催办无实质影响；
-    #   - 谓词被部分索引 idx_alert_escalation 覆盖（init.sql:206），
-    #     每次扫描扫的是窄集，30s 一次开销可忽略。
+    # Escalation scan interval. 30s is a compromise of "timeliness vs scan cost":
+    #   - under the 300s threshold, a 30s jitter delays escalation by at most 30s, no material effect on nagging;
+    #   - the predicate is covered by the partial index idx_alert_escalation (init.sql:206),
+    #     each scan touches a narrow set, so scanning every 30s is negligible overhead.
     escalate_scan_interval_s: float = 30.0
-    # 单条告警最多升级重发几次。防止"没人管 → 永远每 5 分钟重发"变成
-    # 长期噪声源（Alertmanager 也需配 repeat_interval 而非无限重发）。
+    # Max re-send escalations per alert. Prevents "nobody acts -> forever re-send every 5 minutes" from
+    # becoming a long-term noise source (Alertmanager also needs repeat_interval rather than infinite resend).
     escalate_max_repeat: int = 3
 
-    # ---- 判定循环 ----
-    tick_interval_s: float = 1.0        # 离线 ticker 间隔
-    window_maxlen: int = 100            # 每台机器人滑动窗口容量（10Hz → 约 10s）
+    # ---- judgment loop ----
+    tick_interval_s: float = 1.0        # offline ticker interval
+    window_maxlen: int = 100            # sliding-window capacity per robot (10Hz -> ~10s)
 
-    # ---- anomaly（统计异常检测，对标 Netdata 边缘 ML / ORO incident remediation）----
-    # 既有规则是静态阈值（>75°C、<15%、方差≈0）。本规则在窗口上算 rolling z-score，
-    # 捕捉「相对该机器人自身基线的突变」：电池骤降、关节温度阶跃、扭矩尖峰等
-    # 静态阈值漏掉的「慢漂移 + 突变」型异常。z=4 ≈ 4σ，误报率极低。
-    anomaly_zscore: float = 4.0         # 触发阈值（|z| >= 此值）
-    anomaly_min_std: float = 0.5        # 最小标准差门槛：波动小于此值视为正常噪声，不报
-    anomaly_min_samples: int = 20       # 窗口样本下限（<20 条不评，约 2s）
-    anomaly_dedup_s: int = 120         # 同机同指标去重窗口（秒）
+    # ---- anomaly (statistical anomaly detection, benchmarked against Netdata edge ML / ORO incident remediation) ----
+    # Existing rules are static thresholds (>75°C, <15%, variance~0). This rule computes a rolling z-score
+    # over the window, capturing "mutations relative to the robot's own baseline": battery plunge, joint
+    # temperature step, torque spike, etc. -- the "slow drift + mutation" anomalies that static thresholds
+    # miss. z=4 ~= 4 sigma, extremely low false-positive rate.
+    anomaly_zscore: float = 4.0         # trigger threshold (|z| >= this value)
+    anomaly_min_std: float = 0.5        # minimum std-dev gate: fluctuation below this is treated as normal noise, not reported
+    anomaly_min_samples: int = 20       # window sample floor (<20 not evaluated, ~2s)
+    anomaly_dedup_s: int = 120         # dedup window per robot per metric (seconds)
 
-    # ---- 告警通知（I-14）----
-    # 工厂侧机器人 webhook：留空则整条通知链路静默跳过（默认关闭，避免误配刷屏）。
-    # URL 含 token，**只从环境变量注入，禁止写进仓库**。
+    # ---- alert notification (I-14) ----
+    # Factory-side robot webhook: if empty, the whole notification chain is silently skipped (off by
+    # default, to avoid misconfiguration spamming).
+    # The URL contains a token, **injected only from an env var, never written into the repo**.
     alert_webhook_url: str = ""
-    # dingtalk | wecom | generic（通用 JSON，交工厂自建转发加工）
+    # dingtalk | wecom | generic (generic JSON, handed to the factory's own forwarder for processing)
     alert_webhook_kind: str = "generic"
-    # 推送门槛：默认 3 —— 只推 critical，防「低电量风暴」刷屏
+    # Push threshold: default 3 -- only push critical, preventing "low-battery storm" spam
     alert_webhook_min_severity: int = 3
 
     # ---- Prometheus ----
-    # 告警引擎不是 FastAPI 应用，没有 HTTP 路由可挂 /metrics，
-    # 故由 app/metrics.py:start() 在独立端口起一个 http.server（顺序 13 接线）。
-    # 与后端 ingestion 服务端口分离，避免抓取目标冲突。
+    # The alert engine is not a FastAPI app and has no HTTP route to mount /metrics on,
+    # so app/metrics.py:start() starts an http.server on a separate port (order 13 wiring).
+    # Separated from the backend ingestion service port to avoid scrape-target conflicts.
     metrics_port: int = 8001
 
     @property

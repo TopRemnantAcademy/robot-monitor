@@ -1,16 +1,16 @@
-"""告警引擎的 Prometheus 指标暴露。
+"""Prometheus metrics exposure for the alert engine.
 
-为什么告警引擎需要**独立**的 metrics server：
-  `alert_engine/app/main.py` 是一个纯 asyncio 进程（`asyncio.run(amain())`），
-  它**不跑任何 HTTP 框架** —— 没有 FastAPI，也没有 uvicorn。
-  所以不能像后端那样在 FastAPI 上挂 `/metrics` 路由，
-  必须起一个极小的 HTTP 服务把 `prometheus_client` 的输出吐出去，
-  否则 `prometheus.yml` 里 `robot_alert_engine` 这个 job 永远 `up=0`
-  → `AlertEngineDown` 规则**永久误报**。
+Why the alert engine needs a **separate** metrics server:
+  `alert_engine/app/main.py` is a pure asyncio process (`asyncio.run(amain())`),
+  and it runs **no HTTP framework** -- no FastAPI, no uvicorn.
+  So we cannot mount a `/metrics` route on FastAPI like the backend does;
+  we must start a tiny HTTP server to emit `prometheus_client`'s output,
+  otherwise the `robot_alert_engine` job in `prometheus.yml` is forever `up=0`
+  -> the `AlertEngineDown` rule **permanently false-alarms**.
 
-实现用标准库 `http.server` 起在独立线程：
-  - 不引入 aiohttp/uvicorn 等新依赖（保持告警引擎依赖面最小）
-  - 不与 asyncio 事件循环争抢（`ThreadingHTTPServer` 单 worker，只读 registry）
+Implementation uses the standard-library `http.server` on a separate thread:
+  - No new dependencies like aiohttp/uvicorn (keep the alert engine's dependency surface minimal)
+  - Does not contend with the asyncio event loop (`ThreadingHTTPServer` single worker, read-only registry)
 """
 
 from __future__ import annotations
@@ -33,112 +33,119 @@ registry = CollectorRegistry()
 
 alerts_emitted = Counter(
     "robot_alert_emitted_total",
-    "成功发出（落库+发布）的告警条数",
+    "Number of alerts successfully emitted (persisted + published)",
     ["rule_id"],
     registry=registry,
 )
 alerts_suppressed = Counter(
     "robot_alert_suppressed_total",
-    "被 inhibition 抑制的告警条数（订单 10 的 offline 层 + 订单 30 的 severity 层）",
+    "Number of alerts suppressed by inhibition (order 10 offline layer + order 30 severity layer)",
     ["rule_id", "reason"],
     registry=registry,
 )
 alerts_silenced = Counter(
     "robot_alert_silenced_total",
-    "被 silence 静默（TTL 生效期内）而未落库/未发布的告警条数（订单 17）",
+    "Number of alerts silenced (within TTL) and therefore not persisted/published (order 17)",
     ["rule_id"],
     registry=registry,
 )
 alerts_escalated = Counter(
     "robot_alert_escalated_total",
-    "被升级重发的告警条数（severity=3 超时未 ack，订单 17）",
+    "Number of alerts re-sent by escalation (severity=3 unacked past timeout, order 17)",
     ["rule_id"],
     registry=registry,
 )
-# 在线台数（订单 32 / ISSUE #100 改名）：原名 `robot_alert_robots_online`。
+# Online robot count (order 32 / ISSUE #100 rename): originally `robot_alert_robots_online`.
 #
-# 为什么改名：`_gauge` 后缀是**类型自证**，不是装饰。同名问题真实发生过 ——
-# ISSUE #72 的起因就是「同一个在线台数」在两个进程里各有一个名字
-# （后端 `robot_backend_robots_online`、告警引擎 `robot_alert_robots_online`），
-# 面板/告警要维护两套 PromQL，且**没人能从名字判断哪个是 Gauge、哪个是 Counter**。
-# 本次只改告警引擎侧：后端侧的名字被现网 PromQL 与 `rules/robot-alerts.yml` 引用，
-# 改它属跨单返工（订单 32 禁止项 5）。加 `_gauge` 后，抓取端与面板作者
-# 一眼可辨「这只可增可减、禁止对它用 rate()」，两个名字的差异也变得显式可查。
+# Why rename: the `_gauge` suffix is **type self-evidence**, not decoration. The same-name problem
+# really happened -- the root cause of ISSUE #72 was "the same online count" having one name in each of
+# two processes (backend `robot_backend_robots_online`, alert engine `robot_alert_robots_online`),
+# so panels/alerts had to maintain two sets of PromQL, and **nobody could tell from the name which is a
+# Gauge and which is a Counter**.
+# This change only touches the alert engine side: the backend side's name is referenced by live PromQL
+# and `rules/robot-alerts.yml`, changing it would be cross-order rework (order 32 forbidden item 5).
+# After adding `_gauge`, the scrape side and panel authors can tell at a glance "this can go up and down,
+# forbid rate() on it", and the difference between the two names also becomes explicit and checkable.
 #
-# 判据来源（阈值内 `last_seen`）见 `alert_engine/app/main.py:252` 的 ticker；
-# 分子/分母口径（在线 / 固定 100）由 ticker 每秒刷新。
+# Criterion source (last_seen within threshold) see the ticker at `alert_engine/app/main.py:252`;
+# the numerator/denominator caliber (online / fixed 100) is refreshed by the ticker every second.
 robots_online = Gauge(
     "robot_alert_robots_online_gauge",
-    "ticker 线当前判定为在线的机器人数（分母固定 100）",
+    "Number of robots currently judged online by the ticker line (denominator fixed at 100)",
     registry=registry,
 )
-#: 告警**写库失败**的条数（`increase(...[5m]) > 0` 即触发）。
+#: Number of alerts that **failed to be written to the DB** (`increase(...[5m]) > 0` triggers).
 #:
-#: 为什么必须单独埋这一颗：这条链路上 `robot_alert_emitted_total` 只统计
-#: "去重后决定发出"，`store.save()` 的 insert 异常此前**只进日志**。
-#: 于是「DB 无记录」与「告警根本没触发」在监控上完全同形 ——
-#: 看板照常变绿，审计对账却少数据（G-4）。有了它，二者才可区分：
-#: emitted 在涨而 store_errors 也在涨 ⇒ 告警确实判定出来了，只是没落库。
+#: Why this one must be instrumented separately: on this chain `robot_alert_emitted_total` only counts
+#: "decided to emit after dedup", and `store.save()`'s insert exception previously **only went to logs**.
+#: So "no DB record" and "alert never triggered" are completely isomorphic in monitoring --
+#: the dashboard goes green as usual, but the audit reconciliation is short on data (G-4). With this,
+#: the two become distinguishable: emitted rising while store_errors also rising => the alert was indeed
+#: judged, just not persisted.
 store_errors = Counter(
     "robot_alert_store_errors_total",
-    "robot_alert 写库失败的告警条数（>0 即「有告警但 DB 里查不到」，看板绿是假的）",
+    "Number of alerts that failed to be written to the DB (>0 means 'alerts exist but not in DB', green dashboard is fake)",
     registry=registry,
 )
 
-#: 通知**投递成功**的条数（R-15 T1）。与 `notify_failed` 配对算失败率。
+#: Number of notifications **successfully delivered** (R-15 T1). Paired with `notify_failed` to compute failure rate.
 #:
-#: 为什么成功也要计数：只有失败计数时，看到 `notify_failed_total = 37` 无法判断
-#: 严不严重 —— 是 1% 丢包还是 100% 全丢？分母（分母 = sent + failed）必须存在，
-#: `rate(notify_failed[5m]) / (rate(sent[5m]) + rate(notify_failed[5m]))` 才有意义。
+#: Why count successes too: with only a failure counter, seeing `notify_failed_total = 37` cannot tell
+#: how serious it is -- is it 1% packet loss or 100% total loss? The denominator (denominator = sent +
+#: failed) must exist, so `rate(notify_failed[5m]) / (rate(sent[5m]) + rate(notify_failed[5m]))` makes sense.
 notify_sent = Counter(
     "robot_alert_notify_sent_total",
-    "成功投递到群机器人的告警条数（与 notify_failed_total 配对算投递失败率）",
+    "Number of alerts successfully delivered to the group bot (paired with notify_failed_total for delivery failure rate)",
     ["kind"],
     registry=registry,
 )
 
-#: 通知**投递失败**的条数，按 `reason` 细分（R-15 / GAP-3 的核心交付）。
+#: Number of **failed** notification deliveries, broken down by `reason` (the core deliverable of R-15 / GAP-3).
 #:
-#: 为什么必须有这颗：通知失败此前**只进日志**。webhook 配错 / 钉钉企微限流时，
-#: 告警包已落库并广播，值班却在群里收不到 —— 而 Prometheus 侧一无所知
-#: （既有 `alerts_emitted` 只统计"决定发出"，与投递成败无关）。
-#: 于是「通知静默丢失」在监控上与「通知正常」完全同形，看板永远绿。
+#: Why this must exist: notification failures previously **only went to logs**. When the webhook is
+#: misconfigured / DingTalk-WeCom is rate-limited, the alert packet is persisted and broadcast, but the
+#: on-duty staff never receives it in chat -- while the Prometheus side knows nothing (the existing
+#: `alerts_emitted` only counts "decided to emit", unrelated to delivery success/failure).
+#: So "notification silently lost" is completely isomorphic to "notification normal" in monitoring, and
+#: the dashboard is forever green.
 #:
-#: `reason` 取值是**封闭集**（见 `notifiers/webhook.py:NOTIFY_REASONS`）：
-#: `timeout` / `network`（值得重试，查网络）、`http_error` / `business_error`
-#: （多为配置错，查 token）、`config`（本地未发出）、`unknown`（兜底不掩盖）。
-#: 维度刻意收窄 —— 每个不同异常串一个标签会让 Prometheus 时间序列数失控。
+#: `reason` values are a **closed set** (see `notifiers/webhook.py:NOTIFY_REASONS`):
+#: `timeout` / `network` (worth retrying, check network), `http_error` / `business_error`
+#: (mostly config errors, check token), `config` (not sent locally), `unknown` (catch-all, not masked).
+#: The dimension is deliberately narrowed -- one label per distinct exception string would make the
+#: Prometheus time-series count explode.
 notify_failed = Counter(
     "robot_alert_notify_failed_total",
-    "告警通知投递失败条数（按 reason 分类；>0 即「告警在库但群里没人收到」）",
+    "Number of failed alert-notification deliveries (by reason; >0 means 'alert in DB but nobody got it in chat')",
     ["reason"],
     registry=registry,
 )
 
-#: Redis pubsub **断连重连**次数（R-14）。
+#: Number of Redis pubsub **disconnect/reconnect** events (R-14).
 #:
-#: 为什么必须有这颗（而不是只打日志）：`consume()` 的 `pubsub.listen()` 在 Redis
-#: 闪断时会抛 `redis.exceptions.ConnectionError`。R-14 之前这类异常直接逃出协程、
-#: 经 `asyncio.gather` 拖垮整条进程；修复后它被**吞在协程内**并走退避重连 ——
-#: 代价是「引擎在反复闪断」从"进程崩掉"（容器 restart 可见）降级成
-#: **完全静默的内部状态**：`/metrics` 照常 200、`up=1`、看板全绿，但此刻
-#: 流式告警消费正处于退避等待中，是**真的不在消费**。
-#: 有这颗 counter，`increase(robot_alert_redis_reconnect_total[5m]) > 0`
-#: 就能把这类"假活"暴露出来（与 R-15 的 store_errors 同一思路：
-#: 只统计"决定做什么"而不统计"实际做成了吗"，看板绿是假的）。
+#: Why this must exist (rather than just logging): `consume()`'s `pubsub.listen()` throws
+#: `redis.exceptions.ConnectionError` on a Redis blip. Before R-14 such exceptions escaped the coroutine
+#: directly and, via `asyncio.gather`, brought down the whole process; after the fix it is **swallowed
+#: inside the coroutine** and goes through backoff reconnect -- the cost is that "the engine is repeatedly
+#: blipping" degrades from "process crash" (visible via container restart) to **completely silent internal
+#: state**: `/metrics` still 200, `up=1`, dashboard all green, but at this moment the streaming alert
+#: consumption is in backoff waiting and is **genuinely not consuming**.
+#: With this counter, `increase(robot_alert_redis_reconnect_total[5m]) > 0` can expose such "fake alive"
+#: (same idea as store_errors in R-15: only counting "decided to do" but not "actually done" makes the
+#: dashboard green fake).
 #:
-#: 只计**重连尝试发起**的次数（含本次重连后恢复成功的），不做
-#: 成功/失败拆分：失败会立刻再进下一轮退避，故"次数持续上涨"本身就
-#: 是失败未终止的证据，无需第二个指标。
+#: Only counts the number of **reconnect attempts initiated** (including those that recovered after this
+#: reconnect), without success/failure split: a failure will immediately enter the next backoff round, so
+#: "count keeps rising" itself is evidence that failure has not terminated, no second metric needed.
 redis_reconnect = Counter(
     "robot_alert_redis_reconnect_total",
-    "consume() 因 Redis 断连而发起重连（退避后重建 pubsub 并重新 subscribe）的次数",
+    "Number of reconnect attempts initiated by consume() due to Redis disconnection (rebuild pubsub and re-subscribe after backoff)",
     registry=registry,
 )
 
 
 class _Handler(BaseHTTPRequestHandler):
-    def do_GET(self) -> None:  # noqa: N802 (stdlib 命名约定)
+    def do_GET(self) -> None:  # noqa: N802 (stdlib naming convention)
         if self.path != "/metrics":
             self.send_error(404)
             return
@@ -149,12 +156,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, *args) -> None:  # 静默：避免每次抓取刷日志
+    def log_message(self, *args) -> None:  # Silent: avoid flooding logs on every scrape
         return
 
 
 def start(port: int = 8001) -> ThreadingHTTPServer:
-    """在后台线程启动 metrics HTTP 服务，返回 server 以便关闭。"""
+    """Start the metrics HTTP server on a background thread; return the server for shutdown."""
     server = ThreadingHTTPServer(("0.0.0.0", port), _Handler)  # noqa: S104
     t = threading.Thread(target=server.serve_forever, name="metrics-http", daemon=True)
     t.start()

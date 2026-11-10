@@ -1,4 +1,4 @@
-"""低电量规则：battery_pct < 15%（spec/02 §3）。"""
+"""Low-battery rule: battery_pct < 15% (spec/02 §3)."""
 
 from __future__ import annotations
 
@@ -26,6 +26,6 @@ class BatteryLowRule(Rule):
             robot_id=state.get("robot_id", ""),
             rule_id=self.rule_id,
             severity=self.severity,
-            message=f"低电量：{pct:.1f}% 低于阈值 {self.threshold}%",
+            message=f"Low battery: {pct:.1f}% below threshold {self.threshold}%",
             detail={"battery_pct": pct, "threshold": self.threshold},
         )

@@ -1,14 +1,16 @@
-"""告警通知渠道（I-14 的"落到人"部分）。
+"""Alert notification channels (the "reach a human" part of I-14).
 
-设计约束（为什么这么写）：
-1. **工厂有现成机器人吗？** —— 本仓无法知道。
-   钉钉自建机器人 / 企微群机器人**都只暴露一个 HTTP webhook URL**，
-   且两者的 payload 结构不同。故采用"渠道 = 适配器"模式：
-   配置里填 URL，`kind` 决定 payload 形状。没有配置则整条链路静默跳过。
-2. **不引入新依赖** —— `keep` / `prom2teams` 各自都带一整套运行时（且 keep 无钉钉/企微
-   provider，实证 `keep/keep/providers/` 只有 slack/teams/telegram/webhook/ntfy）。
-   这里只做一个转发器，用**标准库 urllib** 就够，避免为一个 webhook 拖进一个平台。
-3. **密钥不进仓库**（AGENTS.md §5）—— URL 里含 token，只从环境变量读。
+Design constraints (why it is written this way):
+1. Does the factory have an off-the-shelf robot? -- this repo cannot know.
+   Both DingTalk self-built bots / WeCom group bots expose only a single HTTP webhook URL,
+   and their payload structures differ. Hence the "channel = adapter" pattern:
+   the config holds the URL, and `kind` decides the payload shape. With no config, the
+   whole chain is silently skipped.
+2. No new dependencies -- `keep` / `prom2teams` each bring a whole runtime (and keep has no
+   DingTalk/WeCom provider; verified that `keep/keep/providers/` only has slack/teams/telegram/webhook/ntfy).
+   Here we only need a forwarder, and the standard-library urllib suffices, avoiding
+   pulling in an entire platform just for one webhook.
+3. No secrets in the repo (AGENTS.md §5) -- the URL contains a token, read only from an env var.
 """
 
 from app.notifiers.webhook import WebhookNotifier, build_notifier

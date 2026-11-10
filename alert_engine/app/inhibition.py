@@ -1,23 +1,25 @@
-"""告警抑制（inhibition）—— 对齐 Alertmanager `inhibit_rules`。
+"""Alert inhibition -- aligned with Alertmanager's `inhibit_rules`.
 
-本模块提供**可追溯**的抑制判定与记录。核心语义（订单 30）：
+This module provides a **traceable** inhibition decision and record. Core semantics (order 30):
 
-    高等级告警抑制同一机器人上的低等级告警。
+    A higher-severity alert inhibits lower-severity alerts on the same robot.
 
-对比 `orders/10-dispatch.md` 落地的既有实现（`main.py` 的 offline 特例：
-机器人离线时抑制同机全部衍生告警），本模块把「源」从**具体规则**泛化为
-**该机当前活跃告警的最高 severity**，从而覆盖离线之外的组合：
+Compared with the existing implementation landed in `orders/10-dispatch.md` (the offline special case
+in `main.py`: when a robot is offline, suppress all of its derivative alerts), this module generalizes
+the "source" from a **concrete rule** to **the highest severity among that robot's currently active
+alerts**, thereby covering combinations beyond offline:
 
-    motor_temp(sev3) 活跃时  →  同机 battery_low(sev2) / joint_stuck(sev2) 被抑制
+    when motor_temp(sev3) is active -> this robot's battery_low(sev2) / joint_stuck(sev2) are inhibited
 
-两条硬约束（订单 30 要求，写错就退化成「静默丢告警」）：
+Two hard constraints (required by order 30; getting them wrong degrades into "silently dropping alerts"):
 
-1. **不静默丢弃**：每一次抑制都必须留下可追溯证据 —— 结构化 `InhibitionRecord`
-   + 日志（含 source 规则/severity 与 target 规则）+ 独立 Prometheus 指标。
-   运维必须能回答「这条告警为什么没出去」，而不是只看到它凭空消失。
-2. **同等级不互相抑制**：`severity` 严格大于才抑制。否则两颗 sev2 告警
-   （battery_low 与 joint_stuck）会互相抑制，先进先出取决于字典序，是竞态。
-3. **仅限同一机器人**（`equal: [robot_id]`）：A 机的高温不抑制 B 机的低电量。
+1. No silent dropping: every inhibition must leave traceable evidence -- a structured `InhibitionRecord`
+   + logs (with source rule/severity and target rule) + an independent Prometheus metric.
+   Operators must be able to answer "why didn't this alert go out", rather than just seeing it vanish.
+2. Same severity does not inhibit each other: only a strict `severity` greater-than inhibits. Otherwise
+   two sev2 alerts (battery_low and joint_stuck) would inhibit each other, with FIFO depending on dict
+   order -- a race.
+3. Same robot only (`equal: [robot_id]`): A's high temperature does not inhibit B's low battery.
 """
 
 from __future__ import annotations
@@ -30,22 +32,23 @@ from app.rules.base import Alert
 
 log = logging.getLogger("inhibition")
 
-#: 该机活跃告警的最高 severity ≥ 此值才作为抑制源。
+#: The highest severity among this robot's active alerts must be >= this to act as an inhibition source.
 #:
-#: 取 3（critical）：只有 critical 才配压制同机的 warning/info。
-#: 若取 2，则「电量低(2)」会压制「joint_stuck(2)」—— 同级互压属误伤；
-#: 若取 1，则任何告警都会压制更低的，抑制面过宽，恢复后成片告警涌出。
+#: Set to 3 (critical): only critical is allowed to suppress this robot's warning/info.
+#: If set to 2, then "low battery(2)" would suppress "joint_stuck(2)" -- same-level mutual suppression
+#: is collateral damage; if set to 1, any alert would suppress a lower one, the inhibition surface is too
+#: broad, and a flood of alerts would burst out on recovery.
 MIN_SOURCE_SEVERITY = 3
 
 
 @dataclass
 class InhibitionRecord:
-    """一次抑制的**可追溯**凭证（订单 30：禁止静默丢弃）。
+    """A **traceable** receipt for one inhibition (order 30: forbid silent dropping).
 
-    - `robot_id` / `target_rule` / `target_severity`：被压下去的那条告警
-    - `source_rule` / `source_severity`：压制它的高等级告警（根因）
-    - `reason`：机器可读成因（`offline` | `severity`），供指标与审计区分
-    - `ts_ms`：抑制发生的毫秒时间戳
+    - `robot_id` / `target_rule` / `target_severity`: the alert that got suppressed
+    - `source_rule` / `source_severity`: the higher-severity alert that suppressed it (root cause)
+    - `reason`: machine-readable cause (`offline` | `severity`), to distinguish metrics from audits
+    - `ts_ms`: millisecond timestamp when the inhibition occurred
     """
 
     robot_id: str
@@ -57,7 +60,7 @@ class InhibitionRecord:
     ts_ms: int = field(default_factory=lambda: int(time.time() * 1000))
 
     def as_log_fields(self) -> str:
-        """扁平化为一行可 grep 的日志字段（脱敏：只含 rule_id / severity）。"""
+        """Flatten into a single grep-able log line (desensitized: only rule_id / severity)."""
         return (
             f"reason={self.reason} robot={self.robot_id} "
             f"target={self.target_rule}(sev{self.target_severity}) "
@@ -65,15 +68,17 @@ class InhibitionRecord:
         )
 
     def as_detail_fields(self) -> dict:
-        """转成可入 `robot_alert.detail`(JSONB) 的取证字段（订单 35）。
+        """Convert to forensic fields that can go into `robot_alert.detail` (JSONB) (order 35).
 
-        为什么凭证要进 detail 而不是加列：
-        `suppressed_by` 列只承载"谁压的"这一个**查询/筛选用**的标量；
-        severity 对比与 reason 是**取证信息**（人要读、不参与过滤），
-        塞进已有 JSONB 列可让 Schema 面保持最小 —— AGENTS.md §4 要求
-        Schema 改动同步 init.sql 与 ORM，少一列就少一处漂移面。
+        Why the receipt goes into detail rather than a new column:
+        the `suppressed_by` column only carries the scalar "who suppressed" for **query/filter** use;
+        the severity comparison and reason are **forensic information** (read by humans, not used for
+        filtering), and stuffing them into the existing JSONB column keeps the Schema surface minimal --
+        AGENTS.md §4 requires Schema changes to sync init.sql with the ORM, one fewer column is one fewer
+        drift surface.
 
-        键名与 `as_log_fields()` 同构（`suppressed_*` 前缀），便于日志↔库里对照。
+        Key names are homomorphic with `as_log_fields()` (the `suppressed_*` prefix), convenient for
+        log<->DB cross-reference.
         """
         return {
             "suppressed_reason": self.reason,
@@ -85,26 +90,27 @@ class InhibitionRecord:
 
 
 class ActiveAlertRegistry:
-    """进程内「每台机器人当前活跃告警」登记簿。
+    """In-process registry of "each robot's currently active alerts".
 
-    为什么需要它：severity 抑制的判据是「同机是否已有更高等级告警活跃」，
-    而 `online_state` 只记在线布尔值，回答不了这个问题。
-    消费线每次规则命中即登记，ticker 判恢复/离线即清理。
+    Why it is needed: the criterion for severity inhibition is "does this robot already have a higher
+    severity alert active", but `online_state` only records the online boolean and cannot answer that.
+    The consume line registers on every rule hit; the ticker clears on recovery/offline.
 
-    为什么用进程内内存而非 Redis：与 `online_state`/`last_seen` 同源
-    （main.py 已有先例）—— 活跃告警是**派生状态**，由本进程的规则评估直接产出，
-    多一次 Redis 往返换不来正确性，却给热路径加 RTT。单副本假设与现有引擎一致。
+    Why in-process memory rather than Redis: same source as `online_state`/`last_seen`
+    (main.py already has a precedent) -- active alerts are **derived state**, produced directly by this
+    process's rule evaluation; one more Redis round trip buys no correctness but adds RTT to the hot path.
+    The single-replica assumption is consistent with the existing engine.
     """
 
     def __init__(self) -> None:
         self._by_robot: dict[str, dict[str, Alert]] = {}
 
     def register(self, alert: Alert) -> None:
-        """规则命中时登记/刷新该机该规则的最新告警。"""
+        """Register/refresh the robot's latest alert for this rule when a rule hits."""
         self._by_robot.setdefault(alert.robot_id, {})[alert.rule_id] = alert
 
     def clear(self, robot_id: str, rule_id: str) -> None:
-        """规则恢复（本轮未再命中）时清除登记。"""
+        """Clear the registration when the rule recovers (not hit this round)."""
         rules = self._by_robot.get(robot_id)
         if not rules:
             return
@@ -113,11 +119,11 @@ class ActiveAlertRegistry:
             self._by_robot.pop(robot_id, None)
 
     def clear_robot(self, robot_id: str) -> None:
-        """整机清除（如判离线时，衍生告警已无意义）。"""
+        """Clear the whole robot (e.g. when judged offline, derivative alerts are meaningless)."""
         self._by_robot.pop(robot_id, None)
 
     def highest(self, robot_id: str, exclude_rule: str | None = None) -> Alert | None:
-        """该机当前最高 severity 的活跃告警；`exclude_rule` 用于排除自身。"""
+        """This robot's currently highest-severity active alert; `exclude_rule` excludes itself."""
         rules = self._by_robot.get(robot_id)
         if not rules:
             return None
@@ -127,7 +133,7 @@ class ActiveAlertRegistry:
         return max(candidates, key=lambda a: a.severity)
 
     def snapshot(self) -> dict[str, dict[str, Alert]]:
-        """只读快照（供测试与诊断断言，勿在热路径调用）。"""
+        """Read-only snapshot (for test and diagnostic assertions; do not call on the hot path)."""
         return {rid: dict(rules) for rid, rules in self._by_robot.items()}
 
     def clear_all(self) -> None:
@@ -139,15 +145,17 @@ def evaluate_severity_inhibition(
     registry: ActiveAlertRegistry,
     min_source_severity: int = MIN_SOURCE_SEVERITY,
 ) -> InhibitionRecord | None:
-    """纯函数：给定待发告警与活跃登记簿，判定是否被同机更高等级告警抑制。
+    """Pure function: given the pending alert and the active registry, decide whether it is inhibited
+    by a higher-severity alert on the same robot.
 
-    返回 `InhibitionRecord` 表示「被抑制」（附可追溯凭证），`None` 表示放行。
-    **不产生副作用**（除日志），便于单测直接钉语义。
+    Returns an `InhibitionRecord` meaning "inhibited" (with a traceable receipt), `None` meaning
+    allow. **No side effects** (except logging), convenient for pinning semantics in unit tests.
     """
     source = registry.highest(alert.robot_id, exclude_rule=alert.rule_id)
     if source is None:
         return None
-    # 自身不得作为自己的抑制源（exclude_rule 已保证），且严格大于才抑制。
+    # Itself must not be its own inhibition source (guaranteed by exclude_rule), and only a strict
+    # greater-than inhibits.
     if source.severity <= alert.severity:
         return None
     if source.severity < min_source_severity:

@@ -1,12 +1,12 @@
-"""关节卡死规则：同一关节角度方差≈0 但扭矩持续超阈值（spec/02 §3）。
+"""Joint-stuck rule: a joint whose angular variance is ~0 but whose torque stays over threshold (spec/02 §3).
 
-判定：窗口（默认 5s ≈ 50 个采样点）内某关节
-  - joint_positions 方差 < 1e-6（几乎不动），且
-  - joint_torques 均值 > 8.0（仍在发力）
-→ 判定为卡死（命令在动、实际没动）。
+Detection: within a window (default 5s ~= 50 samples), for some joint
+  - joint_positions variance < 1e-6 (almost no movement), AND
+  - joint_torques mean > 8.0 (still applying force)
+=> classified as stuck (command is moving, but the joint is not).
 
-关节名取自**最新一条遥测的键**，不在此处重复硬编码 24 个名字，
-避免与 spec/00 §5.5 / 后端 / 模拟器三处定义漂移。
+Joint names are taken from the KEYS of the latest telemetry record; we do not hard-code the
+24 joint names here, to avoid drift versus the three definitions in spec/00 §5.5 / backend / simulator.
 """
 
 from __future__ import annotations
@@ -58,8 +58,8 @@ class JointStuckRule(Rule):
                     robot_id=state.get("robot_id", ""),
                     rule_id=self.rule_id,
                     severity=self.severity,
-                    message=(f"关节卡死：{j} 角度方差 {var:.2e} 近乎不动，"
-                             f"但平均扭矩 {tq:.1f} 超阈值 {self.torque_threshold}"),
+                    message=(f"Joint stuck: {j} angle variance {var:.2e} nearly stationary, "
+                             f"but mean torque {tq:.1f} exceeds threshold {self.torque_threshold}"),
                     detail={"joint": j, "variance": var, "mean_torque": tq},
                 )
         return None

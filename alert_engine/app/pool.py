@@ -1,31 +1,34 @@
-"""asyncpg 连接池工厂（订单 08 / I-6，asyncpg 0.29.0 → 0.32.0 的行为护栏）。
+"""asyncpg connection pool factory (order 08 / I-6, behavior guardrail for asyncpg 0.29.0 -> 0.32.0).
 
-与 `backend_ingestion/app/db/pool.py` 同源（同一份语义护栏，两个服务各留一份，
-避免服务之间产生 import 依赖）。
+Same source as `backend_ingestion/app/db/pool.py` (the same semantic guardrail, kept as two copies
+for the two services, to avoid an import dependency between them).
 
-背景（升级前 vs 升级后，`min_size` 语义变化）：
+Background (before vs after upgrade, `min_size` semantic change):
 
-- <= 0.31：`min_size` = **建池时预建**几条连接，池空闲时可以一路跌到 0，
-  下一次 `acquire()` 现连一次（首查询要等一次 TCP + 认证握手）。
-- >= 0.32：`min_size` 改成**连接地板**（idle 期间始终维持 N 条，断连后台补齐），
-  原本"预建几条"的语义挪给了新参数 `init_size`（默认 = `min_size`）。
-  见 asyncpg docs `create_pool()` 的 ``.. versionchanged:: 0.32.0``：
+- <= 0.31: `min_size` = the number of connections **pre-built at pool creation**; the pool may drain
+  all the way to 0 while idle, and the next `acquire()` connects once on demand (the first query waits
+  for one TCP + auth handshake).
+- >= 0.32: `min_size` becomes a **connection floor** (N connections always maintained while idle, with
+  reconnections topped up in the background); the original "pre-built N" semantics moved to the new
+  parameter `init_size` (defaults to `min_size`).
+  See asyncpg docs for `create_pool()`'s ``.. versionchanged:: 0.32.0``:
   "The *min_size* parameter now defines the connection floor. The former role of
-  *min_size* — setting the initial pool size — is now handled by the new *init_size*
+  *min_size* -- setting the initial pool size -- is now handled by the new *init_size*
   parameter, which defaults to *min_size*."
 
-我们要的是**两者的并集**：既预建、又当常驻地板（机器人 10Hz 连发 7×24，连接不该被回收）。
-所以按官方迁移建议 `min_size=N` → `init_size=N, min_size=0` **不够**，还要保留地板：
+What we want is the **union of both**: both pre-built AND a persistent floor (robots fire at 10Hz 7x24,
+connections should not be reclaimed). So simply following the official migration advice
+`min_size=N` -> `init_size=N, min_size=0` is **not enough**; we must also keep the floor:
 
-    init_size=min_size, min_size=min_size   # 预建 N 条 + 空闲时仍维持 N 条
+    init_size=min_size, min_size=min_size   # pre-build N + keep N maintained while idle
 
-本模块用单一入口把这件事固定下来，避免两处 `create_pool()` 各写各的、
-以后再踩一次同样的语义坑。
+This module pins this down with a single entry point, to avoid the two `create_pool()` call sites each
+writing their own version and stepping on the same semantic pitfall again later.
 
-兼容性依据（本机实证，见 PR 描述）：
-- asyncpg 0.32.0 的 `create_pool()` 同时接受 `init_size` 与 `min_size`
-  （`spec` 未锁版本时也安全：0.29/0.31 只忽略未知的 `init_size`）。
-- `Pool.get_init_size()` 是 0.32.0 新增，故这里不调用它。
+Compatibility basis (verified locally, see PR description):
+- asyncpg 0.32.0's `create_pool()` accepts both `init_size` and `min_size`
+  (safe even when the version is not pinned: 0.29/0.31 simply ignore the unknown `init_size`).
+- `Pool.get_init_size()` is new in 0.32.0, so it is not called here.
 """
 
 from __future__ import annotations
@@ -34,17 +37,19 @@ import asyncpg
 
 __all__ = ["create_pool", "MAX_POOL_SIZE"]
 
-# `max_size` 的下限。**关键点：不能让它等于 `pool_size`。**
+# Lower bound for `max_size`. **Key point: do not set it equal to `pool_size`.**
 #
-# 本机实测（asyncpg 0.32.0 / PostgreSQL 15.19）：三值都设成 N 时，
-# 40 个并发 `acquire()` 下池大小**恒为 N**，超出的协程全部阻塞在 `_queue.get()`，
-# 池退化成信号量。反证：`init_size=2, min_size=2, max_size=10` 同场景下涨到 10。
+# Local measurement (asyncpg 0.32.0 / PostgreSQL 15.19): when all three values are set to N,
+# under 40 concurrent `acquire()` the pool size is **always N**, and the excess coroutines all block on
+# `_queue.get()`, the pool degrading into a semaphore. Proof by contradiction: with
+# `init_size=2, min_size=2, max_size=10` the same scenario grows to 10.
 #
-# 实测代价（alert_engine）：`emit()` 每个告警 spawn 一个 task，池被钉在 2 条时
-# **368 次告警写库抛 `TooManyConnectionsError`，仅 115 次成功** —— 静默丢告警。
+# Measured cost (alert_engine): `emit()` spawns one task per alert; with the pool pinned at 2 connections,
+# **368 alert writes threw `TooManyConnectionsError`, only 115 succeeded** -- silently dropping alerts.
 #
-# 教训与 `min_size` 语义变化同源：0.32.0 的 `min_size` 是**地板**而非"预建几条"，
-# 它不负责给并发留余量；把 `max_size` 设成等于地板，等于宣布"本服务并发度为 1"。
+# Lesson, same root as the `min_size` semantic change: in 0.32.0 `min_size` is a **floor**, not
+# "pre-build N"; it is not responsible for leaving headroom for concurrency. Setting `max_size` equal to
+# the floor is equivalent to declaring "this service has a concurrency degree of 1".
 MAX_POOL_SIZE = 10
 
 
@@ -55,30 +60,30 @@ async def create_pool(
     command_timeout: float = 30.0,
     connect_timeout: float = 8.0,
 ) -> asyncpg.Pool:
-    """建一个"预建 N 条 + 空闲维持 N 条"的 asyncpg 池。
+    """Create an asyncpg pool that is "pre-built N + keeps N maintained while idle".
 
     Args:
-        dsn: 连接串。
-        pool_size: 预建条数（`init_size`）与空闲地板（`min_size`）。
-            **不能同时当 `max_size`** —— 原因见下方 `MAX_POOL_SIZE` 的长注释。
-        command_timeout: 单条命令的服务端超时。
-        connect_timeout: **建池**的整体超时（秒），默认 8s。
+        dsn: connection string.
+        pool_size: the number of pre-built connections (`init_size`) and the idle floor (`min_size`).
+            **Must not double as `max_size`** -- see the long comment on `MAX_POOL_SIZE` below.
+        command_timeout: server-side timeout for a single command.
+        connect_timeout: overall timeout (seconds) for **pool creation**, default 8s.
 
-    注意：`command_timeout` **拦不住** `executemany()` 被锁阻塞时的挂起
-    （本机对 PostgreSQL 15.19 实测，见 `batch_writer.py` 的 `asyncio.wait_for`），
-    它只覆盖普通语句路径；不要把长事务护栏全押在它身上。
+    Note: `command_timeout` **cannot stop** the hang when `executemany()` is blocked by a lock
+    (verified locally on PostgreSQL 15.19, see `batch_writer.py`'s `asyncio.wait_for`);
+    it only covers the normal-statement path; do not stake all long-transaction guards on it.
 
-    `connect_timeout` 存在的理由：`init_size` 即「建池即预连」，会把
-    `connection.connect()` 的默认 `timeout=60` 带进来 —— DB 未就绪就建池，
-    每次调用阻塞满 60s。任何**探活/启动**路径撞上它都会挂死而非快速失败。
-    8s 是「比任何探针周期都短、又足够容忍一次 TCP 握手重试」的折中。
-    实测：`init_size=2` 全部连不上时，不给该参数 60.02s 抛 `TimeoutError`，
-    给 8s 则 8.01s 抛出（见 `tests/test_db_pool_timeout.py`）。
+    Why `connect_timeout` exists: `init_size` means "pre-connect on pool creation", which brings in
+    `connection.connect()`'s default `timeout=60` -- if the DB is not ready when creating the pool,
+    every call blocks for the full 60s. Any **liveness/startup** path hitting it will hang instead of
+    failing fast. 8s is a compromise of "shorter than any probe period, yet tolerant enough for one TCP
+    handshake retry". Measured: with `init_size=2` and everything unreachable, without this param it
+    throws `TimeoutError` at 60.02s; with 8s it throws at 8.01s (see `tests/test_db_pool_timeout.py`).
     """
     return await asyncpg.create_pool(
         dsn=dsn,
-        init_size=pool_size,   # 0.32.0：建池即预建
-        min_size=pool_size,    # 0.32.0：地板；0.29/0.31：预建（语义一致，安全）
+        init_size=pool_size,   # 0.32.0: pre-built on pool creation
+        min_size=pool_size,    # 0.32.0: floor; 0.29/0.31: pre-built (same semantics, safe)
         max_size=max(pool_size, MAX_POOL_SIZE),
         command_timeout=command_timeout,
         timeout=connect_timeout,
