@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://robotmonitor.local/contracts/ws-envelope.schema.json",
   "title": "RobotMonitor WS envelope",
-  "description": "ws://{host}:8000/ws/robots 出站信封（spec/00 §5.2）。OpenAPI 不描述 WebSocket，故单独成文：本文件是 WS 契约的机器可读事实来源，前端 src/lib/wsEnvelope.ts 在开发模式下用 ajv 校验它（生产不校验）。三条分支的判定顺序与 backend_ingestion/app/main.py 的 ws_robots() 出站顺序一致：① snapshot（首帧）② telemetry ③ alert。",
+  "description": "ws://{host}:8000/ws/robots outbound envelope (spec/00 §5.2). OpenAPI does not describe WebSocket, so this is a separate document: the machine-readable source of truth for the WS contract, validated by frontend src/lib/wsEnvelope.ts in dev mode via ajv (not in production). The branch decision order matches the outbound order of backend_ingestion/app/main.py's ws_robots(): ① snapshot (first frame) ② telemetry ③ alert.",
   "oneOf": [
     {
       "$ref": "#/$defs/SnapshotEnvelope"
@@ -17,7 +17,7 @@
   "$defs": {
     "JointDict": {
       "type": "object",
-      "description": "关节名 → 数值。键名为 spec/00 §5.5 的 24 个标准键。",
+      "description": "Joint name -> value. Keys are the 24 standard keys from spec/00 §5.5.",
       "minProperties": 1,
       "additionalProperties": {
         "type": "number"
@@ -25,7 +25,7 @@
     },
     "RobotTelemetry": {
       "type": "object",
-      "description": "与后端 /openapi.json 的 RobotTelemetryOut 逐字段一致（joint_positions 必须在内，见 STATUS.md §六第 2 条事故）。is_online（required）/ last_seen（optional，可为 null）由 ISSUE #77 追加：在线判定的事实源从「机器人自述的 status_code」换成「后端接收侧的 last_seen」。",
+      "description": "Byte-for-byte consistent with backend /openapi.json's RobotTelemetryOut (joint_positions must be included; see the STATUS.md §6.2 incident). is_online (required) / last_seen (optional, may be null) were added by ISSUE #77: the source of truth for online judgment switched from the robot's self-reported status_code to the backend receive-side last_seen.",
       "required": [
         "robot_id",
         "status_code",
@@ -77,20 +77,20 @@
         },
         "is_online": {
           "type": "boolean",
-          "description": "后端判定的在线标志（ISSUE #77）：距最后一次收到遥测是否在阈值内。前端只认它，不再用 status_code 反推在线。"
+          "description": "Backend-judged online flag (ISSUE #77): whether the last received telemetry is within the threshold. The frontend reads only this, no longer inferring online from status_code."
         },
         "last_seen": {
           "type": [
             "integer",
             "null"
           ],
-          "description": "后端最后一次收到该机器人遥测的 epoch 秒（接收侧事实）；从未上报为 null。"
+          "description": "Epoch seconds of the backend's last received telemetry for this robot (receive-side fact); null if never reported."
         }
       }
     },
     "RobotAlert": {
       "type": "object",
-      "description": "告警（spec/00 §5.2 ③），经 Redis robot:alerts 转发。",
+      "description": "Alert (spec/00 §5.2 ③), forwarded via Redis robot:alerts.",
       "required": [
         "robot_id",
         "rule_id",
@@ -120,7 +120,7 @@
     },
     "SnapshotEnvelope": {
       "type": "object",
-      "description": "① 首帧：100 台全量快照。",
+      "description": "① First frame: full snapshot of 100 robots.",
       "required": [
         "type",
         "data"
@@ -149,7 +149,7 @@
     },
     "TelemetryEnvelope": {
       "type": "object",
-      "description": "② 增量遥测：单台。",
+      "description": "② Incremental telemetry: single robot.",
       "required": [
         "type",
         "data"
@@ -166,7 +166,7 @@
     },
     "AlertEnvelope": {
       "type": "object",
-      "description": "③ 告警：单条。",
+      "description": "③ Alert: single entry.",
       "required": [
         "type",
         "data"
