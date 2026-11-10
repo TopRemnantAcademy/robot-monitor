@@ -113,6 +113,18 @@ main:
             echo "── pytest bridge/tests (ROS2 / ISO 21423 bridge, standalone package) ──"
             python -m pip install --no-cache-dir -r bridge/requirements.txt
             python -m pip install --no-cache-dir pytest pytest-timeout
+            # 2026-11-10 next-step: build the Rust extension so the Rust backend path is
+            # actually exercised (and guarded by test_backend_active.py) in CI. Rust install is
+            # best-effort: if the toolchain is unavailable the suite still runs via Python fallback.
+            if ! command -v cargo >/dev/null 2>&1; then
+              echo "── installing Rust toolchain (rustup) for iso21423_rs ──"
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y || echo "rustup install failed; skipping Rust build"
+            fi
+            if command -v cargo >/dev/null 2>&1; then
+              echo "── building iso21423_rs (maturin develop) ──"
+              python -m pip install --no-cache-dir maturin
+              (cd bridge/iso21423-rs && python -m maturin develop) || echo "maturin build failed; suite will use Python fallback"
+            fi
             python -m pytest bridge/tests/ -v --timeout=60
 
             # -- 2026-10-13 added three more gates (previously only hand-verified on the main agent's local machine, now solidified) --
@@ -402,6 +414,18 @@ main:
             echo "── pytest bridge/tests (ROS2 / ISO 21423 bridge, standalone package) ──"
             python -m pip install --no-cache-dir -r bridge/requirements.txt
             python -m pip install --no-cache-dir pytest pytest-timeout
+            # 2026-11-10 next-step: build the Rust extension so the Rust backend path is
+            # actually exercised (and guarded by test_backend_active.py) in CI. Rust install is
+            # best-effort: if the toolchain is unavailable the suite still runs via Python fallback.
+            if ! command -v cargo >/dev/null 2>&1; then
+              echo "── installing Rust toolchain (rustup) for iso21423_rs ──"
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y || echo "rustup install failed; skipping Rust build"
+            fi
+            if command -v cargo >/dev/null 2>&1; then
+              echo "── building iso21423_rs (maturin develop) ──"
+              python -m pip install --no-cache-dir maturin
+              (cd bridge/iso21423-rs && python -m maturin develop) || echo "maturin build failed; suite will use Python fallback"
+            fi
             python -m pytest bridge/tests/ -v --timeout=60
 
             # Identical word-for-word to the push branch's three gates -- the two sides must stay consistent,

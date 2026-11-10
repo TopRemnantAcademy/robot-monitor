@@ -109,7 +109,17 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r bridge/requirements.txt
           python -m pip install pytest pytest-timeout
+      - name: Install Rust toolchain (builds iso21423_rs extension)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build Rust extension (iso21423_rs)
+        run: |
+          set -eu
+          python -m pip install maturin
+          cd bridge/iso21423-rs
+          python -m maturin develop
       - name: pytest bridge/tests (standalone package, no app collision)
+        # test_backend_active.py now FAILS if the shim fell back to Python,
+        # so this lane actually exercises (and guards) the Rust port.
         run: python -m pytest bridge/tests/ -v --timeout=60
       - name: Compile all (syntax gate)
         run: python -m compileall -q bridge simulator
