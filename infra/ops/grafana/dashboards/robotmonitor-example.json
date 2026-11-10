@@ -1,0 +1,189 @@
+{
+  "id": null,
+  "uid": "robotmonitor-example",
+  "title": "RobotMonitor Example — Exporter Health",
+  "description": "Minimal example dashboard wiring the RobotMonitor exporters (TimescaleDB/Postgres, Redis, EMQX) plus a TimescaleDB connection check. Uses the provisioned datasource uids rm-prometheus and rm-timescaledb.",
+  "tags": ["robotmonitor"],
+  "timezone": "",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "TimescaleDB (Postgres) up",
+      "description": "Scrape health of the postgres-exporter target (job=timescaledb). 1 = up, 0 = down.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "rm-prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "DOWN"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "UP"
+                }
+              },
+              "type": "value"
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up{job=\"timescaledb\"}",
+          "legendFormat": "timescaledb"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Redis up",
+      "description": "Scrape health of the redis-exporter target (job=redis). 1 = up, 0 = down.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "rm-prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "DOWN"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "UP"
+                }
+              },
+              "type": "value"
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up{job=\"redis\"}",
+          "legendFormat": "redis"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "EMQX up",
+      "description": "Scrape health of the EMQX exporter target (job=emqx). 1 = up, 0 = down.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "rm-prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "DOWN"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "UP"
+                }
+              },
+              "type": "value"
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up{job=\"emqx\"}",
+          "legendFormat": "emqx"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "TimescaleDB connection check",
+      "description": "Direct SQL probe against the provisioned TimescaleDB (Postgres) datasource via uid rm-timescaledb. Returns 1 if the database accepts connections.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "rm-timescaledb"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {},
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawSql": "SELECT 1 AS ok",
+          "datasource": {
+            "type": "postgres",
+            "uid": "rm-timescaledb"
+          }
+        }
+      ]
+    }
+  ]
+}

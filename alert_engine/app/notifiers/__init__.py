@@ -14,5 +14,6 @@ Design constraints (why it is written this way):
 """
 
 from app.notifiers.webhook import WebhookNotifier, build_notifier
+from app.notifiers.slack import SlackNotifier, build_slack_notifier
 
-__all__ = ["WebhookNotifier", "build_notifier"]
+__all__ = ["WebhookNotifier", "build_notifier", "SlackNotifier", "build_slack_notifier"]

@@ -112,6 +112,9 @@ class Settings(BaseSettings):
     alert_webhook_kind: str = "generic"
     # Push threshold: default 3 -- only push critical, preventing "low-battery storm" spam
     alert_webhook_min_severity: int = 3
+    # Slack incoming-webhook URL (I-14 extension, GitHub issue #8). If empty, the Slack notifier is
+    # disabled and skipped -- same "no secrets in repo" policy as the generic webhook.
+    slack_webhook_url: str = ""
 
     # ---- Prometheus ----
     # The alert engine is not a FastAPI app and has no HTTP route to mount /metrics on,

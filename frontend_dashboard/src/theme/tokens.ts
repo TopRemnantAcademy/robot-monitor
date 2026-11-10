@@ -1,9 +1,32 @@
 // spec/03 §3 / orders/05 "design tokens" — copy strictly, do not change colors yourself.
 // When components need value-based colors (battery bar, temperature blocks), take them from here to avoid scattered magic strings.
+//
+// GitHub issue #7 (theme switching): every token now resolves from the *active* palette via a Proxy, so the
+// ~200 existing `COLORS.x` references across the UI switch dark/light with zero call-site changes. See ThemeProvider.
 
 import type { RobotStatus } from '../types/robot';
 
-export const COLORS = {
+/** Light vs dark theme selector (GitHub issue #7). */
+export type ThemeName = 'dark' | 'light';
+
+/** Complete color palette — every token the UI references. */
+export interface Palette {
+  bgBase: string;
+  surface: string;
+  border: string;
+  textPrimary: string;
+  textSecondary: string;
+  accent: string;
+  statusNormal: string;
+  statusWarning: string;
+  statusFault: string;
+  statusOffline: string;
+  /** Drawer overlay (derived from bgBase, no new hue). */
+  overlay: string;
+}
+
+// Dark (default, original spec/03 §3 industrial theme).
+const DARK: Palette = {
   bgBase: '#0B0E14',
   surface: '#121722',
   border: '#1A2230',
@@ -14,9 +37,44 @@ export const COLORS = {
   statusWarning: '#F1C40F',
   statusFault: '#FF4D4F',
   statusOffline: '#5A6472',
-  /** Drawer overlay: #0B0E14 at 55% opacity (derived from bgBase, no new hue). */
   overlay: 'rgba(11, 14, 20, 0.55)',
-} as const;
+};
+
+// Light (GitHub issue #7): tuned for WCAG-AA contrast on white surfaces.
+const LIGHT: Palette = {
+  bgBase: '#F4F6F9',
+  surface: '#FFFFFF',
+  border: '#D9E0E8',
+  textPrimary: '#0B0E14',
+  textSecondary: '#56616E',
+  accent: '#2563EB',
+  statusNormal: '#1E8E3E',
+  statusWarning: '#B7791F',
+  statusFault: '#D92D20',
+  statusOffline: '#8A95A3',
+  overlay: 'rgba(15, 23, 42, 0.45)',
+};
+
+export const PALETTES: Record<ThemeName, Palette> = { dark: DARK, light: LIGHT };
+
+let _theme: ThemeName = 'dark';
+
+/** Switch the active palette. Called by ThemeProvider (and tests) so `COLORS.x` resolves to the new values. */
+export function setActiveTheme(t: ThemeName): void {
+  _theme = t;
+}
+export function getActiveTheme(): ThemeName {
+  return _theme;
+}
+
+/**
+ * Theme-aware color tokens (GitHub issue #7). A Proxy over `PALETTES[_theme]` so every existing
+ * `COLORS.x` reference in the UI returns the value for the currently selected theme without any call-site edit.
+ * The dashboard remounts on theme change (ThemeProvider's `key`), forcing a re-read of the new values.
+ */
+export const COLORS: Palette = new Proxy({} as Palette, {
+  get: (_target, key: string) => PALETTES[_theme][key as keyof Palette],
+});
 
 /** Font-size / radius tokens (spec/03 §3). Reference here when an inline style is needed. */
 export const FONT = {
@@ -30,13 +88,23 @@ export const RADIUS = {
   drawer: '0px',
 } as const;
 
-/** status_code → state color (0 offline / 1 normal / 2 warning / 3 fault). */
-export const STATUS_COLOR: Record<RobotStatus, string> = {
-  0: COLORS.statusOffline,
-  1: COLORS.statusNormal,
-  2: COLORS.statusWarning,
-  3: COLORS.statusFault,
-};
+/**
+ * status_code → state color (0 offline / 1 normal / 2 warning / 3 fault).
+ * Kept theme-aware via a Proxy so it tracks the active palette (GitHub issue #7).
+ */
+export const STATUS_COLOR: Record<RobotStatus, string> = new Proxy(
+  {} as Record<RobotStatus, string>,
+  {
+    get: (_target, key: string) => {
+      switch (Number(key)) {
+        case 1: return PALETTES[_theme].statusNormal;
+        case 2: return PALETTES[_theme].statusWarning;
+        case 3: return PALETTES[_theme].statusFault;
+        default: return PALETTES[_theme].statusOffline;
+      }
+    },
+  },
+);
 
 export const STATUS_LABEL: Record<RobotStatus, string> = {
   0: 'offline',
@@ -61,14 +129,23 @@ export const STATUS_LABEL: Record<RobotStatus, string> = {
  */
 export type RobotDisplayState = 'online' | 'warning' | 'fault' | 'stale' | 'offline';
 
-/** Display state → color. stale / offline reuse statusOffline gray: no new hue (spec/03 §3). */
-export const DISPLAY_COLOR: Record<RobotDisplayState, string> = {
-  online: COLORS.statusNormal,
-  warning: COLORS.statusWarning,
-  fault: COLORS.statusFault,
-  stale: COLORS.statusOffline,
-  offline: COLORS.statusOffline,
-};
+/**
+ * Display state → color. stale / offline reuse statusOffline gray: no new hue (spec/03 §3).
+ * Kept theme-aware via a Proxy so it tracks the active palette (GitHub issue #7).
+ */
+export const DISPLAY_COLOR: Record<RobotDisplayState, string> = new Proxy(
+  {} as Record<RobotDisplayState, string>,
+  {
+    get: (_target, key: string) => {
+      switch (key) {
+        case 'online': return PALETTES[_theme].statusNormal;
+        case 'warning': return PALETTES[_theme].statusWarning;
+        case 'fault': return PALETTES[_theme].statusFault;
+        default: return PALETTES[_theme].statusOffline; // stale / offline
+      }
+    },
+  },
+);
 
 /** Display state → text. `stale` → "lost" (not "offline"); see RobotDisplayState comment. */
 export const DISPLAY_LABEL: Record<RobotDisplayState, string> = {

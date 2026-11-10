@@ -22,7 +22,7 @@
 //   regressions like wrong URL / missing header / renamed field are still caught by this case.
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import RobotDetailDrawer from '../RobotDetailDrawer';
@@ -34,6 +34,7 @@ import { SAMPLE_HISTORY } from '../../test/msw/handlers';
 // Shared render: already wrapped in QueryClientProvider, so components using useQuery can render in tests
 // (fixes Issue #78: main previously had npm test 8/8 all red).
 import { render } from '../../test/render';
+import axe from 'axe-core';
 
 /** Drawer "this robot's recent alerts" case's /alerts response: one local + one other-robot (verifies filtering). */
 const SAMPLE_ALERT_PAGE = {
@@ -157,7 +158,7 @@ describe('RobotDetailDrawer', () => {
     openDrawer();
     render(<RobotDetailDrawer />);
 
-    const aside = screen.getByRole('complementary');
+    const aside = screen.getByRole('dialog');
     expect(within(aside).getByText('humanoid-042')).toBeInTheDocument();
     expect(within(aside).getByText('18.4%')).toBeInTheDocument();      // battery_pct
     expect(within(aside).getByText('66.2°C')).toBeInTheDocument();     // max_joint_temp
@@ -262,7 +263,7 @@ describe('RobotDetailDrawer', () => {
     openDrawer();
     render(<RobotDetailDrawer />);
 
-    const aside = screen.getByRole('complementary');
+    const aside = screen.getByRole('dialog');
     // humanoid-042's motor_temp alert renders (ruleLabel reuses AlertLogTable's mapping)
     expect(await within(aside).findByText('Motor overheat')).toBeInTheDocument();
     expect(within(aside).getByText('Escalated')).toBeInTheDocument();
@@ -335,7 +336,7 @@ describe('RobotDetailDrawer', () => {
     openDrawer();
     render(<RobotDetailDrawer />);
 
-    const aside = screen.getByRole('complementary');
+    const aside = screen.getByRole('dialog');
     // Non-admin (default role=null): acknowledge button not rendered —— "don't let users see the unclickable thing"
     await within(aside).findByText('Motor overheat');
     expect(within(aside).queryByRole('button', { name: 'Acknowledge' })).not.toBeInTheDocument();
@@ -348,5 +349,111 @@ describe('RobotDetailDrawer', () => {
 
     // Restore global auth state (why this case must stay at the end of describe)
     useAuthStore.setState({ status: 'unknown', email: null, role: null });
+  });
+});
+
+// —— GitHub issue #9: drawer accessibility (keyboard + ARIA + axe-core) ——
+// Reuses the harness above (fetchMock, openDrawer, render). The Drawer is now role="dialog" with
+// aria-modal / aria-labelledby, Escape-to-close, focus moved into the dialog on open, and a Tab trap.
+describe('RobotDetailDrawer accessibility (GitHub issue #9)', () => {
+  it('Drawer exposes dialog semantics: role, aria-modal, and a valid labelledby target', () => {
+    openDrawer();
+    render(<RobotDetailDrawer />);
+
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveAttribute('aria-modal', 'true');
+    expect(dialog).toHaveAttribute('aria-labelledby', 'robot-detail-title');
+
+    // The labelledby target exists and carries the robot id (the dialog's accessible name).
+    const title = document.getElementById('robot-detail-title');
+    expect(title).not.toBeNull();
+    expect(title).toHaveTextContent('humanoid-042');
+
+    // Backdrop mask is decorative and hidden from the a11y tree.
+    expect(document.querySelector('[aria-hidden="true"]')).not.toBeNull();
+  });
+
+  it('Escape closes the dialog (clears selectedRobotId)', () => {
+    openDrawer();
+    render(<RobotDetailDrawer />);
+
+    const dialog = screen.getByRole('dialog');
+    // focus something inside so the keydown bubbles to the dialog handler
+    const closeBtn = screen.getByRole('button', { name: 'Close' });
+    closeBtn.focus();
+
+    fireEvent.keyDown(closeBtn, { key: 'Escape' });
+    expect(useRobotStore.getState().selectedRobotId).toBeNull();
+    expect(dialog).not.toBeInTheDocument();
+  });
+
+  it('Focus moves into the dialog (close button) when it opens', async () => {
+    openDrawer();
+    render(<RobotDetailDrawer />);
+
+    const closeBtn = screen.getByRole('button', { name: 'Close' });
+    await waitFor(() => expect(document.activeElement).toBe(closeBtn));
+  });
+
+  it('Tab is trapped: at the last focusable Tab wraps to first; Shift+Tab at first wraps to last', async () => {
+    openDrawer();
+    render(<RobotDetailDrawer />);
+
+    const dialog = screen.getByRole('dialog');
+    const focusables = () =>
+      Array.from(
+        dialog.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+    await waitFor(() => expect(focusables().length).toBeGreaterThan(1));
+    const list = focusables();
+    const first = list[0];
+    const last = list[list.length - 1];
+
+    // Shift+Tab at the first focusable wraps to the last.
+    first.focus();
+    expect(document.activeElement).toBe(first);
+    fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(last);
+
+    // Tab at the last focusable wraps to the first.
+    last.focus();
+    expect(document.activeElement).toBe(last);
+    fireEvent.keyDown(dialog, { key: 'Tab' });
+    expect(document.activeElement).toBe(first);
+  });
+
+  it('axe-core: no critical/serious violations for dialog name, button names, and ARIA attributes', async () => {
+    openDrawer();
+    render(<RobotDetailDrawer />);
+
+    const dialog = screen.getByRole('dialog');
+    const results = await axe.run(dialog, {
+      runOnly: {
+        type: 'rule',
+        values: [
+          'button-name',
+          'aria-valid-attr',
+          'aria-required-attr',
+          'aria-allowed-attr',
+          'aria-hidden-focus',
+        ],
+      },
+    });
+    const serious = results.violations.filter(
+      (v) => v.impact === 'critical' || v.impact === 'serious',
+    );
+    if (serious.length > 0) {
+      throw new Error(
+        'axe violations: ' +
+          JSON.stringify(
+            serious.map((v) => ({ id: v.id, impact: v.impact, nodes: v.nodes.length })),
+            null,
+            2,
+          ),
+      );
+    }
+    expect(serious).toHaveLength(0);
   });
 });

@@ -4,7 +4,7 @@
 //   1) Real-time increment: taken directly from Zustand's robots Map (this robot updates at 10Hz)
 //   2) History line chart: GET {VITE_API_BASE}/robots/{id}/history?minutes=5&resolution=10s (spec/00 §5.3)
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 // Order 09: use echarts-for-react's core entry + on-demand registered echarts instance,
 // replacing the default entry (the default entry internally requires the entire echarts package, can't tree-shake).
@@ -35,6 +35,7 @@ import {
   fetchRobotHistory,
   robotHistoryKey,
 } from '../api/robotHistory';
+import { downloadCsv, toCsv } from '../lib/csv';
 
 // Order 26: Drawer no longer holds its own REST base URL, uniformly taken from auth/api (re-export to keep existing references compatible).
 import { API_BASE } from '../auth/api';
@@ -94,10 +95,60 @@ export default function RobotDetailDrawer() {
   const queryClient = useQueryClient();
   const canAck = useIsAdmin();
 
+  // GitHub issue #9: keep a ref to the dialog element and remember what was focused before opening,
+  // so we can trap Tab inside and restore focus on close (keyboard / screen-reader users).
+  const dialogRef = useRef<HTMLElement>(null);
+  const previouslyFocused = useRef<HTMLElement | null>(null);
+
   // Reset selected joint each time the Drawer opens, to avoid leftover selection from the previous robot
   useEffect(() => {
     if (selectedRobotId) setSelectedJoint(JOINT_NAMES[0]);
   }, [selectedRobotId]);
+
+  // GitHub issue #9: on open, move focus into the dialog (close button) so keyboard users aren't stranded
+  // on the card behind it; on close, return focus to the element that opened it.
+  useEffect(() => {
+    if (selectedRobotId) {
+      previouslyFocused.current = (document.activeElement as HTMLElement) ?? null;
+      const id = window.setTimeout(() => {
+        dialogRef.current?.querySelector<HTMLElement>('[data-drawer-close]')?.focus();
+      }, 0);
+      return () => window.clearTimeout(id);
+    }
+    previouslyFocused.current?.focus?.();
+    return undefined;
+  }, [selectedRobotId]);
+
+  // GitHub issue #9: Escape closes the dialog; Tab is trapped within it (Shift+Tab wraps to the last).
+  const onDrawerKeyDown = useCallback((e: ReactKeyboardEvent<HTMLElement>) => {
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      selectRobot(null);
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    const root = dialogRef.current;
+    if (!root) return;
+    const focusables = Array.from(
+      root.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    );
+    if (focusables.length === 0) {
+      e.preventDefault();
+      return;
+    }
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement as HTMLElement;
+    if (e.shiftKey && (active === first || !root.contains(active))) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && active === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }, [selectRobot]);
 
   // Order 26 (I-20): history query delegated to react-query for caching and retry.
   //   - Reopen same robot: hits cache within staleTime, no backend call;
@@ -174,6 +225,26 @@ export default function RobotDetailDrawer() {
     if (!Array.isArray(items)) return [];
     return items.filter((a) => a.robot_id === selectedRobotId).slice(0, 5);
   }, [alertsQuery.data, selectedRobotId]);
+
+  // GitHub issue #11: the full (un-sliced) set for this robot, used only for CSV export.
+  const robotAlertsAll: AlertApiItem[] = useMemo(() => {
+    const items = alertsQuery.data?.items;
+    if (!Array.isArray(items)) return [];
+    return items.filter((a) => a.robot_id === selectedRobotId);
+  }, [alertsQuery.data, selectedRobotId]);
+
+  // GitHub issue #11: build the CSV client-side (no backend change) and trigger a browser download.
+  const exportAlertsCsv = useCallback(() => {
+    const rows = robotAlertsAll.map((a) => [
+      a.time,
+      a.robot_id,
+      a.rule_id,
+      a.severity,
+      a.ack ? 'true' : 'false',
+    ]);
+    const csv = toCsv(['time', 'robot', 'rule', 'severity', 'ack'], rows);
+    downloadCsv(`alerts-${selectedRobotId}.csv`, csv);
+  }, [robotAlertsAll, selectedRobotId]);
 
   // Order 27 T1: 24-joint real-time torque load row model (pure CSS bars, no new ECharts instance).
   // maxAbs takes the max |torque| of joints with values in the current frame as full scale; clamp to 1 when all-zero/no data to prevent divide-by-zero,
@@ -303,13 +374,19 @@ export default function RobotDetailDrawer() {
 
   return (
     <>
-      {/* Mask layer: click to close (doesn't block the main area layout, Drawer is fixed-positioned) */}
+      {/* Mask layer: click to close (doesn't block the main area layout, Drawer is fixed-positioned).
+          Decorative backdrop only — hidden from the accessibility tree. */}
       <div
+        aria-hidden="true"
         className="fixed inset-0 z-30"
         style={{ backgroundColor: COLORS.overlay }}
         onClick={() => selectRobot(null)}
       />
       <aside
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="robot-detail-title"
         className="fixed right-0 top-0 h-screen z-40 flex flex-col overflow-hidden"
         style={{
           width: '480px',
@@ -317,17 +394,20 @@ export default function RobotDetailDrawer() {
           borderLeft: `1px solid ${COLORS.border}`,
           borderRadius: 0,
         }}
+        onKeyDown={onDrawerKeyDown}
       >
         <div
           className="h-14 shrink-0 flex items-center justify-between px-4"
           style={{ borderBottom: `1px solid ${COLORS.border}` }}
         >
           <div className="flex items-baseline gap-2 min-w-0">
-            <span style={{ ...FONT.title, color: COLORS.textPrimary }}>{selectedRobotId}</span>
+            <span id="robot-detail-title" style={{ ...FONT.title, color: COLORS.textPrimary }}>{selectedRobotId}</span>
             <span style={{ ...FONT.metric, color: statusColor }}>{statusText}</span>
           </div>
           <button
             type="button"
+            data-drawer-close
+            aria-label={t('drawer.close')}
             onClick={() => selectRobot(null)}
             className="px-2 py-1 cursor-pointer"
             style={{ ...FONT.metric, color: COLORS.textSecondary, border: `1px solid ${COLORS.border}` }}
@@ -524,9 +604,29 @@ export default function RobotDetailDrawer() {
           {/* This robot's recent alerts (REST authoritative view, filter latest 200 by robot_id take first 5;
               Order 27 T2: admin can acknowledge/withdraw in place, invalidate and re-fetch on success to reconcile) */}
           <section>
-            <h3 className="mb-1" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
-              {t('alerts.title')}
-            </h3>
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <h3 style={{ ...FONT.metric, color: COLORS.textSecondary }}>
+                {t('alerts.title')}
+              </h3>
+              {/* GitHub issue #11: export this robot's full alert history as CSV (client-side, no backend change) */}
+              <button
+                type="button"
+                onClick={exportAlertsCsv}
+                disabled={robotAlertsAll.length === 0}
+                aria-label={t('alerts.exportCsv')}
+                className="px-2 py-0.5 rounded cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
+                style={{
+                  fontSize: '10px',
+                  fontWeight: 600,
+                  color: COLORS.textPrimary,
+                  backgroundColor: COLORS.surface,
+                  border: `1px solid ${COLORS.border}`,
+                }}
+                title={t('alerts.exportCsv')}
+              >
+                {t('alerts.exportCsv')}
+              </button>
+            </div>
             {ackError ? (
               <div className="mb-1" style={{ ...FONT.metric, color: COLORS.statusFault }}>
                 {ackError}

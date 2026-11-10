@@ -5,6 +5,7 @@ import { COLORS, FONT } from '../theme/tokens';
 import { selectStatusCounts, useRobotStore } from '../store/robotStore';
 import { useShallow } from 'zustand/react/shallow';
 import { useI18n } from '../i18n/I18nProvider';
+import { useTheme } from '../theme/ThemeProvider';
 import LanguageSwitcher from '../i18n/LanguageSwitcher';
 
 function Kpi({ label, value, unit, color }: { label: string; value: string; unit?: string; color?: string }) {
@@ -21,6 +22,7 @@ function Kpi({ label, value, unit, color }: { label: string; value: string; unit
 
 export default function HealthSummaryHeader() {
   const { t } = useI18n();
+  const { theme, cycleTheme } = useTheme();
   const alerts = useRobotStore((s) => s.alerts);
   const wsStatus = useRobotStore((s) => s.wsStatus);
 
@@ -94,8 +96,26 @@ export default function HealthSummaryHeader() {
 
         <LanguageSwitcher />
 
-        <div className="flex items-center gap-2">
+        {/* GitHub issue #7: theme switch (dark / light). Glyph + aria-label both carry the target state. */}
+        <button
+          type="button"
+          onClick={cycleTheme}
+          aria-label={theme === 'dark' ? t('theme.toggleToLight') : t('theme.toggleToDark')}
+          title={theme === 'dark' ? t('theme.toggleToLight') : t('theme.toggleToDark')}
+          className="px-2 py-1 rounded cursor-pointer"
+          style={{
+            ...FONT.metric,
+            color: COLORS.textSecondary,
+            border: `1px solid ${COLORS.border}`,
+            backgroundColor: COLORS.surface,
+          }}
+        >
+          {theme === 'dark' ? '☀' : '☾'}
+        </button>
+
+        <div className="flex items-center gap-2" role="status" aria-label={`WebSocket ${dotLabel}`}>
           <span
+            aria-hidden="true"
             className="inline-block w-2.5 h-2.5 rounded-full"
             style={{ backgroundColor: dotColor, boxShadow: `0 0 6px ${dotColor}` }}
           />

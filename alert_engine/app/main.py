@@ -51,7 +51,7 @@ from app.rules.offline import OfflineRule
 from app.rules.anomaly import AnomalyRule
 from app.rules.base import Alert
 from app import metrics
-from app.notifiers import build_notifier
+from app.notifiers import build_notifier, build_slack_notifier
 from app.notifiers.webhook import classify_exception
 from app.store import load_online_state, save, save_suppressed, update_online
 
@@ -87,6 +87,9 @@ _tasks: set[asyncio.Task] = set()
 # Assembling at module level is a deliberate fail-fast: a misspelled kind prevents the process from
 # starting, which is better than misconfiguring and silently not notifying at runtime.
 _notifier = build_notifier(settings)
+# Slack notifier (GitHub issue #8): None when SLACK_WEBHOOK_URL is empty. Both notifiers are tried
+# independently in `_notify`; a failure on one does not affect delivery on the other.
+_slack_notifier = build_slack_notifier(settings)
 
 # ---- Notification retry limits (R-15 T3) ------------------------------------------------
 # The values are **hard caps**, not tunable parameters: requirement §6 explicitly forbids "unbounded
@@ -244,32 +247,33 @@ async def _notify(alert: Alert) -> None:
       Cost: one alert's notification and its persistence no longer complete at strictly the same instant,
       acceptable -- notification is inherently "best effort" (requirement §3).
     """
-    # Take a snapshot before await: during retries `_notifier` may be replaced (tests monkeypatch it),
-    # this task should always be responsible for "the notifier at that time".
-    notifier = _notifier
-    if notifier is None:
+    # Take a snapshot before await: during retries the notifier set is stable here, but we still read
+    # it once so a future monkeypatch of `_notifier` (tests) is honored.
+    notifiers = [n for n in (_notifier, _slack_notifier) if n]
+    if not notifiers:
         return
-    try:
-        ok, reason = await _send_with_retry(notifier, alert)
-    except asyncio.CancelledError:
-        raise                     # cancel is control flow, not delivery failure; must not be counted as failure
-    except Exception as exc:      # pragma: no cover - defense in depth, normally unreachable
-        log.exception("notify task crashed: %s/%s", alert.robot_id, alert.rule_id)
-        ok, reason = False, classify_notify_reason(exc)
+    for notifier in notifiers:
+        try:
+            ok, reason = await _send_with_retry(notifier, alert)
+        except asyncio.CancelledError:
+            raise                     # cancel is control flow, not delivery failure; must not be counted as failure
+        except Exception as exc:      # pragma: no cover - defense in depth, normally unreachable
+            log.exception("notify task crashed: %s/%s", alert.robot_id, alert.rule_id)
+            ok, reason = False, classify_notify_reason(exc)
 
-    if ok:
-        metrics.notify_sent.labels(kind=getattr(notifier, "kind", "unknown")).inc()
-        return
+        if ok:
+            metrics.notify_sent.labels(kind=getattr(notifier, "kind", "unknown")).inc()
+            continue
 
-    # Failure: the count must land within the **closed reason set** (`NotifyError` already normalized,
-    # here we guard None/empty string once more, to prevent an empty label).
-    metrics.notify_failed.labels(reason=reason or "unknown").inc()
-    # The failure has already been printed per-attempt by the notifier's `log.exception`; here we add a
-    # **conclusion-level** log line: record "finally gave up, retried N times", otherwise the log would
-    # only have 3 identical failure stacks, and the reader could not distinguish "failed but retried
-    # successfully" from "totally failed" (metrics can distinguish, human reading logs cannot).
-    log.error("notify giving up after retries: reason=%s %s/%s",
-              reason or "unknown", alert.robot_id, alert.rule_id)
+        # Failure: the count must land within the **closed reason set** (`NotifyError` already normalized,
+        # here we guard None/empty string once more, to prevent an empty label).
+        metrics.notify_failed.labels(reason=reason or "unknown").inc()
+        # The failure has already been printed per-attempt by the notifier's `log.exception`; here we add a
+        # **conclusion-level** log line: record "finally gave up, retried N times", otherwise the log would
+        # only have 3 identical failure stacks, and the reader could not distinguish "failed but retried
+        # successfully" from "totally failed" (metrics can distinguish, human reading logs cannot).
+        log.error("notify giving up after retries: reason=%s %s/%s",
+                  reason or "unknown", alert.robot_id, alert.rule_id)
 
 
 async def emit(alert: Alert) -> None:
@@ -357,7 +361,7 @@ async def emit(alert: Alert) -> None:
         # reason see `_notify`'s docstring -- the wait on the notification chain (including retries) must
         # never occupy the alert consume loop. Failure terminates inside `_notify` (only count + log),
         # structurally impossible to roll back or block the already-completed `save()` / broadcast above.
-        if _notifier is not None:
+        if _notifier is not None or _slack_notifier is not None:
             spawn(_notify(alert))
 
 

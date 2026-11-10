@@ -25,11 +25,35 @@ Robot fleet (Edge) --MQTT--> [backend_ingestion] --batch--> TimescaleDB
 
 ## Full-stack local run (Docker)
 
+The middleware (EMQX + TimescaleDB + Redis) lives in the **base** `infra/docker-compose.yml`.
+The `backend` and `alert-engine` services live in the **overlay** `infra/docker-compose.app.yml`.
+Compose both with `-f` for a one-command full stack. Note that the **frontend is not a compose
+service** — it runs via `npm` in `frontend_dashboard/`.
+
 ```bash
-docker compose -f infra/docker-compose.yml up -d   # EMQX, TimescaleDB, Redis
-bash test_integration.sh                            # end-to-end smoke (build modules first)
-cd frontend_dashboard && npm install && npm run dev # http://localhost:5173
+# One command: infra (EMQX + TimescaleDB + Redis) + backend + alert-engine
+docker compose -f infra/docker-compose.yml -f infra/docker-compose.app.yml up -d
+
+# (Optional) also start the observability stack — Grafana / Prometheus / exporters
+docker compose -f infra/docker-compose.yml -f infra/docker-compose.app.yml --profile ops up -d
+
+# The frontend runs via npm, not as a container:
+cd frontend_dashboard && npm install && npm run dev   # http://localhost:5173
 ```
+
+`bash test_integration.sh` is an alternative smoke path: it brings up only the base infra and
+runs the end-to-end + load test, starting `backend`/`alert-engine` as local Python processes
+(rather than the app overlay).
+
+### Optional CI smoke (not wired into CI yet)
+
+An optional CI smoke can be added later without destabilizing the existing CI:
+
+- Run `bash test_integration.sh` against the compose stack (requires a Docker-enabled runner), or
+- Validate the compose files cheaply with `docker compose -f infra/docker-compose.yml config`
+  (and the same for the app overlay) to catch YAML/reference errors.
+
+Neither is enabled in `.github/workflows/ci.yml` yet; the issue marks the CI job as optional.
 
 ## Frontend-only local run (no Docker — recommended for UI contributors)
 

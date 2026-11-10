@@ -19,6 +19,7 @@ from unittest import mock
 import pytest
 
 from app.notifiers.webhook import WebhookNotifier, build_notifier
+from app.notifiers.slack import SlackNotifier, build_slack_notifier
 from app.rules.base import Alert
 
 # ---------------------------------------------------------------- fixtures
@@ -136,3 +137,63 @@ def test_configured_url_wires_kind_and_threshold():
 def test_unknown_kind_raises_value_error():
     with pytest.raises(ValueError):
         WebhookNotifier("dingding", "http://x")
+
+
+# ------------------------------------------------- 7. Slack notifier (GitHub issue #8)
+# Mirrors the webhook contract: never raises outward, severity threshold, classified failure reason.
+
+def test_slack_payload_is_text_envelope():
+    p = SlackNotifier("http://x").build_payload(make_alert())
+    assert "text" in p
+    assert "[Critical]" in p["text"]
+    assert "humanoid-001" in p["text"]
+
+
+def test_slack_below_min_severity_is_not_sent():
+    n = SlackNotifier("http://x", min_severity=3)
+    with mock.patch("urllib.request.urlopen",
+                    return_value=FakeResp(b'{"ok":true}')) as m:
+        ok2 = asyncio.run(n.send(make_alert(sev=2)))
+        ok3 = asyncio.run(n.send(make_alert(sev=3)))
+    assert ok2 is False
+    assert ok3 is True
+    assert m.call_count == 1
+
+
+def test_slack_success_on_ok_true():
+    with mock.patch("urllib.request.urlopen",
+                    return_value=FakeResp(b'{"ok":true}')):
+        assert asyncio.run(SlackNotifier("http://x").send(make_alert())) is True
+
+
+def test_slack_failure_on_ok_false_envelope():
+    # Slack returns 200 with {"ok": false, "error": "invalid_token"} on a bad token -> business_error.
+    with mock.patch("urllib.request.urlopen",
+                    return_value=FakeResp(b'{"ok":false,"error":"invalid_token"}')):
+        n = SlackNotifier("http://x")
+        assert asyncio.run(n.send(make_alert())) is False
+        assert n.last_reason == "business_error"
+
+
+def test_slack_network_error_is_swallowed():
+    with mock.patch("urllib.request.urlopen", side_effect=OSError("conn refused")):
+        assert asyncio.run(SlackNotifier("http://x").send(make_alert())) is False
+
+
+def test_slack_blank_url_builds_no_notifier():
+    class SettingsBlankSlack:
+        slack_webhook_url = ""
+        alert_webhook_min_severity = 3
+
+    assert build_slack_notifier(SettingsBlankSlack()) is None
+
+
+def test_slack_configured_url_wires_threshold():
+    class SettingsSlack:
+        slack_webhook_url = "https://hooks.slack.com/services/XXX"
+        alert_webhook_min_severity = 2
+
+    got = build_slack_notifier(SettingsSlack())
+    assert got is not None
+    assert got.kind == "slack"
+    assert got.min_severity == 2

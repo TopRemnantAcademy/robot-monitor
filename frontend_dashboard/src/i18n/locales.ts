@@ -52,7 +52,12 @@ const en: Dict = {
   'ws.connected': 'Connected',
   'ws.connecting': 'Connecting',
   'ws.reconnecting': 'Reconnecting',
+  'ws.degradedHint': 'live data is paused',
   'unit.lost': ' · {n} lost',
+
+  // Theme switching (GitHub issue #7)
+  'theme.toggleToLight': 'Switch to light',
+  'theme.toggleToDark': 'Switch to dark',
 
   // Fleet health analytics strip
   'panel.statusDist': 'Status distribution (units)',
@@ -148,6 +153,7 @@ const en: Dict = {
   'alerts.suppressed': 'Suppressed',
   'alerts.ack': 'Acknowledge',
   'alerts.unack': 'Unacknowledge',
+  'alerts.exportCsv': 'Export CSV',
   'ack.error': 'Alert acknowledge failed',
   'chart.temp': 'Temp (°C)',
   'chart.torque': 'Torque (N·m)',
@@ -184,7 +190,12 @@ const ko: Dict = {
   'ws.connected': '연결됨',
   'ws.connecting': '연결 중',
   'ws.reconnecting': '재연결 중',
+  'ws.degradedHint': '실시간 데이터 일시 중지',
   'unit.lost': ' · 누락 {n}',
+
+  // 테마 전환 (GitHub issue #7)
+  'theme.toggleToLight': '라이트 모드',
+  'theme.toggleToDark': '다크 모드',
 
   'panel.statusDist': '상태 분포(대)',
   'panel.batteryDist': '배터리 분포(%, 보고됨)',
@@ -269,6 +280,7 @@ const ko: Dict = {
   'alerts.suppressed': '억제됨',
   'alerts.ack': '확인',
   'alerts.unack': '철회',
+  'alerts.exportCsv': 'CSV 내보내기',
   'ack.error': '알림 확인 실패',
   'chart.temp': '온도(°C)',
   'chart.torque': '토크(N·m)',
@@ -304,7 +316,12 @@ const zh: Dict = {
   'ws.connected': '已连接',
   'ws.connecting': '连接中',
   'ws.reconnecting': '断开重连中',
+  'ws.degradedHint': '实时数据已暂停',
   'unit.lost': ' · 失联 {n}',
+
+  // 主题切换（GitHub issue #7）
+  'theme.toggleToLight': '切换到浅色',
+  'theme.toggleToDark': '切换到深色',
 
   'panel.statusDist': '状态分布（台）',
   'panel.batteryDist': '电量分布（%，收到过遥测）',
@@ -389,6 +406,7 @@ const zh: Dict = {
   'alerts.suppressed': '已抑制',
   'alerts.ack': '确认',
   'alerts.unack': '撤回',
+  'alerts.exportCsv': '导出 CSV',
   'ack.error': '告警确认操作失败',
   'chart.temp': '温度(°C)',
   'chart.torque': '扭矩(N·m)',
@@ -428,7 +446,12 @@ const ja: Dict = {
   'ws.connected': '接続済み',
   'ws.connecting': '接続中',
   'ws.reconnecting': '再接続中',
+  'ws.degradedHint': 'リアルタイムデータは一時停止',
   'unit.lost': ' · 切断 {n}',
+
+  // テーマ切替（GitHub issue #7）
+  'theme.toggleToLight': 'ライトに切替',
+  'theme.toggleToDark': 'ダークに切替',
 
   // Fleet health analytics strip
   'panel.statusDist': 'ステータス分布（台）',
@@ -519,6 +542,7 @@ const ja: Dict = {
   'alerts.suppressed': '抑制済み',
   'alerts.ack': '確認',
   'alerts.unack': '確認解除',
+  'alerts.exportCsv': 'CSV 出力',
   'ack.error': 'アラートの確認に失敗',
   'chart.temp': '温度(°C)',
   'chart.torque': 'トルク(N·m)',

@@ -21,6 +21,9 @@ import { useAuthStore } from './auth/authStore';
 import { useRobotWebSocket } from './hooks/useRobotWebSocket';
 import { startObservabilityReport } from './lib/observability';
 import { COLORS } from './theme/tokens';
+import { ThemeProvider } from './theme/ThemeProvider';
+import { useRobotStore } from './store/robotStore';
+import { useI18n } from './i18n/I18nProvider';
 import { makeQueryClient } from './lib/queryClient';
 import ErrorFallback from './ErrorFallback';
 
@@ -28,6 +31,11 @@ import ErrorFallback from './ErrorFallback';
 function Dashboard() {
   // Single global WS entry point: 100ms throttled store flush (spec/03 §6)
   useRobotWebSocket();
+  const { t } = useI18n();
+  // GitHub issue #14: reflect degraded WS state at the fleet level — a banner under the header when the
+  // live feed is not connected (reconnecting / offline), so the whole-screen "everything is fine" look
+  // cannot hide a dropped connection.
+  const wsStatus = useRobotStore((s) => s.wsStatus);
 
   // Order 16 T2: print one re-render summary every 5s (wsMsgs / storeCommits / cardRenders / ratio).
   // Mounted on Dashboard (not App) deliberately: when unauthenticated, LoginGate does not render Dashboard,
@@ -40,6 +48,24 @@ function Dashboard() {
       style={{ backgroundColor: COLORS.bgBase, color: COLORS.textPrimary }}
     >
       <HealthSummaryHeader />
+      {wsStatus !== 'open' ? (
+        <div
+          role="alert"
+          className="shrink-0 flex items-center justify-center px-4 py-1"
+          style={{
+            backgroundColor: COLORS.statusWarning,
+            color: COLORS.bgBase,
+            fontSize: '12px',
+            fontWeight: 600,
+          }}
+        >
+          {wsStatus === 'connecting'
+            ? t('ws.connecting')
+            : t('ws.reconnecting')}
+          {' — '}
+          {t('ws.degradedHint')}
+        </div>
+      ) : null}
       {/* UI enhancement: fleet-level distribution + trend layer (see FleetHealthAnalytics top comment).
           fixed-height strip (shrink-0), card wall flex-1 auto-shrink, page still no scroll. */}
       <FleetHealthAnalytics />
@@ -70,9 +96,12 @@ export default function App() {
     // ErrorBoundary is outside the Provider: even the Provider's own exceptions are caught.
     <ErrorBoundary FallbackComponent={ErrorFallback}>
       <QueryClientProvider client={queryClient}>
-        <LoginGate>
-          <Dashboard />
-        </LoginGate>
+        {/* GitHub issue #7: ThemeProvider publishes the active palette and remounts the dashboard on switch. */}
+        <ThemeProvider>
+          <LoginGate>
+            <Dashboard />
+          </LoginGate>
+        </ThemeProvider>
       </QueryClientProvider>
     </ErrorBoundary>
   );

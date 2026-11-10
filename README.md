@@ -63,18 +63,35 @@ Robot fleet (Edge) --MQTT--> [backend_ingestion] --batch--> TimescaleDB
 
 ## Quick start (full stack, Docker)
 
+The middleware (EMQX + TimescaleDB + Redis) is defined in the **base** file
+`infra/docker-compose.yml`. The application services — `backend` (FastAPI ingestion)
+and `alert-engine` — live in the **overlay** `infra/docker-compose.app.yml`. Compose
+both files together with `-f` so a single command brings up the entire stack
+(middleware + backend + alert-engine):
+
 ```bash
-docker compose -f infra/docker-compose.yml up -d   # start middleware (EMQX, TimescaleDB, Redis)
-bash test_integration.sh                            # end-to-end smoke test (build modules first)
+# One command: infra (EMQX + TimescaleDB + Redis) + backend + alert-engine
+docker compose -f infra/docker-compose.yml -f infra/docker-compose.app.yml up -d
 ```
 
-Then open the dashboard dev server:
+Optional — also start the **observability** stack (Grafana / Prometheus / exporters),
+which is hidden behind the `ops` profile in the base file:
+
+```bash
+docker compose -f infra/docker-compose.yml -f infra/docker-compose.app.yml --profile ops up -d
+```
+
+The frontend is **not** a Docker service — it runs via `npm`:
 
 ```bash
 cd frontend_dashboard
 npm install
 npm run dev        # Vite dev server on http://localhost:5173
 ```
+
+> Smoke test: `bash test_integration.sh` brings up the base infra and runs the
+> end-to-end + load test, starting `backend`/`alert-engine` as local Python processes
+> (it does not use the app overlay). Use it to validate the running stack.
 
 ---
 
@@ -194,11 +211,12 @@ graph TD
     fedev__vitejs_plugin_react["@vitejs/plugin-react 4.3.4"]
     fedev_ajv["ajv 8.20.0"]
     fedev_autoprefixer["autoprefixer 10.4.20"]
+    fedev_axe_core["axe-core 4.14.0"]
     fedev_esbuild["esbuild 0.21.5"]
     fedev_happy_dom["happy-dom 21.0.4"]
     fedev_jsdom["jsdom 25.0.1"]
-    fedev_openapi_typescript["openapi-typescript 7.13.0"]
     fedev_msw["msw 2.7.0"]
+    fedev_openapi_typescript["openapi-typescript 7.13.0"]
     fedev_postcss["postcss 8.4.49"]
     fedev_puppeteer["puppeteer 23.11.1"]
     fedev_tailwindcss["tailwindcss 3.4.17"]

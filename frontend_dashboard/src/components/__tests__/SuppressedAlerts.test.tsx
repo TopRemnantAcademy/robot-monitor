@@ -222,7 +222,7 @@ describe('RobotDetailDrawer — suppression marker (Order 35)', () => {
     st.selectRobot('humanoid-042');
     render(<RobotDetailDrawer />);
 
-    const aside = screen.getByRole('complementary');
+    const aside = screen.getByRole('dialog');
     // Suppressed row present + marker readable (reuses AlertLogTable's same wording and token)
     const tag = await within(aside).findByText('⊘ Suppressed');
     expect(tag).toHaveAttribute('title', 'Suppressed by higher-severity alert (root cause: Motor overheat)');

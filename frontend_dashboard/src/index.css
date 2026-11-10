@@ -38,6 +38,28 @@ body,
   outline-offset: 1px;
 }
 
+/* GitHub issue #7 — light theme. The React tree sets <html data-theme="light">; reskin the page chrome
+   (background behind the app, scrollbars) to match the active palette. The dashboard surfaces themselves
+   are reskinned via the theme-aware COLORS tokens in JS. */
+html[data-theme='light'],
+html[data-theme='light'] body,
+html[data-theme='light'] #root {
+  background-color: #f4f6f9;
+  color: #0b0e14;
+}
+
+html[data-theme='light'] *::-webkit-scrollbar-track {
+  background: #f4f6f9;
+}
+
+html[data-theme='light'] *::-webkit-scrollbar-thumb {
+  background: #d9e0e8;
+}
+
+html[data-theme='light'] *::-webkit-scrollbar-thumb:hover {
+  background: #c2cbd6;
+}
+
 /* Cards/alert rows are buttons; the browser would swap their font for the system UI font, so force inheritance */
 button {
   font: inherit;

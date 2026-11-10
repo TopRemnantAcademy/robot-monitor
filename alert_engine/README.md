@@ -9,6 +9,28 @@ pip install -r requirements.txt
 python -m app.main
 ```
 
+## Notifiers (I-14)
+
+When an alert fires, the engine pushes it to one or more external channels. Each notifier is **disabled
+when its URL is unset** (the whole chain is skipped), so a default deployment sends nothing — no secrets
+in the repo; every URL comes only from an env var.
+
+| Channel | Env var | Payload | Notes |
+| :--- | :--- | :--- | :--- |
+| DingTalk / WeCom / generic webhook | `ALERT_WEBHOOK_URL` (+ `ALERT_WEBHOOK_KIND`, `ALERT_WEBHOOK_MIN_SEVERITY`) | vendor markdown / raw JSON | three-way adapter in `app/notifiers/webhook.py` |
+| Slack incoming webhook | `SLACK_WEBHOOK_URL` (reuses `ALERT_WEBHOOK_MIN_SEVERITY`) | `{"text": "..."}` | `app/notifiers/slack.py` (GitHub issue #8) |
+
+Contract (shared, R-15 / GAP-3): `send()` returns `bool` and **never raises outward**; on failure it
+records a classifiable reason (`timeout` / `network` / `http_error` / `business_error` / `config` /
+`unknown`) on `last_reason`, which `app/main.py` uses to label `robot_alert_notify_failed_total{reason}`.
+Delivery runs in a background task (`spawn(_notify(...))`) so a slow/failing notification can never block
+alert persistence or the consume loop. Bounded retries (`NOTIFY_MAX_ATTEMPTS` / `NOTIFY_TOTAL_BUDGET_S`).
+
+```bash
+# unit tests for both notifiers (no network; urlopen is mocked)
+cd alert_engine && python -m pytest tests/test_notifier.py -q
+```
+
 ## Four rules (all mandatory)
 
 | rule_id | Trigger condition | severity | Dedup window |
