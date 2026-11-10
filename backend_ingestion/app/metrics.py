@@ -1,52 +1,66 @@
-"""Prometheus 指标暴露（后端采集层）。
+"""Prometheus metric exposure (backend ingest layer).
 
-为什么需要这个文件（此前是「下了没接」的典型）：
-  `prometheus/client_python` 在上一轮已 clone 到 `external/`，
-  但 `backend_ingestion/` 里**没有任何一处 import** ——
-  没有指标导出，配置再多 Prometheus 抓取目标也只会拿到 `up=0`。
+Why this file is needed (previously a classic "cloned but not wired up" case):
+  `prometheus/client_python` was cloned into `external/` in the previous round,
+  but **nothing in `backend_ingestion/` imported it** — without metric export,
+  no matter how many Prometheus scrape targets you configure you only get `up=0`.
 
-  本模块把已经在 `/healthz` 里暴露的运行时计数**同时**导出为 Prometheus 指标，
-  于是 `up{job="robot_backend"}` 与 `robot_backend_queue_depth` 等
-  在 `infra/observability/prometheus.yml` 里声明的指标**真实存在**。
+  This module exports the runtime counters already exposed in `/healthz` as
+  Prometheus metrics as well, so `up{job="robot_backend"}` and
+  `robot_backend_queue_depth` etc., declared in
+  `infra/observability/prometheus.yml`, **actually exist**.
 
-指标命名对齐 `infra/observability/rules/robot-alerts.yml` 的 PromQL：
-  robot_backend_queue_depth          （Gauge，规则里用 `> 5000`）
-  robot_backend_mqtt_dropped_total   （Counter，规则里用 increase(...[1m])）
+Metric names align with the PromQL in `infra/observability/rules/robot-alerts.yml`:
+  robot_backend_queue_depth          (Gauge, rule uses `> 5000`)
+  robot_backend_mqtt_dropped_total   (Counter, rule uses increase(...[1m]))
 
-本模块只管「指标定义」，不负责采集。WS 相关有两个来源，**不要混淆**：
-  - `robot_backend_ws_connections` —— 服务端当前连接数（订单 16 T1b），
-    由 `main.py` 的 `ws_robots` 连接/断开时增减；
+This module only defines metrics; it does not collect. WS-related metrics have
+two sources — **do not confuse them**:
+  - `robot_backend_ws_connections` —— current server-side connection count
+    (order 16 T1b), incremented/decremented by `main.py`'s `ws_robots` on
+    connect/disconnect;
   - `robot_backend_ws_probe_alive` / `robot_backend_ws_probe_failures_total`
-    —— WS **合成探针**（客户端视角），由 `app/ws_probe.py` 的循环更新。
-两者是互补而非重复：连接数为 1 只证明「有个客户端挂着」，
-探针为 1 才证明「这条连接真的还能收到首帧 snapshot」。
+    —— WS **synthetic probe** (client perspective), updated by the loop in
+    `app/ws_probe.py`.
+They are complementary, not duplicate: a connection count of 1 only proves "a
+client is hanging on"; a probe of 1 proves "this connection really still receives
+the first snapshot frame".
 
-命名单一来源（订单 32 / ISSUE #100，合并 ISSUE #72 的收敛动作）：
-  历史上订单 16 的实现分支另立了一套 `robot_monitor_*` 前缀（6 个指标），与订单 19
-  已落地的 `robot_backend_*` **并存**，其中 3 个是同一计数源的重复指标。本模块收敛为
-  `robot_backend_*` **唯一命名**。下表 12 处旧名（6 个 native + 6 个第二波）已作废；
-  本单（订单 32）在 `main@8cbe4f7` 之上补的是**运行时硬门禁**：
-  此前"旧名已消失"只有注释与守卫单测背书，
-  而单测用的是自带 registry 的 render()，并不等于真实 `/metrics` 的字节。
-    - `robot_monitor_batch_queue_size`         → 删除（同源：`robot_backend_queue_depth`）
-    - `robot_monitor_batch_rows_total`         → 删除（同源：`robot_backend_telemetry_written_total`）
-    - `robot_monitor_mqtt_messages_total`      → 删除（同源：`robot_backend_mqtt_received_total`）
-    - `robot_monitor_batch_flush_total{reason}`→ 改名并入 `robot_backend_batch_flushes_total{reason}`
-    - `robot_monitor_ws_connections`           → 改名为 `robot_backend_ws_connections`
-    - `robot_monitor_history_latency_seconds`  → 改名为 `robot_backend_history_latency_seconds`
-  被删的 3 个之所以能删，是因为 prometheus_client 的 Counter/Gauge 是**幂等累加/覆盖**
-  语义：删掉重复定义后，同一事件只经一个计数器表达，数值不会丢、也不会双份。
+Single source of naming (order 32 / ISSUE #100, folding in ISSUE #72's
+convergence action):
+  Historically the order-16 implementation branch stood up a separate
+  `robot_monitor_*` prefix (6 metrics) that **coexisted** with the already-shipped
+  `robot_backend_*` from order 19, of which 3 were duplicate counters of the same
+  source. This module converges to `robot_backend_*` as the **sole naming**. The 12
+  old names below (6 native + 6 second-wave) are retired; this ticket (order 32),
+  on top of `main@8cbe4f7`, adds the **runtime hard gate**: previously "old names
+  are gone" was only backed by comments and a guard unit test, and that test used
+  render() on a self-contained registry — not the same bytes as the real
+  `/metrics`.
+    - `robot_monitor_batch_queue_size`         -> deleted (same source: `robot_backend_queue_depth`)
+    - `robot_monitor_batch_rows_total`         -> deleted (same source: `robot_backend_telemetry_written_total`)
+    - `robot_monitor_mqtt_messages_total`      -> deleted (same source: `robot_backend_mqtt_received_total`)
+    - `robot_monitor_batch_flush_total{reason}`-> renamed into `robot_backend_batch_flushes_total{reason}`
+    - `robot_monitor_ws_connections`           -> renamed to `robot_backend_ws_connections`
+    - `robot_monitor_history_latency_seconds`  -> renamed to `robot_backend_history_latency_seconds`
+  The 3 deleted ones could be deleted because prometheus_client's Counter/Gauge
+  have **idempotent accumulate/overwrite** semantics: after removing the duplicate
+  definition, the same event is expressed by only one counter — values are neither
+  lost nor doubled.
 
-第二波收敛（2026-10-11，CI 实录）：#73/#76/#77 的回收分支基于旧 main 开发，
-  彼此不知道对方的命名约束，合并后 6 个旧前缀指标再次入库，被 #72 的守卫测试
-  （FORBIDDEN_MONITOR_PREFIX 行首前缀断言）当场拦下 —— 这正是守卫存在的意义。
-    - `robot_monitor_robots_online`                     → `robot_backend_robots_online`
-    - `robot_monitor_history_source_total`              → `robot_backend_history_source_total`
-    - `robot_monitor_ws_outbound_queue_depth`           → `robot_backend_ws_outbound_queue_depth`
-    - `robot_monitor_ws_telemetry_frames_dropped_total` → `robot_backend_ws_telemetry_frames_dropped_total`
-    - `robot_monitor_ws_alerts_deferred_total`          → `robot_backend_ws_alerts_deferred_total`
-    - `robot_monitor_ws_slow_client_evicted_total`      → `robot_backend_ws_slow_client_evicted_total`
-  这些指标尚未被任何面板/告警规则引用，纯改名无下游兼容负担。
+Second-wave convergence (2026-10-11, CI record): the #73/#76/#77 reclamation
+branches were built on an old main, unaware of each other's naming constraints;
+after merge, 6 old-prefix metrics re-entered, and #72's guard test
+(FORBIDDEN_MONITOR_PREFIX, a line-start prefix assertion) caught them on the
+spot — exactly what the guard exists for.
+    - `robot_monitor_robots_online`                     -> `robot_backend_robots_online`
+    - `robot_monitor_history_source_total`              -> `robot_backend_history_source_total`
+    - `robot_monitor_ws_outbound_queue_depth`           -> `robot_backend_ws_outbound_queue_depth`
+    - `robot_monitor_ws_telemetry_frames_dropped_total` -> `robot_backend_ws_telemetry_frames_dropped_total`
+    - `robot_monitor_ws_alerts_deferred_total`          -> `robot_backend_ws_alerts_deferred_total`
+    - `robot_monitor_ws_slow_client_evicted_total`      -> `robot_backend_ws_slow_client_evicted_total`
+  None of these metrics are yet referenced by any dashboard/alert rule, so a pure
+  rename carries no downstream compatibility burden.
 """
 
 from __future__ import annotations
@@ -54,123 +68,144 @@ from __future__ import annotations
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
 from prometheus_client.exposition import CONTENT_TYPE_LATEST
 
-# 独立 registry：避免与进程内其它库的默认注册表互相污染，
-# 也让 test 可以拿到干净的实例（默认 REGISTRY 是全局单例，重复导入会抛重复注册）。
+# Separate registry: avoid polluting the process's other libraries' default
+# registries, and let tests grab a clean instance (the default REGISTRY is a
+# global singleton; repeated imports raise duplicate-registration errors).
 registry = CollectorRegistry()
 
 telemetry_written = Counter(
     "robot_backend_telemetry_written_total",
-    "成功写入 TimescaleDB 的遥测行数（按批累加，单位：行）",
+    "Telemetry rows successfully written to TimescaleDB (accumulated per batch, unit: rows)",
     registry=registry,
 )
-# 按触发原因分 label —— 这是「双重触发（满 500 条 / 满 1s）」是否按设计工作的唯一证据。
-#   count   ：攒满 batch_trigger_count(500) 条触发 → 说明流入速率高，队列没空过
-#   timeout ：距上批满 batch_trigger_seconds(1.0s) 触发 → 说明流入速率低，靠兜底刷
-# 稳定压测时 count 应占绝大多数；若 timeout 占多数，说明没打满 1000 msg/s。
-# label 值只有这两个**恒定枚举**（外加脏值归一后的 'unknown'），不存在高基数风险
-# （对比：绝不按 robot_id 分）。
+# Labeled by trigger reason — the only evidence that the "dual trigger (500 rows /
+# 1s)" is working as designed.
+#   count   : triggered by accumulating batch_trigger_count (500) rows -> high inflow rate, queue never drained
+#   timeout : triggered by exceeding batch_trigger_seconds (1.0s) -> low inflow rate, flush via fallback
+# Under a steady load test count should dominate; if timeout dominates, 1000 msg/s
+# was not reached.
+# The label values are only these two **constant enums** (plus 'unknown' after
+# dirty-value normalization) — no high-cardinality risk (contrast: never label by
+# robot_id).
 #
-# ISSUE #72：本指标吸收了原 `robot_monitor_batch_flush_total` —— 后者带 reason label、
-# 后者无 label，是「同一刷批事件」的两份时序。合并后保留 label 能力（信息不降级），
-# 只留一个名字（PromQL/面板/告警无需再维护两套）。metric 名沿用现网已有的
-# `robot_backend_batch_flushes_total`，故 PromQL 侧 `sum(rate(...))` 写法无需改动。
+# ISSUE #72: this metric absorbed the old `robot_monitor_batch_flush_total` — the
+# latter had a reason label, the former did not; two time series for "one flush
+# event". After merging we keep the label capability (no information loss) and only
+# one name (PromQL/dashboards/alerts no longer maintain two sets). The metric name
+# reuses the already-live `robot_backend_batch_flushes_total`, so the PromQL-side
+# `sum(rate(...))` form needs no change.
 batch_flushes = Counter(
     "robot_backend_batch_flushes_total",
-    "BatchWriter 的刷批次数，按触发原因区分（count=满 500 条 / timeout=满 1s）",
+    "BatchWriter flush count, split by trigger reason (count=full 500 rows / timeout=full 1s)",
     labelnames=("reason",),
     registry=registry,
 )
 queue_depth = Gauge(
     "robot_backend_queue_depth",
-    "asyncio.Queue 当前积压条数（持续增长=落库跟不上 1000 msg/s）",
+    "Current backlog of the asyncio.Queue (steadily rising = flush cannot keep up with 1000 msg/s)",
     registry=registry,
 )
 mqtt_received = Counter(
     "robot_backend_mqtt_received_total",
-    "MQTT 收到的遥测消息数",
+    "Telemetry messages received over MQTT",
     registry=registry,
 )
 mqtt_dropped = Counter(
     "robot_backend_mqtt_dropped_total",
-    "MQTT 校验失败被丢弃的消息数（>0 说明 payload 契约被破坏）",
+    "Messages dropped due to MQTT validation failure (>0 means the payload contract is broken)",
     registry=registry,
 )
 
-# ---- WS 合成探针（缺口 G-3「看板假的绿」）----
-# 注意：这两个是**探针视角**指标，与 `robot_backend_ws_connections`（服务端连接数，
-# 订单 16 T1b）语义不同，禁止互相覆盖或复用一个名字。
+# ---- WS synthetic probe (gap G-3 "dashboard's fake green") ----
+# Note: these two are **probe-perspective** metrics, semantically different from
+# `robot_backend_ws_connections` (server-side connection count, order 16 T1b);
+# do not overwrite or reuse one name for both.
 ws_probe_alive = Gauge(
     "robot_backend_ws_probe_alive",
-    "WS 合成探针最近一次探活结果（1=握手并收到 snapshot 首帧 / 0=失败）",
+    "Latest WS synthetic-probe result (1=handshake + received snapshot first frame / 0=failure)",
     registry=registry,
 )
 ws_probe_failures = Counter(
     "robot_backend_ws_probe_failures_total",
-    "WS 合成探针累计失败次数（>0 说明客户端视角的实时流断过）",
+    "Cumulative WS synthetic-probe failures (>0 means the client-perspective realtime stream dropped)",
     registry=registry,
 )
 
-# ---- 订单 16 T1b：护栏可视化面（ISSUE #72 已并入 robot_backend_* 单一命名）----
-# AGENTS.md §3 的两条硬约束（后端禁逐条 INSERT / 前端禁逐条重渲染）此前只写在文档里，
-# 下面每个指标都对应一句可被企业验收追问的"凭什么"。
-# 与上方指标无重复：ws_connections / history_latency_seconds 是本单真正新增的能力。
+# ---- order 16 T1b: guardrail visualization panel (ISSUE #72 folded into the single robot_backend_* naming) ----
+# The two hard constraints in AGENTS.md §3 (no row-by-row INSERT on the backend /
+# no row-by-row re-render on the frontend) were previously only in docs; each
+# metric below maps to one "by what evidence" question an enterprise acceptance
+# review could ask.
+# No duplication with the metrics above: ws_connections / history_latency_seconds
+# are genuinely new capabilities in this ticket.
 
-# 当前 WS 连接数。Gauge 而非 Counter：大屏会断开重连，连接数可增可减。
-# 用途：验证"100 台机器人"是否真的由 N 个大屏在看（连接数应为大屏台数 × 每屏 1 条），
-# 以及连接泄漏排查（只增不减 = 断开的 WS 没走 finally 的计数回收）。
-# 刷新动作在 main.py 的 /metrics（pull 模型下没人替我们定期 set）。
+# Current WS connection count. Gauge not Counter: a big screen disconnects and
+# reconnects, so the count goes up and down.
+# Use: verify that "100 robots" are really being watched by N big screens (count
+# should be number of screens x 1 per screen), and hunt connection leaks (only
+# increasing = a disconnected WS never decremented in its finally block).
+# Refresh action is in main.py's /metrics (under the pull model nobody sets it for us periodically).
 ws_connections = Gauge(
     "robot_backend_ws_connections",
-    "当前活跃的 /ws/robots 连接数（含未通过鉴权的握手期内连接）",
+    "Current active /ws/robots connection count (including in-handshake connections not yet authenticated)",
     registry=registry,
 )
 
-# 当前在线台数（ISSUE #77）。语义是「距最后一次收到遥测 ≤ robot_offline_threshold_s」，
-# 而不是「status_code != 0」—— 停报的机器人 status_code 会冻在最后一帧，
-# 用它统计会稳定虚高。刷新点：`/healthz`（编排以秒级频率打，顺带维护，不另起定时器）。
+# Currently online count (ISSUE #77). The semantics is "time since last telemetry
+# <= robot_offline_threshold_s", NOT "status_code != 0" — a robot that stopped
+# reporting freezes its status_code at the last frame, so counting it would
+# steadily over-report. Refresh point: `/healthz` (the orchestrator hits it at
+# second-level frequency and maintains it as a side effect, no separate timer).
 robots_online = Gauge(
     "robot_backend_robots_online",
-    "在线机器人数（now - last_seen <= 阈值，ISSUE #77；停报者不计入）",
+    "Online robot count (now - last_seen <= threshold, ISSUE #77; stopped reporters excluded)",
     registry=registry,
 )
 
-# /history 耗时分布。Histogram 而非 Gauge：要的是 p50/p95/p99，不是瞬时值。
-# 桶边界依据：Drawer 打开是**用户交互**，1s 是体感阈值；小于 10ms 是本地缓存命中量级。
-# 上限 2.5s 处若仍堆积，说明查询已在拖垮交互，需要走连续聚合表而非原始表 time_bucket。
+# /history latency distribution. Histogram not Gauge: we want p50/p95/p99, not an
+# instantaneous value.
+# Bucket boundaries: opening a Drawer is **user interaction**, 1s is the perceived
+# threshold; below 10ms is the local-cache-hit magnitude.
+# If the upper bound at 2.5s still piles up, the query is dragging down interaction
+# and needs to go through the continuous-aggregate table rather than raw time_bucket.
 history_latency_seconds = Histogram(
     "robot_backend_history_latency_seconds",
-    "/history 端点处理耗时（含 DB 查询，Drawer 折线 + 热力图的数据源）",
+    "/history endpoint processing time (incl. DB query, the data source for Drawer line chart + heatmap)",
     buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5),
     registry=registry,
 )
 
-# /history 的数据源计数（ISSUE #76）。
+# /history data-source counter (ISSUE #76).
 #
-# 为什么必须有：改查连续聚合后 p95 会下降，但**「变快」单独看无法自证**
-# —— 空结果、缓存、甚至查询写错都会让耗时变短。把数据源拆成 cagg/raw 两个
-# series 后，p95 下降与 `source="cagg"` 占比上升必须同时成立才算真的生效；
-# 反之若 `source="raw"` 长期占多数，说明聚合没跟上（刷新策略或调度有问题），
-# 这正是回归该发现的那类故障，而不是靠人眼盯。
-# label 只有 2 个取值，基数可控（对比 mqtt_received 刻意不带 robot_id 的理由）。
+# Why it must exist: after switching to the continuous aggregate, p95 drops, but
+# "faster" alone cannot self-prove — empty results, cache hits, even a wrongly
+# written query would shorten the time. Splitting the source into cagg/raw two
+# series means p95 dropping AND `source="cagg"` share rising must both hold to be
+# truly effective; conversely if `source="raw"` dominates long-term, the aggregate
+# is not keeping up (refresh strategy or scheduling problem) — exactly the kind of
+# regression this metric was built to catch, rather than by human eyes.
+# Only 2 label values, bounded cardinality (contrast mqtt_received deliberately
+# not carrying robot_id, same reason).
 history_source = Counter(
     "robot_backend_history_source_total",
-    "/history 实际命中数据源：cagg=连续聚合 robot_history_10s / raw=原始表回退",
+    "/history actual data source hit: cagg=continuous aggregate robot_history_10s / raw=raw table fallback",
     ("source",),
     registry=registry,
 )
 
 
 def render() -> tuple[bytes, str]:
-    """返回 (body, content_type)，供 FastAPI 的 /metrics 端点直接使用。"""
+    """Return (body, content_type) for direct use by FastAPI's /metrics endpoint."""
     return generate_latest(registry), CONTENT_TYPE_LATEST
 
 
 def observe_flush(reason: str, rows: int) -> None:
-    """记录一次落库：批次数（带 reason）+ 行数。
+    """Record one flush: batch count (with reason) + rows.
 
-    `reason` 只接受 'count' / 'timeout'（由调用方判定，见 batch_writer._flush）。
-    未知值不静默吞掉 —— 记成 'unknown' 让它在面板上暴露出来，
-    否则拼写错误（如 'Count'）会导致面板少一块而无人察觉。
+    `reason` only accepts 'count' / 'timeout' (decided by the caller, see
+    batch_writer._flush). Unknown values are not silently swallowed — they become
+    'unknown' so they surface on the dashboard; otherwise a typo (e.g. 'Count')
+    would drop a panel block with nobody noticing.
     """
     if reason not in ("count", "timeout"):
         reason = "unknown"
@@ -179,107 +214,116 @@ def observe_flush(reason: str, rows: int) -> None:
 
 
 def refresh_gauges(queue_size: int, ws_conns: int) -> None:
-    """在暴露 /metrics 前刷新 Gauge 瞬时值。
+    """Refresh Gauge instantaneous values before exposing /metrics.
 
-    为什么必须显式刷新：Prometheus 是 **pull** 模型 —— 抓取端只在 scrape 那一刻
-    读值，不会替我们定期 set。Gauge 若不刷新，会永远停在上一次调用 set() 的时刻
-    （表现为"常量 0"，正是订单 16 验收要排除的现象）。
-    Counter / Histogram 无此问题（累加语义，调用点就在事件发生处）。
+    Why this must be explicit: Prometheus is a **pull** model — the scraper only
+    reads values at scrape time, it does not set them for us periodically. If a
+    Gauge is not refreshed it stays frozen at the last set() moment (appearing as a
+    "constant 0", exactly the phenomenon order-16 acceptance wants excluded).
+    Counter / Histogram have no such problem (accumulate semantics, the call site
+    is at the event).
     """
     queue_depth.set(queue_size)
     ws_connections.set(ws_conns)
 
 
 # ---------------------------------------------------------------------------
-# ISSUE #73：WS 出站背压 + 心跳
+# ISSUE #73: WS outbound backpressure + heartbeat
 #
-# 为什么单列一组而不是复用 robot_monitor_ws_connections：
-# 连接数回答"几台大屏挂着"，**不回答"它们还跟得上吗"**。一个慢客户端
-# （移动网络 / 标签页被冻结）连接数照样 +1，却把 1000 msg/s 的出站帧全积在
-# 自己的队列里。下面三个指标就是"谁在拖后腿"的可观测面：
-#   - outbound_queue_depth  Gauge   按连接聚合的出站积压（持续 >0 = 有人消费不动）
-#   - telemetry_frames_dropped_total  Counter 被**丢弃**的遥测帧（内存有界的代价）
-#   - alerts_deferred_total           Counter 因队列满而顺延的告警（>0 = 病态，
-#                                            0 是"告警不可丢"约束生效的证据）
-# 刻意不带 connection label：连接是短生命周期对象，按连接分 label 会让
-# Prometheus 时序无限增长（每次重连都是新 series）。需要下钻时看日志。
+# Why a separate group instead of reusing robot_monitor_ws_connections: the
+# connection count answers "how many big screens are hanging on", **not** "are
+# they keeping up". A slow client (mobile network / frozen tab) still increments
+# the count by 1 yet piles 1000 msg/s of outbound frames in its own queue. The
+# three metrics below are the observability surface for "who is dragging":
+#   - outbound_queue_depth  Gauge   per-connection aggregated outbound backlog (persistent >0 = someone can't keep up)
+#   - telemetry_frames_dropped_total  Counter  telemetry frames **dropped** (the cost of bounded memory)
+#   - alerts_deferred_total           Counter  alerts deferred because the queue was full (>0 = pathological,
+#                                           0 is evidence the "alerts must not be lost" constraint holds)
+# Deliberately no connection label: connections are short-lived objects; labeling
+# by connection would grow Prometheus series without bound (every reconnect is a
+# new series). Drill down via logs when needed.
 # ---------------------------------------------------------------------------
 
-# 出站积压（每台机器一条 WS 连接，这里取**所有连接的合计**）。
+# Outbound backlog (one WS connection per machine; here we take the **sum across
+# all connections**).
 outbound_queue_depth = Gauge(
     "robot_backend_ws_outbound_queue_depth",
-    "所有 /ws/robots 连接出站队列的积压帧数合计（持续 >0 说明有慢客户端）",
+    "Combined outbound backlog frame count across all /ws/robots connections (persistent >0 means a slow client)",
     registry=registry,
 )
 
-# 被丢弃的遥测帧。**遥测可丢、告警不可丢**（ISSUE #73 禁止项第三条）：
-# 这个计数涨是设计内的背压行为，不是故障；它涨而 alerts_deferred_total 恒 0，
-# 恰好证明分级处置按预期工作。
+# Telemetry frames dropped. **Telemetry may be dropped, alerts may not** (ISSUE #73
+# forbidden item #3): this counter rising is in-design backpressure behavior, not a
+# fault; it rising while alerts_deferred_total stays 0 precisely proves graded
+# handling works as intended.
 telemetry_frames_dropped = Counter(
     "robot_backend_ws_telemetry_frames_dropped_total",
-    "因出站队列满而被丢弃的遥测帧数（丢最旧，慢客户端的背压代价）",
+    "Telemetry frames dropped due to a full outbound queue (drop oldest, the backpressure cost of a slow client)",
     registry=registry,
 )
 
-# 顺延的告警。设计目标恒为 0：告警溢出时队列允许扩容（见 ws_backpressure），
-# 只有几千条告警积压这种病态情形才会让这个数 >0。
+# Deferred alerts. Design target is always 0: on overflow the queue is allowed to
+# grow (see ws_backpressure); only a pathological pile-up of thousands of queued
+# alerts would push this above 0.
 alerts_deferred = Counter(
     "robot_backend_ws_alerts_deferred_total",
-    "因出站队列满而顺延的告警帧数（应为 0；>0 说明告警积压，需扩容或摘连接）",
+    "Alert frames deferred because the outbound queue was full (should be 0; >0 means alert backlog, scale up or drop a connection)",
     registry=registry,
 )
 
-# 被摘除的慢/半开连接数。与连接数 Gauge 互补：连接数掉下来是**结果**，
-# 这个计数是**原因**——运维据此区分"大屏正常关闭"与"被服务端踢掉"。
+# Slow/half-open connections evicted. Complements the connection-count Gauge: the
+# count dropping is the **result**, this counter is the **cause** — ops use it to
+# tell "big screen closed normally" from "kicked by the server".
 ws_slow_client_evicted = Counter(
     "robot_backend_ws_slow_client_evicted_total",
-    "因出站队列持续满或心跳超时被主动 close 的慢客户端连接数",
+    "Slow client connections actively closed due to a persistently full outbound queue or heartbeat timeout",
     registry=registry,
 )
 
 # ---------------------------------------------------------------------------
-# ISSUE #71：WS 出站 fan-out 中枢（服务端广播合并）
+# ISSUE #71: WS outbound fan-out hub (server-side broadcast coalescing)
 #
-# 为什么单列一组：#73 的指标回答"单条连接跟不跟得上"，
-# 这两个指标回答"**服务端**是否还在随客户端数线性膨胀"：
-#   - frames_total{kind}    实际**发送**的 WS 帧总数（含每连接各一份）。
-#     改造前 ≈ N × 1000/s（每连接独立订阅 + 逐条 send）；
-#     改造后 ≈ N × (节拍 × 机器人数)，序列化全进程只做一份。
-#   - coalesced_total       在节拍内被**合并掉**的遥测条数（覆盖写掉的中间帧）。
-#     它 > 0 才证明「每台机器人只保留最新一帧」真的在生效；
-#     恒为 0 说明节拍没起作用（收到的每条都被单独发了）。
-# 不设 ws_hub_clients：连接注册与 ws_robots 的 _ws_active 一一对应，
-# 再发一个同源 Gauge 就是 #72 刚清完的双轨命名故技复萌。
+# Why a separate group: #73's metrics answer "is a single connection keeping up",
+# these two answer "**is the server** still scaling linearly with client count":
+#   - frames_total{kind}     actual WS frames **sent** (incl. one copy per connection).
+#     before the change ~= N x 1000/s (each connection subscribes independently + sends individually);
+#     after ~= N x (tick x robot count), serialization done once per process.
+#   - coalesced_total        telemetry frames **merged away** within a tick (intermediate frames overwritten).
+#     only > 0 proves "keep only the latest frame per robot" really works;
+#     staying 0 means the tick did nothing (every received frame was sent individually).
+# No ws_hub_clients: connection registration maps 1:1 with ws_robots' _ws_active;
+# emitting another same-source Gauge would resurrect the dual-track naming #72 just cleared.
 # ---------------------------------------------------------------------------
 ws_hub_frames_total = Counter(
     "robot_backend_ws_hub_frames_total",
-    "WS 出站中枢实际发送的帧数，按 kind 区分（telemetry=合并后每机器人一帧 / alert=逐条不合并）",
+    "WS hub frames actually sent, split by kind (telemetry=one merged frame per robot / alert=sent individually)",
     labelnames=("kind",),
     registry=registry,
 )
 ws_hub_coalesced_total = Counter(
     "robot_backend_ws_hub_coalesced_total",
-    "被节拍合并掉的遥测帧数（本节拍收到数 - 实际扇出数；>0 = 每机器人只留最新一帧生效）",
+    "Telemetry frames merged away by the tick (received this tick - actually fanned out; >0 = keep-latest-per-robot in effect)",
     registry=registry,
 )
 
 # ---------------------------------------------------------------------------
-# Benchmark C: 오프라인 버퍼（store-and-forward）
+# Benchmark C: offline buffer (store-and-forward)
 #
-# TimescaleDB 장애 시 버퍼링된 후 DB 복구 시 재생되는遥测 행 수.
-#   - telemetry_buffered_total       : 버퍼에 보관된 행 수（누적）
-#   - telemetry_buffered_replayed_total : 재생되어 실제 재투입된 행 수（누적）
-# 둘의 차이가 지속적으로 > 0 이면「버퍼는 쌓이는데 재생이 안 된다」= Redis↔DB
-# 불일치, 혹은 재생 루프가 죽은 것. 이 지표가 없으면「버퍼가 쌓여도 대시보드는
-# 여전히 초록」이라는 가짜 녹색을 막을 수 없음（G-4 동일한 맥락）.
+# Rows buffered when TimescaleDB is down, replayed after DB recovery.
+#   - telemetry_buffered_total          : rows stored in the buffer (cumulative)
+#   - telemetry_buffered_replayed_total : rows actually replayed and re-enqueued (cumulative)
+# If their difference stays persistently > 0, it means "buffer keeps growing but
+# replay never runs" = Redis<->DB inconsistency, or the replay loop died. Without
+# this metric you cannot prevent the "buffer piles up but the dashboard still shows
+# green" false-green (same context as G-4).
 # ---------------------------------------------------------------------------
 telemetry_buffered = Counter(
     "robot_backend_telemetry_buffered_total",
-    "DB 쓰기 실패로 오프라인 버퍼(Redis 리스트)에 보관된遥测 행数（재생 대기）",
+    "Telemetry rows stored in the offline buffer (Redis list) after a DB write failure (awaiting replay)",
     registry=registry,
 )
 telemetry_buffered_replayed = Counter(
     "robot_backend_telemetry_buffered_replayed_total",
-    "오프라인 버퍼에서 재생되어 writer 에 재투입된遥测 행数",
+    "Telemetry rows replayed from the offline buffer and re-enqueued into the writer",
     registry=registry,
 )
