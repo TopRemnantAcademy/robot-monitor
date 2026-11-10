@@ -1,13 +1,17 @@
-"""RBAC 角色常量（订单 15 T3）。
+"""RBAC role constants (order 15 T3).
 
-为什么要单独一个模块而不是写在 config.py：
-`role` 既要进 JWT 签发侧（登录时写进 claims），又要在校验侧读出来做依赖注入，
-两处必须引用**同一个**真值源。散落成字符串字面量的后果是"签的时候写 admin、
-判的时候比 Admin"，且这种错不会在启动时报出来，只会让 admin 静默变 viewer。
+Why a separate module rather than writing it in config.py:
+`role` must feed both the JWT signing side (written into claims at login) and the
+verification side (read back for dependency injection); both must reference
+**the same** source of truth. Scattering it as string literals would lead to
+"signing writes admin, judging compares Admin", and that error would not surface
+at startup -- it would silently turn admin into viewer.
 
-权限模型（两级，够用就好，不加中间层）：
-- VIEWER —— 操作员：只读。看板、100 台状态、单机历史、WS 实时流。
-- ADMIN  —— 管理员：VIEWER 的全部 + 订单 17 的告警确认/静默等写操作。
+Permission model (two levels, enough, no middle tier):
+- VIEWER -- operator: read-only. Dashboard, 100-unit status, single-unit
+  history, WS real-time stream.
+- ADMIN  -- admin: all of VIEWER + write operations like order 17's alert
+  acknowledge / suppression.
 """
 
 from __future__ import annotations
@@ -16,16 +20,19 @@ from enum import Enum
 
 
 class Role(str, Enum):
-    """`str` 混入让枚举值可直接被 PyJWT 序列化进 claims，无需手工转 str。"""
+    """The `str` mixin lets the enum value be serialized into claims by PyJWT
+    directly, no manual str conversion."""
 
     VIEWER = "viewer"
     ADMIN = "admin"
 
 
-#: 新注册用户的默认角色。**刻意不是 admin** ——
-#: 自助注册只能拿到只读权，提权必须由运维改库或走管理接口，
-#: 否则 `/auth/register` 就成了"任何人自己开管理员"的后门。
+#: Default role for newly registered users. Deliberately **not** admin --
+#: self-service registration can only get read-only; privilege escalation must be
+#: done by ops editing the DB or via the management interface, otherwise
+#: `/auth/register` becomes a backdoor where anyone opens their own admin.
 DEFAULT_ROLE = Role.VIEWER
 
-#: 允许出现在 JWT 里的角色全集。签发前用它校验，挡住手写 claims 传入的越界值。
+#: The full set of roles allowed in the JWT. Used to validate before signing,
+#: blocking hand-written claims carrying an out-of-range value.
 ALL_ROLES: frozenset[Role] = frozenset(Role)

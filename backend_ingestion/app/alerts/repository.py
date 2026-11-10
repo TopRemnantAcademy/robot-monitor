@@ -1,11 +1,13 @@
-"""告警读写的 SQL 层（订单 17 T1）。
+"""Alert read/write SQL layer (order 17 T1).
 
-单独成文件而不是塞进 router：SQL 与 HTTP 是两种失败模式（前者报 DB 异常，
-后者报 4xx/5xx），混在一起会让「分页 WHERE 拼错」这类问题只表现为 500，
-排查时要在 FastAPI 栈里翻 SQL。这里保持纯 asyncpg 调用，可被单测直接驱动。
+Separate file rather than stuffed into the router: SQL and HTTP are two failure
+modes (the former reports DB exceptions, the latter 4xx/5xx); mixing them makes
+problems like "wrong pagination WHERE" appear only as 500, and you have to dig
+SQL out of the FastAPI stack. Here it stays pure asyncpg calls, directly
+drivable by unit tests.
 
-连接来源：`app/db/session.py:get_pool()` —— 与写路径**同一个池**，
-不新开第二套连接（订单 15 禁止项 3 的同一原则）。
+Connection source: `app/db/session.py:get_pool()` -- the **same pool** as the
+write path, no second connection set (same principle as order 15 forbidden item 3).
 """
 
 from __future__ import annotations
@@ -20,12 +22,13 @@ log = logging.getLogger("alerts.repo")
 
 
 def _decode_detail(v):
-    """jsonb 列的规范化。
+    """Normalize the jsonb column.
 
-    asyncpg **默认不注册 jsonb codec**，`jsonb` 列取回来是 **str**（本机实测：
-    同仓 batch_writer 的写路径也因此显式 `json.dumps`）。这里统一解成 dict，
-    否则 `AlertItem.detail: dict | None` 会校验失败报 500 —— 这是 HTTP 测试
-    真实抓到的问题，不是推测。
+    asyncpg **does not register a jsonb codec by default**; a `jsonb` column comes
+    back as a **str** (measured locally: this repo's batch_writer write path
+    therefore explicitly `json.dumps`). Here we uniformly parse it to a dict,
+    otherwise `AlertItem.detail: dict | None` would fail validation and 500 --
+    this is a problem the HTTP test actually caught, not speculation.
     """
     if isinstance(v, dict):
         return v
@@ -42,8 +45,10 @@ def _normalize(row: dict[str, Any]) -> dict[str, Any]:
     row["detail"] = _decode_detail(row.get("detail"))
     return row
 
-# 显式列出列名（不用 SELECT *）：列序即响应字段序，且增列时不会悄悄改变契约。
-# 订单 35 追加 suppressed / suppressed_by（与 init.sql、models.py 列序一致）。
+
+# Explicit column list (no SELECT *): column order is the response field order,
+# and adding columns will not silently change the contract.
+# Order 35 appends suppressed / suppressed_by (column order matches init.sql, models.py).
 _COLS = (
     "alert_id, time, robot_id, rule_id, severity, message, detail, "
     "ack, ack_at, ack_by, escalated, suppressed, suppressed_by"
@@ -56,14 +61,17 @@ def _build_filters(
     suppressed: bool | None,
     robot_id: str | None,
 ) -> tuple[str, list[Any]]:
-    """构造 WHERE 子句与参数。用 $n 占位符，杜绝字符串拼接注入。
+    """Build the WHERE clause and params. Use $n placeholders to eliminate string
+    concatenation injection.
 
-    参数从 $1 起连续编号，调用方在此之后追加 limit/offset 参数时
-    必须用 `len(params) + 1` 续号 —— 见 `list_alerts`。
+    Params are numbered contiguously from $1; when the caller appends
+    limit/offset params after this, they must continue numbering with
+    `len(params) + 1` -- see `list_alerts`.
 
-    `suppressed` 是**三态**（True/False/None=全部），与 ack/escalated 同构：
-    默认视图传 `false` 把被抑制的行挡在未确认流之外；打开「显示已抑制」开关后
-    前端改传 `true` 另拉一页（见 AlertLogTable 的双查询实现）。
+    `suppressed` is **tri-state** (True/False/None=all), same shape as ack/
+    escalated: the default view passes `false` to keep suppressed rows out of the
+    unacked stream; turning on the "show suppressed" toggle makes the frontend
+    pass `true` for a separate page (see AlertLogTable's dual-query impl).
     """
     clauses: list[str] = []
     params: list[Any] = []
@@ -94,15 +102,17 @@ async def list_alerts(
     limit: int,
     offset: int,
 ) -> tuple[list[dict[str, Any]], int]:
-    """分页查询，返回 (items, total)。
+    """Paginated query, returns (items, total).
 
-    排序键是 `(time DESC, alert_id DESC)`：
-    - `time DESC` 让最新的在前，符合告警流语义；
-    - 同 `time` 可能有多条（一轮 tick 内多规则各报一条，见 init.sql:65 说明），
-      故再按 `alert_id DESC` 兜底 —— 否则分页边界处顺序不稳定，
-      「第 1 页最后一条」可能在下一页重复出现（经典的分页漂移）。
+    Sort key is `(time DESC, alert_id DESC)`:
+    - `time DESC` puts newest first, matching alert-stream semantics;
+    - the same `time` may have multiple rows (several rules each report one within
+      a tick, see init.sql:65 note), so `alert_id DESC` is a tiebreak -- otherwise
+      pagination boundary order is unstable and "page 1's last row" may repeat on
+      the next page (classic pagination drift).
 
-    过滤条件全部由 `_build_filters` 拼装 —— 本函数只负责分页与 total 对账。
+    All filter conditions are assembled by `_build_filters` -- this function only
+    handles pagination and total reconciliation.
     """
     where, params = _build_filters(ack, escalated, suppressed, robot_id)
 
@@ -115,8 +125,9 @@ async def list_alerts(
 
     pool = await get_pool()
     async with pool.acquire() as conn:
-        # 同一连接、同一事务读两次：否则「列表」与「总数」之间若有人写入，
-        # 会出现 total 与 items 对不上的自相矛盾响应。
+        # Same connection, same transaction, two reads: otherwise between "list"
+        # and "total" someone could write, producing a self-contradictory response
+        # where total and items disagree.
         async with conn.transaction():
             rows = await conn.fetch(list_sql, *params, limit, offset)
             total = await conn.fetchval(count_sql, *params)
@@ -125,7 +136,7 @@ async def list_alerts(
 
 
 async def get_alert(alert_id: int) -> dict[str, Any] | None:
-    """按 alert_id 取单条（ack/unack 前置存在性检查用）。"""
+    """Fetch one by alert_id (used by ack/unack for the existence check)."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -135,26 +146,32 @@ async def get_alert(alert_id: int) -> dict[str, Any] | None:
 
 
 async def set_ack(alert_id: int, ack: bool, ack_by: str | None) -> tuple[dict[str, Any] | None, bool]:
-    """置 ack 状态，返回 (行, changed)。
+    """Set ack state, return (row, changed).
 
-    幂等由 SQL 自身保证，而不是"先 SELECT 判断再 UPDATE"：
+    Idempotency is guaranteed by SQL itself, not by "SELECT-then-UPDATE":
     - `UPDATE ... WHERE alert_id = $1 AND ack IS DISTINCT FROM $2`
-      —— 只在这一行状态确实不同时才更新。`changed` = `rowcount > 0`。
-      重复 ack 时 rowcount=0，`ack_at`/`ack_by` **不被覆盖**（首次确认人得以保留，
-      这才符合审计语义：谁第一个认领的）。
-    - `RETURNING` 回填现值，故幂等命中时也拿得到 ack_at/ack_by 供响应体使用。
+      -- only updates when this row's state actually differs. `changed` =
+      `rowcount > 0`.
+      On repeated ack rowcount=0, `ack_at`/`ack_by` are **not overwritten** (the
+      first ack-er is preserved, which matches audit semantics: who claimed it
+      first).
+    - `RETURNING` backfills the current value, so an idempotent hit still gets
+      ack_at/ack_by for the response body.
 
-    `IS DISTINCT FROM` 而非 `<>`：`ack` 是非空列，这里用前者只是因为
-    `ack_by`/`ack_at` 在 unack 时要置 NULL，语义上统一更安全（不会因 NULL 比较返回 UNKNOWN）。
+    `IS DISTINCT FROM` rather than `<>`: `ack` is a non-null column; here we use
+    the former only because `ack_by`/`ack_at` are set to NULL on unack, and the
+    semantics are uniformly safer (won't return UNKNOWN on a NULL comparison).
 
-    **ack_by 不接受空串**：JWT 的 `sub` 由调用方保证非空后传入；
-    这里不做校验（校验在路由层，因它才知道"取不到 sub 该不该 500"）。
+    **ack_by does not accept an empty string**: the JWT `sub` is guaranteed
+    non-empty by the caller before passing in; this layer does not validate (that
+    belongs to the router, because only it knows whether "can't get sub" should be
+    a 500).
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
             if ack:
-                # 确认：写 ack_at/ack_by（仅在状态变化时）
+                # Acknowledge: write ack_at/ack_by (only on state change)
                 row = await conn.fetchrow(
                     f"""
                     UPDATE robot_alert
@@ -165,7 +182,7 @@ async def set_ack(alert_id: int, ack: bool, ack_by: str | None) -> tuple[dict[st
                     alert_id, ack_by,
                 )
             else:
-                # 撤回：清 ack_at/ack_by（仅在状态变化时）
+                # Retract: clear ack_at/ack_by (only on state change)
                 row = await conn.fetchrow(
                     f"""
                     UPDATE robot_alert
@@ -178,7 +195,8 @@ async def set_ack(alert_id: int, ack: bool, ack_by: str | None) -> tuple[dict[st
             changed = row is not None
             if row is not None:
                 return _normalize(dict(row)), changed
-            # 幂等命中或行不存在 —— 由调用方查一次区分。这里直接返回现况。
+            # Idempotent hit or row not found -- the caller distinguishes with one
+            # more query. Here we return the current state directly.
             current = await conn.fetchrow(
                 f"SELECT {_COLS} FROM robot_alert WHERE alert_id = $1", alert_id
             )

@@ -1,14 +1,17 @@
-"""User 模型 + fastapi-users 的 SQLAlchemy 适配（订单 15 T1）。
+"""User model + fastapi-users SQLAlchemy adapter (order 15 T1).
 
-**复用既有 DB 连接**（订单 15 禁止项 3：禁止引入第二套 DB 连接或 ORM 会话）：
-本项目写路径走 asyncpg 原生池（`app/db/session.py`），ORM 模型只用于读路径与
-schema 对齐。fastapi-users 的 `SQLAlchemyUserDatabase` 需要一个 SQLAlchemy 会话，
-所以这里只是把同一个 DSN 包成一个 async engine —— 没有第二套连接串、没有第二份凭据，
-`schema` 与 `infra/init.sql` 同源。
+**Reuse the existing DB connection** (order 15 forbidden item 3: no second DB
+connection or ORM session): this project's write path uses the native asyncpg
+pool (`app/db/session.py`); the ORM model is only for the read path and schema
+alignment. fastapi-users' `SQLAlchemyUserDatabase` needs a SQLAlchemy session, so
+here we only wrap the same DSN into an async engine -- no second connection
+string, no second set of credentials, and `schema` is co-sourced with
+`infra/init.sql`.
 
-建表：`robot_user` 由 `infra/init.sql` 建（见该文件第 7 节），**不调用**
-`metadata.create_all()` —— 生产库的 DDL 只能有一个来源，否则会与 init.sql 漂移
-（订单 19 的教训就是 ORM 与 DDL 各写各的）。
+Table creation: `robot_user` is created by `infra/init.sql` (see section 7 of that
+file); **do not call** `metadata.create_all()` -- the production DB's DDL can have
+only one source, otherwise it drifts from init.sql (order 19's lesson was ORM and
+DDL each writing their own).
 """
 
 from __future__ import annotations
@@ -28,23 +31,26 @@ from app.db.models import Base
 
 
 class RobotUser(SQLAlchemyBaseUserTable[int], Base):
-    """机器人监控系统的操作账号。
+    """Operator account for the robot monitoring system.
 
-    继承 `SQLAlchemyBaseUserTable[int]` 带来 fastapi-users 契约要求的五列
-    （`email / hashed_password / is_active / is_superuser / is_verified`）。
-    `id` **不在基类里**：框架只给 UUID 版本预置主键
-    （`SQLAlchemyBaseUserTableUUID` 才有 `id`），整数主键要自己声明 ——
-    少了它 SQLAlchemy 会报 "could not assemble any primary key columns"。
-    这里按 `infra/init.sql` 的 `BIGSERIAL` 声明成 `BigInteger` 自增。
+    Inheriting `SQLAlchemyBaseUserTable[int]` brings the five columns the
+    fastapi-users contract requires (`email / hashed_password / is_active /
+    is_superuser / is_verified`). `id` is **not** in the base class: the framework
+    only pre-seeds a primary key for the UUID version (`SQLAlchemyBaseUserTableUUID`
+    has `id`); an integer primary key must be declared yourself -- without it
+    SQLAlchemy errors "could not assemble any primary key columns". Here it is
+    declared as `BigInteger` auto-increment per `infra/init.sql`'s `BIGSERIAL`.
 
-    关于 `is_superuser`：框架自带，但本项目两级模型用 `role` 表达。
-    保留该列是继承契约的一部分，代码里**不读它**做鉴权，避免"两个真值源"。
+    On `is_superuser`: it comes with the framework, but this project's two-level
+    model expresses roles via `role`. Keeping the column is part of the inherited
+    contract; the code does **not** read it for auth, to avoid "two truth sources".
     """
 
     __tablename__ = "robot_user"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    # 与 init.sql 的列序一致：role / created_at 追加在框架五列之后。
+    # Column order matches init.sql: role / created_at appended after the five
+    # framework columns.
     role: Mapped[str] = mapped_column(
         String(16), nullable=False, default=DEFAULT_ROLE.value
     )
@@ -54,10 +60,11 @@ class RobotUser(SQLAlchemyBaseUserTable[int], Base):
 
 
 def _async_dsn() -> str:
-    """`postgresql://…` → `postgresql+asyncpg://…`。
+    """`postgresql://…` -> `postgresql+asyncpg://…`.
 
-    只做前缀替换，不改写其余部分（认证信息、库名、查询参数原样透传），
-    保证 auth 与业务读路径连的是**同一个库**。
+    Only prefix replacement, leaving everything else untouched (credentials, DB
+    name, query params pass through verbatim), guaranteeing auth and the business
+    read path connect to the **same DB**.
     """
     dsn = settings.database_url
     if dsn.startswith("postgresql+asyncpg://"):
@@ -73,11 +80,12 @@ _session_maker = async_sessionmaker(_engine, expire_on_commit=False)
 
 
 async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
-    """FastAPI 依赖：每请求一个 ORM 会话。
+    """FastAPI dependency: one ORM session per request.
 
-    会话由 `async with` 保证归还，异常时自动回滚；
-    不在这里手动 commit —— 写操作由 fastapi-users 的 manager 负责提交，
-    避免"框架提交了、依赖又提交一次"的双重提交。
+    The session is returned by `async with`, rolling back automatically on
+    exception; do not commit manually here -- writes are committed by fastapi-
+    users' manager, avoiding "framework committed, dependency commits again"
+    double commit.
     """
     async with _session_maker() as session:
         yield session
@@ -90,5 +98,5 @@ async def get_user_db(
 
 
 async def close_engine() -> None:
-    """lifespan 收尾时释放 engine 持有的连接。"""
+    """Release connections held by the engine on lifespan teardown."""
     await _engine.dispose()

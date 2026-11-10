@@ -1,57 +1,71 @@
-"""WS 出站背压 + 心跳（ISSUE #73）。
+"""WS outbound backpressure + heartbeat (ISSUE #73).
 
-## 现象 / 根因
+## Symptom / root cause
 
-改前 `ws_robots`（`main.py`）的增量循环是**同步 await** 每个客户端的 `send_json`：
+Before this module, the incremental loop in `ws_robots` (`main.py`) awaited each
+client's `send_json` **synchronously**:
 
     async for msg in pubsub.listen():
         await ws.send_json({"type": "telemetry", "data": data})
 
-`await send_json` 只保证"帧已交给内核"，不保证"客户端已消费"。慢客户端
-（移动网络 / 前端卡顿 / 标签页被冻结）会让 uvicorn 的 transport 写缓冲涨到高水位，
-此后每一次 `send` 都阻塞在 `drain()` 上 —— 而这**阻塞的是转发循环本身**，
-于是：① 该慢客户端把出站帧积压在内存里无界增长；② 整个转发循环被它拖住，
-所有健康客户端一起挨饿。1000 msg/s × N 客户端下，一个卡死的浏览器标签就能
-拖垮整个进程。
+`await send_json` only guarantees the frame was handed to the kernel, not that
+the client consumed it. A slow client (mobile network / frozen tab / janky
+frontend) lets uvicorn's transport write buffer climb to its high-water mark,
+after which every `send` blocks on `drain()` -- and that **blocks the relay
+loop itself**. The result: (1) the slow client piles up outbound frames in
+memory with no bound; (2) the whole relay loop is dragged down by it, and every
+healthy client starves. At 1000 msg/s x N clients, a single stuck browser tab
+can take down the whole process.
 
-## 本模块的解法
+## This module's approach
 
-给每条连接一个**有界出站队列**（`asyncio.Queue(maxsize=N)`）+ 一个独立发送协程：
+Give each connection a **bounded outbound queue** (`asyncio.Queue(maxsize=N)`)
+plus an independent sender coroutine:
 
-- 转发循环只做 `put_nowait`，**永不 await**，慢客户端不再拖累循环；
-- 队列满时按消息类型分级处置（见 `enqueue`），最坏情况内存 = N × 帧大小，
-  且 N 是配置里写死的常量，不随时长增长；
-- 发送协程 `await ws.send_json` 仍会因背压阻塞，但阻塞的是**它自己**，
-  队列满即触发丢弃，链路保持有界。
+- The relay loop only does `put_nowait` and **never awaits**, so slow clients
+  no longer stall the loop.
+- When the queue is full, frames are dropped by type (see `enqueue`). Worst
+  case memory = N x frame size, and N is a constant pinned in config -- it does
+  not grow with uptime.
+- The sender coroutine's `await ws.send_json` can still block on backpressure,
+  but only **itself**; once the queue is full the drop fires, keeping the link
+  bounded.
 
-## 告警不可丢（ISSUE #73 「约束/禁止项」第三条）
+## Alerts must not be dropped (ISSUE #73 "constraints/forbidden" item 3)
 
-`robot:alerts` 是前端告警流的**唯一数据源**，丢一条就是漏一条告警。因此
-队列溢出时的处置是分级的：**只丢遥测，保住告警**。队列里没有遥测可丢时
-（极端情形：整队都是告警）宁可让队列多涨一格，也不丢告警 —— 用
-`queue.maxsize + 少量余量` 的方式把"告警不可丢"这条硬约束编码进实现，
-而不是靠注释约定。
+`robot:alerts` is the **single source** of the frontend alert stream; dropping
+one means missing one alert. So on queue overflow the handling is tiered:
+**only telemetry is dropped, alerts are preserved**. When there is no telemetry
+to drop (extreme case: the whole queue is alerts) the queue is allowed to grow
+by a few slots rather than dropping an alert -- the "alerts must not be dropped"
+hard constraint is encoded into the implementation, not just a comment.
 
-## 心跳（ISSUE #73 第二条验收）
+## Heartbeat (ISSUE #73 acceptance item 2)
 
-`ping/pong` 由 Starlette 原生支持：收到 `websocket.receive` 且 `message["text"]`
-为 `"ping"` 时回 `"pong"`。客户端主动发 ping 是浏览器端"半开连接"检测的常规手段
-（TCP 层不会因为拔网线立刻报错）。服务端侧则用 `_HEARTBEAT` 哨兵驱动：
-发送协程每轮循环往队列放一个哨兵，途中会 `await` 到背压/断开等真实状态，
-于是"发得出去"本身就是一次验活，不需要额外定时器。
+`ping/pong` is natively supported by Starlette: when `websocket.receive`
+returns a message whose `text` is `"ping"`, reply with `"pong"`. Clients sending
+ping proactively is the browser-side norm for half-open connection detection
+(TCP does not report an unplugged cable immediately). On the server side, the
+`_HEARTBEAT` sentinel drives liveness: the sender coroutine drops a sentinel
+into the queue each loop iteration; along the way it `await`s real backpressure /
+disconnect state, so "it got sent" is itself a liveness check -- no extra timer
+needed.
 
-## 一个刻意的取舍：不用 `State.WAITING_FOR_RESPONSE`
+## A deliberate choice: no `State.WAITING_FOR_RESPONSE`
 
-ISSUE #73 验收原文写的是「检查连接的可写/背压状态（`State.WAITING_FOR_RESPONSE`
-或队列深度）」。本仓实测（Starlette 0.36.3）：
+The ISSUE #73 acceptance text said "check the connection's writable/backpressure
+state (`State.WAITING_FOR_RESPONSE` or queue depth)". Measured in this repo
+(Starlette 0.36.3):
 
     >>> [x for x in dir(WebSocketState) if not x.startswith("_")]
     ['CONNECTED', 'CONNECTING', 'DISCONNECTED']
 
-**服务端 Starlette 没有 `WAITING_FOR_RESPONSE` 这个状态**（它是客户端
-`websockets` 库的状态机概念）。因此本实现走验收给出的**第二个等价判据 —— 队列深度**，
-并辅以 `transport.get_write_buffer_size()` 作为真实写缓冲的观测值（仅用于日志/指标，
-不作为唯一判据：uvicorn 0.28 未向外暴露该 transport，读不到时静默降级）。
+**The server-side Starlette has no `WAITING_FOR_RESPONSE` state** (that is a
+client-side `websockets` library state-machine concept). So this implementation
+uses the **second equivalent criterion from the acceptance -- queue depth**, plus
+`transport.get_write_buffer_size()` as an observation of the real write buffer
+(used only for logging/metrics, never as the sole criterion: uvicorn 0.28 does
+not expose that transport, so it silently degrades when unreadable).
 """
 
 from __future__ import annotations
@@ -63,33 +77,37 @@ from collections.abc import Awaitable, Callable
 
 log = logging.getLogger("ws_backpressure")
 
-#: 遥测帧的标识（与 `main.py` 的出站信封一致）。
+#: Telemetry frame identifier (matches the outbound envelope in `main.py`).
 TELEMETRY = "telemetry"
-#: 告警帧的标识。**不可丢**。
+#: Alert frame identifier. **Must not be dropped.**
 ALERT = "alert"
 
-#: 队列满且全是告警时的额外余量。让"告警不可丢"在多几条告警时仍然成立，
-#: 同时把最坏内存增长钉在一个常量上。
+#: Extra slack when the queue is full but holds only alerts. Keeps "alerts must
+#: not be dropped" true even with a few extra alerts stacked, while pinning the
+#: worst-case memory growth to a constant.
 ALERT_OVERFLOW_SLACK = 64
 
-#: 心跳哨兵。放在队列里而不是起定时器：发送协程每轮自然 flush 一次，
-#: 顺带把"这条连接还发得出去吗"验掉，不需要第二个并发源。
+#: Heartbeat sentinel. Placed in the queue rather than driven by a timer: the
+#: sender coroutine naturally flushes it each loop, incidentally verifying
+#: "can this connection still send?" -- no second concurrency source needed.
 _HEARTBEAT = object()
 
-# ---- 预序列化帧通道（ISSUE #71 融合设计）----
-# ws_hub 的节拍扇出把每帧**只序列化一次**（一份发布 → 多连接复用），入队的是
-# 现成的 JSON 文本。队列项的 kind 用哨兵对象而非字符串，与 dict 信封通道
-# 绝不混淆；droppability 仍按 telemetry/alert 分级（见 _drop_oldest_telemetry）。
+# ---- Pre-serialized frame channel (ISSUE #71 merge design) ----
+# ws_hub's beat fan-out serializes each frame **only once** (one publish -> many
+# connections reuse it); what gets enqueued is ready-made JSON text. Queue item
+# kinds use sentinel objects, not strings, so they can never be confused with the
+# dict-envelope channel; droppability is still tiered by telemetry/alert (see
+# _drop_oldest_telemetry).
 _RAW_TELEMETRY = object()
 _RAW_ALERT = object()
 
 
 class WsOutbound:
-    """单条 WS 连接的出站通道：有界队列 + 独立发送协程。
+    """Outbound channel for a single WS connection: bounded queue + sender coroutine.
 
-    生命周期：`__init__` → `start()` → `enqueue()`（任意次）→ `aclose()`。
-    所有公开方法都是**不阻塞转发循环**的（`enqueue` 用 `put_nowait`），
-    这是本模块存在的全部意义。
+    Lifecycle: `__init__` -> `start()` -> `enqueue()` (any number of times) ->
+    `aclose()`. All public methods are **non-blocking to the relay loop**
+    (`enqueue` uses `put_nowait`) -- this is the entire point of the module.
     """
 
     def __init__(
@@ -100,36 +118,43 @@ class WsOutbound:
         alert_slack: int = ALERT_OVERFLOW_SLACK,
         on_sent: Callable[[], None] | None = None,
     ) -> None:
-        # 【为什么队列一次分配到位，而不是"满了再换一只大的"】
-        # 提示：本文件上一版真的尝试过"告警来了就换更大队列"（`_rehome_for_alert`），
-        # 那是**错的**：发送协程正在 `await queue.get()` 消费老队列，此时把
-        # `self._queue` 换成新对象，搬移与消费互相竞争，会**静默丢帧**
-        # （实测混流 5000 条时少 1 条告警，且只在"搬移恰好撞上消费"时出现）。
-        # 正解：物理容量一次给足（遥测软上限 + 告警预留），再用一个**软上限**
-        # 决定遥测从哪一刻开始丢 —— 全程无需搬移，无竞态。
+        # [Why allocate the queue once, rather than "grow it when full"]
+        # Note: an earlier version actually tried "swap in a bigger queue when an
+        # alert arrives" (`_rehome_for_alert`), and it was **wrong**: the sender
+        # coroutine is already `await queue.get()`-ing the old queue, so swapping
+        # `self._queue` to a new object makes the move and the consume race each
+        # other and **silently drop frames** (measured: 1 alert lost in a 5000-
+        # frame mixed stream, only when "move collides with consume").
+        # Correct approach: provision physical capacity up front (telemetry soft
+        # limit + alert headroom), then use a **soft limit** to decide from which
+        # moment telemetry starts dropping -- no move, no race, ever.
         #
-        # maxsize 至少 1，否则 asyncio.Queue 退化成无上限（maxsize<=0 语义）。
-        # 配置项配错也不允许出现"无界堆积"——这正是本单要消灭的现象。
+        # maxsize must be at least 1, otherwise asyncio.Queue degrades to
+        # unbounded (maxsize<=0 semantics). A misconfigured value must never
+        # produce "unbounded pile-up" -- exactly the phenomenon this module kills.
         self._telemetry_limit = max(1, maxsize)
-        # 物理容量 = 遥测软上限 + 告警预留：给"不可丢的告警"独立空间。
+        # Physical capacity = telemetry soft limit + alert headroom: give the
+        # "undroppable alerts" their own space.
         self._queue: asyncio.Queue = asyncio.Queue(
             maxsize=self._telemetry_limit + max(0, alert_slack)
         )
         self._ws = ws
         self._on_sent = on_sent
         self._task: asyncio.Task | None = None
-        # 遥测节流：丢了多少帧、合并了多少次。分两个计数是为了把
-        # "背压真的在丢"与"只是被合并了"区分开 —— 盯指标的人需要这两条不一样。
+        # Telemetry throttling: how many frames dropped, how many coalesced. Two
+        # separate counters so "backpressure is really dropping" is distinguishable
+        # from "just coalesced" -- whoever watches metrics needs the two to differ.
         self.telemetry_dropped = 0
         self.telemetry_merged = 0
         self.alerts_deferred = 0
-        # 发送进度：`_sender` 每成功发一帧就 +1 并刷新时间。
-        # watchdog 靠"计数是否前进 / 时间是否前进"判断连接是否还活着，
-        # 这是它唯一需要的两个信号（避免再给每连接挂一个定时器）。
+        # Send progress: `_sender` increments and refreshes the timestamp on each
+        # successful frame. The watchdog judges liveness from "counter advancing /
+        # timestamp advancing" -- the only two signals it needs (avoid a per-
+        # connection timer).
         self.sent_count = 0
         self.last_sent_at: float | None = None
 
-    # ------------------------------------------------------------- 入队
+    # ------------------------------------------------------------- enqueue
 
     @property
     def qsize(self) -> int:
@@ -137,34 +162,40 @@ class WsOutbound:
 
     @property
     def maxsize(self) -> int:
-        """遥测的软上限（不含留给告警的那截）。"""
+        """Telemetry soft limit (excluding the alert headroom)."""
         return self._telemetry_limit
 
     @property
     def capacity(self) -> int:
-        """物理容量 = 遥测软上限 + 告警预留。"""
+        """Physical capacity = telemetry soft limit + alert headroom."""
         return self._queue.maxsize
 
     @property
     def is_saturated(self) -> bool:
-        """队列是否已顶到日常容量（实时判定，不含告警扩容的那部分余量）。
+        """Whether the queue has hit its routine capacity (real-time, excluding the
+        alert headroom portion).
 
-        watchdog 用它判断"客户端消费速度是否长期低于流入速度"。
-        用 `full()` 而非 `qsize()>=maxsize`：前者是 asyncio 自己的判据，
-        与 `put_nowait` 抛 `QueueFull` 的条件严格一致，不会出现"我说满了但还能塞进去"。
+        The watchdog uses this to judge "is the client consuming durably slower
+        than the inflow". Uses `full()` rather than `qsize()>=maxsize`: the
+        former is asyncio's own criterion, strictly consistent with the
+        `QueueFull` raised by `put_nowait` -- no "I say full but it still fits".
         """
         return self._queue.full()
 
     def enqueue(self, kind: str, envelope: dict) -> None:
-        """把一帧放进出站队列。**永不阻塞、永不抛**。
+        """Place a frame on the outbound queue. **Never blocks, never raises**.
 
-        分级处置（`kind` 由调用方按出站信封的 `type` 传入）：
+        Tiered handling (`kind` is passed by the caller from the outbound
+        envelope's `type`):
 
-        - `alert`：先尝试直接入队；队列满则**扩容**（上限 `maxsize + alert_slack`），
-          仍满才 `deferred` 计数。告警**永不被丢弃**（ISSUE #73 禁止项第三条）。
-        - 其它（遥测）：队列满时丢**队首**（最旧的一帧）再入队。
-          丢最旧而非丢最新，是因为遥测是"最新值优先"的时序数据 ——
-          前面那帧的价值已经被后面的覆盖，丢它损失最小（spec/01 §4.3 状态缓存同理）。
+        - `alert`: try a direct enqueue first; if the queue is full, **expand**
+          (up to `maxsize + alert_slack`), and only then count it as `deferred`.
+          Alerts are **never dropped** (ISSUE #73 forbidden item 3).
+        - anything else (telemetry): when full, drop the **head** (oldest frame)
+          before enqueuing. Dropping the oldest rather than the newest because
+          telemetry is "latest-value-wins" time-series data -- the older frame's
+          value is already superseded, so dropping it is the least loss
+          (spec/01 SS4.3 state cache is the same idea).
         """
         if kind == ALERT:
             self._enqueue_alert(envelope)
@@ -172,12 +203,15 @@ class WsOutbound:
             self._enqueue_telemetry(kind, envelope)
 
     def enqueue_raw(self, kind: str, text: str) -> None:
-        """预序列化帧入队（ws_hub 节拍扇出专用）。语义与 `enqueue` 完全一致。
+        """Pre-serialized frame enqueue (ws_hub beat fan-out only). Semantics
+        identical to `enqueue`.
 
-        区别仅在载荷形态：`text` 是 hub **已经序列化好**的 JSON 字符串，
-        发送协程走 `send_text` 直发，不再每连接重复 `json.dumps` ——
-        这是「一份序列化 → N 连接复用」的落点（ISSUE #71 的核心收益）。
-        droppability 与 dict 通道相同：遥测可丢（丢最旧）、告警永丢不得。
+        The only difference is the payload shape: `text` is JSON **already
+        serialized** by the hub, so the sender goes straight to `send_text`
+        instead of re-`json.dumps` per connection -- this is the landing point of
+        "serialize once -> reuse across N connections" (ISSUE #71 core benefit).
+        Droppability matches the dict channel: telemetry droppable (oldest),
+        alerts never.
         """
         if kind == ALERT:
             self._enqueue_raw_alert(text)
@@ -185,36 +219,41 @@ class WsOutbound:
             self._enqueue_raw_telemetry(text)
 
     def _enqueue_telemetry(self, kind: str, envelope: dict) -> None:
-        # 【判据是"遥测**自己**的额度"，不是物理容量】
-        # 物理容量里多出来的那截是**留给告警的**。若这里按物理容量判断，
-        # 遥测会先把预留区占满，随后告警只能落到 deferred ——
-        # "告警不可丢"就退化成"谁先到谁占位"（实测：maxsize=5+slack=4 时，
-        # 遥测占满 9 格、3 条告警全部顺延）。
+        # [The criterion is "telemetry's **own** quota", not physical capacity]
+        # The extra capacity is **reserved for alerts**. If judged against
+        # physical capacity here, telemetry would fill the reserved zone first,
+        # and then alerts could only land in deferred -- "alerts must not be
+        # dropped" degrades to "first come, first served" (measured: maxsize=5 +
+        # slack=4 -> telemetry fills all 9 slots, 3 alerts all deferred).
         if self._queue.qsize() >= self._telemetry_limit:
-            # 找队首的遥测帧丢弃。用 `_queue._queue` 直接探测是必要的：
-            # 队列里可能混着哨兵与告警，只能从**最旧的**一侧开始找。
+            # Find the oldest telemetry frame to drop. Probing `_queue._queue`
+            # directly is necessary: the queue may mix sentinels and alerts, so
+            # we must search from the **oldest** side.
             dropped = self._drop_oldest_telemetry()
             if dropped is None:
-                # 队里没有可丢的遥测（已被发送协程取走/全是哨兵），
-                # 这一帧没被接纳 —— 记"合并"而非"丢弃"：没丢任何已有数据。
+                # No droppable telemetry in the queue (already taken by the
+                # sender / all sentinels): this frame was not admitted -- count
+                # "merged" not "dropped": nothing existing was lost.
                 self.telemetry_merged += 1
                 return
             self.telemetry_dropped += 1
         try:
             self._queue.put_nowait((kind, envelope))
-        except asyncio.QueueFull:  # pragma: no cover - 丢帧后必有空位
+        except asyncio.QueueFull:  # pragma: no cover - a slot always opens after drop
             self.telemetry_dropped += 1
 
     def _enqueue_alert(self, envelope: dict) -> None:
-        """告警入队。**永不丢**（ISSUE #73 禁止项第三条）。
+        """Alert enqueue. **Never dropped** (ISSUE #73 forbidden item 3).
 
-        物理容量里已预留 `alert_slack` 格专供告警（见 `__init__`），
-        所以正常路径是"直接进"。只有病态情形（告警自身积压超过预留量）
-        才落到 `alerts_deferred` 记账 —— 那时仍**不丢**，只是让这条顺延，
-        运维据该指标判断是否需要扩容或摘连接。
+        Physical capacity already reserves `alert_slack` slots for alerts (see
+        `__init__`), so the normal path is "go straight in". Only a pathological
+        case (alerts themselves piling past the headroom) lands in
+        `alerts_deferred` accounting -- and even then it is **not dropped**, just
+        deferred, so ops judge from this metric whether to scale up or cull the
+        connection.
 
-        这里刻意**不做**任何"换队列腾位"的动作：那会与正在消费的发送协程
-        竞争并静默丢帧（见 `__init__` 的实测说明）。
+        Deliberately **no** "swap queue to make room" here: that races and silently
+        drops frames against the consuming sender (see `__init__`'s measured note).
         """
         try:
             self._queue.put_nowait((ALERT, envelope))
@@ -222,7 +261,8 @@ class WsOutbound:
             self.alerts_deferred += 1
 
     def _enqueue_raw_telemetry(self, text: str) -> None:
-        """预序列化遥测入队，判据与 `_enqueue_telemetry` 相同（软上限 + 丢最旧）。"""
+        """Pre-serialized telemetry enqueue; same criterion as
+        `_enqueue_telemetry` (soft limit + drop oldest)."""
         if self._queue.qsize() >= self._telemetry_limit:
             dropped = self._drop_oldest_telemetry()
             if dropped is None:
@@ -231,58 +271,68 @@ class WsOutbound:
             self.telemetry_dropped += 1
         try:
             self._queue.put_nowait((_RAW_TELEMETRY, text))
-        except asyncio.QueueFull:  # pragma: no cover - 丢帧后必有空位
+        except asyncio.QueueFull:  # pragma: no cover - a slot always opens after drop
             self.telemetry_dropped += 1
 
     def _enqueue_raw_alert(self, text: str) -> None:
-        """预序列化告警入队：同样只走预留区，**永不丢**（同 `_enqueue_alert`）。"""
+        """Pre-serialized alert enqueue: also goes only through the headroom,
+        **never dropped** (same as `_enqueue_alert`)."""
         try:
             self._queue.put_nowait((_RAW_ALERT, text))
         except asyncio.QueueFull:
             self.alerts_deferred += 1
 
     def _drop_oldest_telemetry(self) -> tuple | None:
-        """从队首起找第一帧遥测并移除，返回被丢的元组；找不到返回 None。
+        """From the head, find the first telemetry frame and remove it; return the
+        dropped tuple, or None if none found.
 
-        队列里可能有四种东西，必须分开对待：
-          - `(TELEMETRY, envelope)`        → 可丢；
-          - `(_RAW_TELEMETRY, text)`       → 可丢（hub 预序列化遥测，同遥测语义）；
-          - `(ALERT/​_RAW_ALERT, ...)`      → **不可丢**，跳过；
-          - `_HEARTBEAT` 裸哨兵（`object()`）→ 可丢，但**没有下标**。
+        The queue may hold four kinds of things, and they must be treated
+        separately:
+          - `(TELEMETRY, envelope)`        -> droppable;
+          - `(_RAW_TELEMETRY, text)`       -> droppable (hub pre-serialized
+                                             telemetry, same semantics);
+          - `(ALERT/_RAW_ALERT, ...)`      -> **not droppable**, skip;
+          - bare `_HEARTBEAT` sentinel (`object()`) -> droppable, but **no index**.
 
-        ⚠️ 判据必须是「是遥测才可丢」的白名单，**不是** `item[0] is not ALERT`：
-        后者会把 `_RAW_ALERT` 也当成可丢（哨兵对象 `is not` 字符串恒真），
-        一旦队首恰好是一条预序列化告警，它就会被静默丢弃 —— 违反
-        「告警不可丢」的硬约束。此函数第一版还漏过第三种（哨兵下标越界
-        TypeError），教训同源：对队列里的东西做**穷举**，别做排除。
+        The criterion must be a **whitelist** "is telemetry -> droppable", NOT
+        `item[0] is not ALERT`: the latter would also treat `_RAW_ALERT` as
+        droppable (sentinel object `is not` string is always true). If the head
+        happens to be a pre-serialized alert, it would be silently dropped --
+        violating the "alerts must not be dropped" hard constraint. The very
+        first version of this function also missed the third kind (sentinel index
+        out-of-range TypeError); same lesson: **enumerate** the queue contents,
+        don't exclude.
         """
-        items = self._queue._queue  # 直接访问 deque：从头部定位才可能 O(1) 丢最旧
+        items = self._queue._queue  # access deque directly: locating from the head is O(1) drop-oldest
         for i, item in enumerate(items):
             if item is _HEARTBEAT:
                 del items[i]
-                return None  # 丢哨兵不算丢遥测（无信封可返回）
+                return None  # dropping a sentinel is not dropping telemetry (no envelope to return)
             kind = item[0]
             if kind is TELEMETRY or kind is _RAW_TELEMETRY:
                 del items[i]
                 return item
         return None
 
-    # ------------------------------------------------------------- 出站
+    # ------------------------------------------------------------- outbound
 
     def start(self) -> None:
-        """启动发送协程。由 `ws_robots` 在 accept 之后调用。"""
+        """Start the sender coroutine. Called by `ws_robots` after accept."""
         self._task = asyncio.create_task(self._sender())
 
     async def _sender(self) -> None:
-        """串行发送。**唯一**调用 `ws.send_json` / `ws.send_text` 的地方。
+        """Serialize the send. The **only** place that calls `ws.send_json` /
+        `ws.send_text`.
 
-        为什么串行而非并发：WebSocket 帧必须有序，并发 send 会让帧交错，
-        客户端 JSON.parse 直接炸。串行也让"背压"这件事有单一定义点 ——
-        阻塞只发生在这一处，队列长度就是唯一的积压度量。
+        Why serial and not concurrent: WebSocket frames must be ordered;
+        concurrent sends interleave frames and the client's JSON.parse explodes.
+        Serial also gives "backpressure" a single definition point -- blocking
+        happens only here, and queue length is the only backlog metric.
 
-        载荷双形态：dict 信封走 `send_json`（本连接自行序列化）；
-        hub 预序列化的 RAW 帧走 `send_text` 直发 —— 每帧的 json.dumps
-        全进程只做一次（ISSUE #71 的核心收益），客户端拿到的字节完全一致。
+        Two payload shapes: dict envelopes go through `send_json` (this
+        connection serializes itself); hub pre-serialized RAW frames go through
+        `send_text` direct -- each frame's json.dumps happens exactly once per
+        process (ISSUE #71 core benefit), and the client receives identical bytes.
         """
         try:
             while True:
@@ -301,21 +351,23 @@ class WsOutbound:
         except asyncio.CancelledError:
             raise
         except Exception:
-            # 发送失败（客户端断开/帧非法）不吞掉：记日志后让协程退出，
-            # 由 `ws_robots` 的 finally 负责回收计数与队列。
-            # 注意**不能**在这里 close ws —— 关闭动作归 `ws_robots`，
-            # 否则会与它的 finally 抢同一个连接。
+            # Send failure (client disconnect / illegal frame) is not swallowed:
+            # log then let the coroutine exit; `ws_robots`'s finally is responsible
+            # for reclaiming counters and the queue.
+            # Note: **do not** close the ws here -- the close belongs to
+            # `ws_robots`, otherwise it races the same connection with its finally.
             log.warning("ws outbound sender stopped", exc_info=True)
 
     def heartbeat(self) -> None:
-        """往队列里塞一个心跳哨兵（队列满则跳过，不阻塞）。"""
+        """Push a heartbeat sentinel into the queue (skip if full, non-blocking)."""
         try:
             self._queue.put_nowait(_HEARTBEAT)
         except asyncio.QueueFull:
             pass
 
     async def aclose(self) -> None:
-        """取消发送协程并等待其退出。幂等，可重复调用。"""
+        """Cancel the sender coroutine and wait for it to exit. Idempotent,
+        safe to call repeatedly."""
         task, self._task = self._task, None
         if task is None:
             return
@@ -323,12 +375,14 @@ class WsOutbound:
         try:
             await task
         except (asyncio.CancelledError, Exception):
-            # 发送协程内部已记过日志；这里只保证不外抛，
-            # 因为 aclose 的调用点（finally）必须无条件走完回收。
+            # The sender already logged internally; here we only guarantee no
+            # exception escapes, because aclose's call site (finally) must run
+            # its reclamation unconditionally.
             pass
 
     def drain_nowait(self) -> list[dict]:
-        """取走队列里剩余的可发送信封（跳过哨兵），供测试断言与优雅关闭使用。"""
+        """Take the remaining sendable envelopes from the queue (skip sentinels),
+        for test assertions and graceful shutdown."""
         out: list[dict] = []
         while True:
             try:
@@ -342,10 +396,11 @@ class WsOutbound:
 
 
 def envelope_size(envelope: dict) -> int:
-    """估算一帧的字节数（观测用：日志里报"积压了多少字节"比"多少帧"直观）。"""
+    """Estimate a frame's byte size (observability: reporting "how many bytes
+    backed up" reads better in logs than "how many frames")."""
     try:
         return len(json.dumps(envelope, separators=(",", ":"), ensure_ascii=False))
-    except (TypeError, ValueError):  # pragma: no cover - 信封来自 json.loads，必然可序列化
+    except (TypeError, ValueError):  # pragma: no cover - envelope comes from json.loads, always serializable
         return 0
 
 

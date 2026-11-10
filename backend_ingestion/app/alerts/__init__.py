@@ -1,1 +1,1 @@
-"""告警闭环 REST 层（订单 17 T1）。"""
+"""Alert closed-loop REST layer (order 17 T1)."""

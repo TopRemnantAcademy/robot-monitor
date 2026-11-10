@@ -1,19 +1,21 @@
-"""告警闭环 REST 端点（订单 17 T1）。
+"""Alert closed-loop REST endpoints (order 17 T1).
 
-三个端点：
-- `GET  /alerts`                 —— 分页列表（viewer 起可读，与 /robots 同级只读权限）
-- `POST /alerts/{alert_id}/ack`  —— 确认（**需 admin**）
-- `POST /alerts/{alert_id}/unack`—— 撤回（**需 admin**）
+Three endpoints:
+- `GET  /alerts`                  -- paginated list (readable from viewer up, same as /robots read-only permission)
+- `POST /alerts/{alert_id}/ack`   -- acknowledge (**requires admin**)
+- `POST /alerts/{alert_id}/unack` -- retract (**requires admin**)
 
-为什么 ack 写操作要 admin 而读不要：
-确认是**有审计后果的写操作**（记录 ack_by = 具体操作人）。若 viewer 也能确认，
-那么"谁认领了这条故障"就不再可信 —— 车间里任何一台巡检终端都能改状态。
-读操作（看告警）不改变任何东西，viewer 起即可。
+Why ack (a write) needs admin but read does not:
+Acknowledging is a **write operation with audit consequences** (records ack_by =
+the specific operator). If viewers could ack too, then "who claimed this fault"
+would no longer be trustworthy -- any inspection terminal on the floor could
+change state. Read operations (viewing alerts) change nothing, so viewer-up is
+enough.
 
-`ack_by` 只从 JWT `sub` 取（派工单禁止项 2）：
-这里通过 `Depends(require_role(Role.ADMIN))` 拿到已验签的 `RobotUser`，
-再从 `request.state.user`（`deps.py:current_active_user` 写入）取 `sub`。
-**不接受** query/body 里的操作人字段。
+`ack_by` is taken only from the JWT `sub` (work-order forbidden item 2): here we
+get the verified `RobotUser` via `Depends(require_role(Role.ADMIN))`, then read
+`sub` from `request.state.user` (written by `deps.py:current_active_user`).
+**Do not accept** an operator field from query/body.
 """
 
 from __future__ import annotations
@@ -32,56 +34,64 @@ log = logging.getLogger("alerts.router")
 
 router = APIRouter(tags=["alerts"])
 
-#: 单页上限。与派工单示例（limit=50）一致的默认值，上限 500 的选取理由见下。
+#: Per-page cap. Default matches the work-order example (limit=50); the 500 cap's
+#: rationale is below.
 _DEFAULT_LIMIT = 50
 _MAX_LIMIT = 500
 
 
 def _subject(request: Request, user: RobotUser) -> str:
-    """取审计主体（JWT `sub`）。
+    """Get the audit subject (JWT `sub`).
 
-    优先 `request.state.user.id` —— 这是 `current_active_user` 查库拿到的真实用户主键；
-    它与 JWT 的 `sub` 同源（fastapi-users 用 user id 作 sub，见 manager.py）。
-    用 user.id 而不是再解一次 token：**避免"解出来的 sub"与"已鉴权的用户"可能不一致**
-    （例如 token 在请求途中被吊销），审计写的是"确实通过了鉴权的那个人"。
+    Prefer `request.state.user.id` -- this is the real user primary key looked up
+    from the DB by `current_active_user`; it is co-sourced with the JWT `sub`
+    (fastapi-users uses the user id as sub, see manager.py). Using user.id rather
+    than re-decoding the token **avoids "the decoded sub" and "the authenticated
+    user" possibly disagreeing** (e.g. the token was revoked mid-request); the
+    audit writes "the person who actually passed auth".
 
-    该值必非空：能走到这里说明鉴权已通过。
+    This value must be non-empty: reaching here means auth passed.
     """
     return str(user.id)
 
 
 @router.get("/alerts", response_model=AlertPage)
 async def list_alerts(
-    ack: bool | None = Query(default=None, description="true/false 筛选确认状态；省略=全部"),
-    escalated: bool | None = Query(default=None, description="true 只看已升级告警"),
+    ack: bool | None = Query(default=None, description="true/false filter on ack status; omitted=all"),
+    escalated: bool | None = Query(default=None, description="true = only escalated alerts"),
     suppressed: bool | None = Query(
         default=None,
-        description="true 只看已抑制 / false 排除已抑制；省略=全部（含已抑制）",
+        description="true = only suppressed / false = exclude suppressed; omitted=all (including suppressed)",
     ),
-    robot_id: str | None = Query(default=None, description="按机器人过滤"),
+    robot_id: str | None = Query(default=None, description="filter by robot"),
     limit: int = Query(default=_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT),
     offset: int = Query(default=0, ge=0),
     _user: RobotUser = Depends(require_role(Role.VIEWER)),
 ):
-    """分页查询告警（解 H5）。
+    """Paginated alert query (resolves H5).
 
-    只读，viewer 起可访问 —— 与 `GET /robots` 权限一致（看板必须所有人都能看）。
-    典型用法：前端筛选「未确认」= `GET /alerts?ack=false&limit=50&offset=0`。
+    Read-only, accessible from viewer up -- same permission as `GET /robots`
+    (the dashboard must be viewable by everyone). Typical usage: the frontend
+    filters "unacked" with `GET /alerts?ack=false&limit=50&offset=0`.
 
-    `suppressed`（订单 35）刻意是**可选**参数，省略时返回全集（含被抑制行）。
-    为什么不把「排除已抑制」设成默认：默认值一变，既有调用方（前端告警流、
-    RobotDetailDrawer 的 200 条拉取）的行为会在没人改代码的情况下静默改变。
-    把「默认视图要不要藏被抑制行」交给**调用方显式表达**，契约本身保持中性。
+    `suppressed` (order 35) is deliberately an **optional** parameter; when
+    omitted it returns the full set (including suppressed rows).
+    Why not default to "exclude suppressed": changing the default would silently
+    change the behavior of existing callers (frontend alert stream, RobotDetailDrawer's
+    200-row pull) without any code change. Leaving "does the default view hide
+    suppressed rows" to the **caller's explicit expression** keeps the contract
+    itself neutral.
 
-    注意这与「前端默认不进未确认流」是两件事：前者是 API 的中立性，
-    后者是 `AlertLogTable` 的展示决策（默认 `suppressed=false` + 一个开关）。
+    Note this is a different thing from "the frontend by default does not enter the
+    unacked stream": the former is the API's neutrality, the latter is
+    `AlertLogTable`'s display decision (default `suppressed=false` + a toggle).
     """
     try:
         rows, total = await repository.list_alerts(
             ack=ack, escalated=escalated, suppressed=suppressed,
             robot_id=robot_id, limit=limit, offset=offset,
         )
-    except Exception as exc:  # noqa: BLE001 —— DB 不可达时回 503 而非 500
+    except Exception as exc:  # noqa: BLE001 -- return 503 not 500 when DB unreachable
         log.exception("list_alerts failed")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -103,10 +113,12 @@ async def ack_alert(
     body: AckRequest | None = None,
     user: RobotUser = Depends(require_role(Role.ADMIN)),
 ):
-    """确认告警。**幂等**：重复确认返回 200 + changed=false，不报错、不覆盖首次确认人。
+    """Acknowledge an alert. **Idempotent**: re-acking returns 200 + changed=false,
+    no error, no overwrite of the first ack-er.
 
-    操作人（`ack_by`）只从 JWT 取，`body` 声明为 `AckRequest`（extra=forbid）
-    仅为拒绝伪造字段；其内容**不被读取**。
+    The operator (`ack_by`) is taken only from the JWT; `body` is declared as
+    `AckRequest` (extra=forbid) only to reject forged fields; its content **is not
+    read**.
     """
     return await _apply_ack(alert_id, True, _subject(request, user))
 
@@ -118,20 +130,24 @@ async def unack_alert(
     body: AckRequest | None = None,
     user: RobotUser = Depends(require_role(Role.ADMIN)),
 ):
-    """撤回确认（误确认时用）。同样幂等：对未确认的告警再 unack 返回 changed=false。"""
+    """Retract acknowledgement (for mis-acks). Also idempotent: unacking an
+    already-unacked alert returns changed=false."""
     return await _apply_ack(alert_id, False, _subject(request, user))
 
 
 async def _apply_ack(alert_id: int, ack: bool, subject: str) -> AckResult:
-    """ack / unack 的公共实现。
+    """Common implementation of ack / unack.
 
-    存在性检查与写入合并成一次 SQL（`set_ack` 的 RETURNING + 兜底 SELECT）：
-    - 行存在且状态变化 → changed=True，回填新值；
-    - 行存在但状态已是目标值 → changed=False，回填**现值**（幂等）；
-    - 行不存在 → 404。
+    Existence check and write are merged into one SQL (`set_ack`'s RETURNING +
+    fallback SELECT):
+    - row exists and state changes -> changed=True, backfill new value;
+    - row exists but state already the target -> changed=False, backfill **current
+      value** (idempotent);
+    - row does not exist -> 404.
 
-    这里区分「行不存在」与「幂等命中」靠 `set_ack` 返回的 row 是否为 None：
-    两者都走兜底 SELECT，靠结果有无区分。
+    Distinguishing "row not found" from "idempotent hit" relies on whether the
+    row returned by `set_ack` is None: both paths hit the fallback SELECT, and the
+    presence of a result distinguishes them.
     """
     try:
         row, changed = await repository.set_ack(alert_id, ack, subject)

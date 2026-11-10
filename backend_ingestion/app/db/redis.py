@@ -1,4 +1,4 @@
-"""Redis 异步连接池（最新状态 Hash + Pub/Sub 广播）。"""
+"""Async Redis connection pool (latest-state Hash + Pub/Sub broadcast)."""
 
 from __future__ import annotations
 

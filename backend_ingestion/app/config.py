@@ -1,6 +1,7 @@
-"""环境变量配置（pydantic-settings）。
+"""Environment-variable configuration (pydantic-settings).
 
-对应 spec/00 §6 与 .env.example。所有阈值/窗口集中在此，禁止在业务代码里硬编码。
+Maps to spec/00 SS6 and .env.example. All thresholds/windows live here; never
+hard-code them in business code.
 """
 
 from __future__ import annotations
@@ -23,159 +24,203 @@ class Settings(BaseSettings):
     # ---- TimescaleDB ----
     database_url: str = "postgresql://postgres:postgres@localhost:5432/robot_monitor"
 
-    # ---- 批量落库双重触发（spec/01 §4.2）----
+    # ---- Batch flush dual trigger (spec/01 SS4.2) ----
     batch_trigger_count: int = 500
     batch_trigger_seconds: float = 1.0
     batch_queue_maxsize: int = 20000
-    # 单批写入失败时的重试与退避（见 services/batch_writer.py 的降级链）
+    # Per-batch failure retries and backoff (see the degradation chain in
+    # services/batch_writer.py).
     batch_flush_max_retries: int = 3
     batch_flush_retry_backoff_s: float = 0.5
-    # 病态批次隔离的二分深度上限：每层把批减半，段大小 = batch/2^depth。
-    # 上限存在的意义是保证最坏情况下的往返次数有界（避免 O(n) 次查询）。
-    # 深度 8 + 批 500 → 最小段 1 行，足以定位单行坏数据。
+    # Binary-search isolation depth cap for a sick batch: each level halves the
+    # batch, segment size = batch/2^depth. The cap bounds the worst-case number
+    # of round-trips (avoids O(n) queries).
+    # Depth 8 + batch 500 -> minimum segment 1 row, enough to localize a single
+    # bad row.
     batch_isolation_max_depth: int = 8
 
-    # ---- asyncpg 连接池 ----
-    # 空闲地板条数（asyncpg 0.32 语义，见 app/db/pool.py）。写路径是单连接顺序刷盘，
-    # 2 条足矣；`db_pool_max_size` 留出并发余量（/healthz 探活 + 读路径会同时到达）。
-    # 注：不采用订单 08 分支那套「DB_POOL_SIZE 同时当 init_size/min_size/max_size」的写法，
-    # 三值相等会把池退化成信号量（本机实测见 app/db/pool.py 的 MAX_POOL_SIZE 注释）。
+    # ---- asyncpg connection pool ----
+    # Idle floor (asyncpg 0.32 semantics, see app/db/pool.py). The write path is
+    # a single connection flushing sequentially, so 2 is enough; `db_pool_max_size`
+    # leaves headroom for concurrency (/healthz probe + read path arrive together).
+    # Note: do NOT use the order-08 branch's "DB_POOL_SIZE doubles as
+    # init_size/min_size/max_size" approach -- equal three values degrade the pool
+    # to a semaphore (see the MAX_POOL_SIZE comment in app/db/pool.py for local
+    # measurements).
     db_pool_min_size: int = 2
     db_pool_max_size: int = 10
     db_command_timeout_s: float = 30.0
     db_max_idle_s: float = 300.0
-    # 建池超时（秒）。**必须有上限**，理由见 app/db/session.py 的模块头注释：
-    # asyncpg 0.32 的 init_size 是「建池即预连」，此时 `connection.connect()` 的
-    # 默认 timeout=60 会生效 —— DB 未就绪就建池，每次调用都要阻塞满 60s。
-    # 而这是**探活路径**（/healthz 的 ping()），阻塞 60s 等于探针永久挂死、
-    # db=up 永不到达。给一个远短于任何探针周期的上限，让失败快速可见、快速重试。
-    # 0.32.0 实测：init_size=2 全部连不上时，不给该参数 60.02s 抛 TimeoutError，
-    # 加 timeout=8 则 8.01s 抛出（见 tests/test_db_pool_timeout.py）。
+    # Pool-build timeout (seconds). **Must be bounded**, reason in app/db/session.py's
+    # module header comment: asyncpg 0.32's init_size means "connect at pool build",
+    # at which point `connection.connect()`'s default timeout=60 takes effect -- if
+    # the DB is not ready when building the pool, every call blocks the full 60s.
+    # And this is the **probe path** (/healthz ping()), so blocking 60s means the
+    # probe hangs forever and db=up never arrives. Give a bound far shorter than any
+    # probe cycle so failures surface fast and retry fast.
+    # Measured 0.32.0: init_size=2 all-unreachable -> without this param, 60.02s
+    # TimeoutError; with timeout=8 -> 8.01s raised (see tests/test_db_pool_timeout.py).
     db_connect_timeout_s: float = 8.0
-    # /healthz 的 DB 探活（就绪探针不应每次打库，缓存结果）
+    # /healthz DB probe (a ready probe should not hit the DB every time; cache result)
     db_health_cache_s: float = 5.0
 
-    # ---- Redis 最新状态缓存（spec/01 §4.3）----
+    # ---- Redis latest-state cache (spec/01 SS4.3) ----
     state_ttl_seconds: int = 10
 
-    # ---- robot_metadata 心跳（G-6 / ISSUE #96）----
-    # 总开关。关闭后 metadata_writer 的 run() 直接退出、flush() 直接返回：
-    # 既不改写 robot_metadata，也不做离线扫描，遥测写路径（batch_writer）语义与
-    # 吞吐完全不受影响 —— 这正是「不得改变既有遥测写路径」的落地方式。
+    # ---- robot_metadata heartbeat (G-6 / ISSUE #96) ----
+    # Master switch. When off, metadata_writer's run() exits immediately and
+    # flush() returns immediately: it neither rewrites robot_metadata nor does the
+    # offline scan; the telemetry write path (batch_writer) semantics and
+    # throughput are completely unaffected -- this is the literal "must not change
+    # the existing telemetry write path".
     metadata_heartbeat_enabled: bool = True
-    # metadata 心跳的刷盘周期。语义上必须 ≤ state_ttl_seconds：Redis 里的
-    # `robot:state:{id}` 活 10s，若心跳比它慢，会出现「Redis 已判过期、DB 里
-    # is_online 还是 true」的窗口期。1s 同时把写放大压到 ≤100 行/秒的量级。
+    # metadata heartbeat flush period. Must be <= state_ttl_seconds semantically:
+    # `robot:state:{id}` lives 10s in Redis, so if the heartbeat is slower, there
+    # is a window where "Redis already expired but DB is_online is still true".
+    # 1s also caps the write amplification at <=100 rows/second.
     metadata_flush_seconds: float = 1.0
 
-    # ---- 在线判定阈值（ISSUE #77）----
-    # 「现在还活着吗」只由后端判定：前端此前拿 `status_code === 0` 猜在线，
-    # 于是停报的机器人把最后一帧的 status_code 冻在那里，永远显示在线。
+    # ---- Online-status threshold (ISSUE #77) ----
+    # "Alive right now" is decided only by the backend: the frontend used to guess
+    # online from `status_code === 0`, so a robot that stopped reporting froze its
+    # last status_code and showed online forever.
     #
-    # 30s 的依据（不是拍脑袋）：正常上报是 10Hz（100ms 一条），30s = 连续丢 300 帧，
-    # 远大于网络抖动/MQTT 重连/JS 事件循环阻塞的量级；而 AGENTS.md 的验收要求
-    # 「避免 10Hz 正常抖动误判」。与 alert_engine 的 offline_after_s(10s) **刻意不同**：
-    # 那个是**告警阈值**（早报=早处置），这个是**展示阈值**（晚划=不闪）。
-    # 两者语义不同，不要为了"看着一致"把它们并成一个值。
+    # The 30s basis (not a guess): normal reporting is 10Hz (one every 100ms),
+    # 30s = 300 consecutive lost frames, far larger than the scale of network
+    # jitter / MQTT reconnect / JS event-loop blocking; and AGENTS.md acceptance
+    # requires "avoid misjudging 10Hz normal jitter". **Deliberately different**
+    # from alert_engine's offline_after_s (10s): that is an **alert threshold**
+    # (earlier report = earlier response), this is a **display threshold** (later
+    # flip = no flicker). The two have different semantics; do not collapse them
+    # into one value just to "look consistent".
     robot_offline_threshold_s: float = 30.0
 
-    # ---- CORS（R-17）----
-    # 允许的来源，逗号分隔。**默认空 = 不启用 CORS 中间件**（同源部署即够），
-    # 绝不默认 `*`：`*` 与 allow_credentials=True 组合会让任意站点都能带着
-    # 用户凭据打后端（CSRF/信息泄露面），R-17 §6 明确列为禁止项。
-    # 只有**显式**写 `*` 才放行所有来源（代码里单独分支 + 告警日志）。
-    # 例：CORS_ALLOW_ORIGINS=http://localhost:5173,https://board.example.com
+    # ---- CORS (R-17) ----
+    # Allowed origins, comma-separated. **Default empty = CORS middleware off**
+    # (same-origin deployment suffices); never default to `*`: `*` combined with
+    # allow_credentials=True lets any site hit the backend with the user's
+    # credentials (CSRF / info-leak surface), explicitly forbidden in R-17 SS6.
+    # Only an **explicit** `*` opens all origins (a separate code branch + warning
+    # log).
+    # Example: CORS_ALLOW_ORIGINS=http://localhost:5173,https://board.example.com
     cors_allow_origins: str = ""
 
-    # ---- 限流（R-17，可选，默认关闭）----
-    # 总开关。默认 false = 不加任何限流逻辑，既有 e2e/探针/监控的请求节奏逐字不变
-    # （R-17 §6 硬门槛：限流不得破坏 e2e-30k-landing 真绿）。
+    # ---- Rate limiting (R-17, optional, default off) ----
+    # Master switch. Default false = no rate-limiting logic at all; existing
+    # e2e/probe/monitoring request cadence is byte-for-byte unchanged
+    # (R-17 SS6 hard gate: rate limiting must not break e2e-30k-landing's real green).
     rate_limit_enabled: bool = False
-    # 每客户端 IP 每分钟的请求上限（固定窗口）。仅在 rate_limit_enabled=true 时生效。
-    # /healthz、/metrics、/ws/robots 与 /internal/* 恒免限流（见 security_middleware）。
+    # Per-client-IP request cap per minute (fixed window). Only applies when
+    # rate_limit_enabled=true. /healthz, /metrics, /ws/robots and /internal/* are
+    # always exempt (see security_middleware).
     rate_limit_per_minute: int = 120
 
     # ---- HTTP ----
     ws_host: str = "0.0.0.0"
     ws_port: int = 8000
 
-    # ---- WS 合成探针（缺口 G-3「看板假的绿」）----
-    # 探针是**旁观者**：关掉它、或它跑挂，都不影响遥测写入与 WS 广播。
-    # 默认开启，因为「没有它就没有客户端视角」；企业内网只需 loopback，无外网依赖。
+    # ---- WS synthetic probe (gap G-3 "dashboard's fake green") ----
+    # The probe is an **observer**: disabling it, or it crashing, does not affect
+    # telemetry writing or WS broadcast. On by default because "without it there is
+    # no client perspective"; an enterprise intranet only needs loopback, no
+    # external dependency.
     ws_probe_enabled: bool = True
-    # 探针间隔。下限 30s 被 `ws_probe.py:MIN_INTERVAL_S` 钳住 ——
-    # 这里配更小也不会更快（探针自己也是 WS 客户端，会与 1000 msg/s 抢 loopback）。
+    # Probe interval. The lower bound of 30s is clamped by `ws_probe.py:MIN_INTERVAL_S`
+    # -- configuring smaller here won't go faster (the probe itself is a WS client
+    # and would contend with 1000 msg/s on loopback).
     ws_probe_interval_s: float = 60.0
-    # 探针目标路径。写成配置是为了将来出现「多路 WS」时不必改代码。
+    # Probe target path. Made configurable so a future "multiple WS" needs no code
+    # change.
     ws_probe_path: str = "/ws/robots"
-    # 启动宽限：uvicorn 的 lifespan startup 里就会把探针任务创建出来，
-    # 此时端口尚未 accept，立刻探必然失败。给一个窗口避免开局一次假失败。
+    # Startup grace: uvicorn's lifespan startup creates the probe task, but the
+    # port is not yet accepting, so an immediate probe is doomed. Give a window to
+    # avoid an opening false-failure.
     ws_probe_startup_grace_s: float = 5.0
 
-    # ---- WS 出站背压 + 心跳（ISSUE #73）----
-    # 每条连接一个**有界**出站队列：转发循环只做 put_nowait（永不 await），
-    # 慢客户端不再拖住 Redis 转发循环，内存最坏 = 队列长度 × 帧大小（常量）。
-    # 依据：100 台 × 10Hz = 1000 msg/s，若逐帧 await 到慢客户端，一个卡死的
-    # 浏览器标签就能把整个进程的内存拖无界（见 app/ws_backpressure.py 头注释）。
+    # ---- WS outbound backpressure + heartbeat (ISSUE #73) ----
+    # One **bounded** outbound queue per connection: the relay loop only does
+    # put_nowait (never awaits); slow clients no longer stall the Redis relay loop,
+    # and worst-case memory = queue length x frame size (a constant).
+    # Basis: 100 units x 10Hz = 1000 msg/s; if you await per-frame into a slow
+    # client, one stuck browser tab can drag the whole process's memory unbounded
+    # (see app/ws_backpressure.py header comment).
     #
-    # 取值 500：约 0.5s 的遥测（1000 msg/s）—— 足以吸收移动网络的抖动，
-    # 又不至于让"丢掉最旧帧"这件事被延迟到用户可见。配大等于回到无界。
+    # Value 500: about 0.5s of telemetry (1000 msg/s) -- enough to absorb mobile
+    # network jitter, but not so large that "dropping the oldest frame" is delayed
+    # until user-visible. Configuring larger returns to unbounded.
     ws_outbound_queue_size: int = 500
-    # 心跳哨兵的投放间隔。发送协程每轮循环投一个，它会被 `await send_json`
-    # 牵着经过真实的背压/断开判定 —— 于是"投得进去"本身就是一次验活。
-    # 浏览器侧的半开连接（拔网线但 TCP 未断）会表现为发送阻塞，
-    # 该连接随后被 `ws_outbound_close_timeout_s` 兜底摘除。
+    # Heartbeat sentinel cadence. The sender drops one each loop iteration; it gets
+    # carried through the real backpressure/disconnect judgment by `await send_json`
+    # -- so "it got enqueued" is itself a liveness check.
+    # A browser-side half-open connection (cable unplugged but TCP not down) shows
+    # up as send blocking, and that connection is then reaped by
+    # `ws_outbound_close_timeout_s`.
     ws_heartbeat_interval_s: float = 15.0
-    # 单条连接在队列持续满 / 发送持续阻塞时的最长容忍时间，超时主动 close。
-    # 上限存在是为了让"慢客户端断网后计数在心跳超时内归位"成为可验证的承诺，
-    # 而不是"等 TCP 自己发现"（可能几分钟）。默认 60s ≈ 3 个心跳周期。
+    # Max tolerance for a single connection with a persistently-full queue /
+    # persistently-blocked send, after which it is actively closed. The cap exists
+    # so "a disconnected slow client's counter returns within the heartbeat
+    # timeout" becomes a verifiable promise, not "wait for TCP to notice itself"
+    # (which can take minutes). Default 60s ~ 3 heartbeat cycles.
     ws_outbound_close_timeout_s: float = 60.0
-    # 出站队列满时，允许为**不可丢的告警**额外扩张的格数（见 ws_backpressure）。
+    # When the outbound queue is full, how many extra slots may expand for the
+    # **undroppable alerts** (see ws_backpressure).
     ws_alert_overflow_slack: int = 64
 
-    # ---- WS 广播合并节拍（ISSUE #71）----
-    # 服务端出站中枢的扇出周期。100ms = 10Hz，与上游遥测速率（100 台 × 10Hz）
-    # 及前端 100ms 节流（spec/03 §6）同拍：每节拍每台机器人只扇出**最新一帧**，
-    # 中间帧在「覆盖写」里被自然合并（ws_hub_coalesced_total 计数即证据）。
-    # 调大 → 服务端更省、但看板更新变钝；调小 → 更实时、但序列化/发送次数回升。
+    # ---- WS broadcast coalescing beat (ISSUE #71) ----
+    # Server-side outbound hub fan-out period. 100ms = 10Hz, on the same beat as
+    # upstream telemetry rate (100 units x 10Hz) and the frontend 100ms throttle
+    # (spec/03 SS6): each beat fans out only the **latest frame** per robot;
+    # intermediate frames are naturally coalesced in the "overwrite" (counter
+    # ws_hub_coalesced_total is the evidence).
+    # Larger -> cheaper server, but duller dashboard updates; smaller -> more
+    # real-time, but serialization/send counts climb back.
     ws_broadcast_interval_ms: float = 100.0
 
-    # ---- 认证 / RBAC（订单 15）----
-    # JWT 签名密钥。**必须**由 .env 注入，不设默认值 —— 有空默认值等于库里带着
-    # 一个人人可签的密钥，任何拿到源码的人都能伪造 admin token（AGENTS.md §5）。
-    # 未配置时 AppSettings 构造即抛错，宁可起不来也不要静默降级成"谁都能进"。
+    # ---- Auth / RBAC (order 15) ----
+    # JWT signing secret. **Must** be injected via .env, no default -- an empty
+    # default equals shipping a secret anyone can sign with, so anyone with the
+    # source can forge an admin token (AGENTS.md SS5).
+    # When unset, AppSettings construction raises; better to fail to start than to
+    # silently degrade into "anyone can enter".
     jwt_secret: str
-    # token 有效期：8 小时 = 一个班次。大屏是 7×24 公共终端，
-    # 过期后由前端 401 拦截清 token 回登录页，由当班人重新登录。
+    # Token lifetime: 8 hours = one shift. The big screen is a 7x24 public
+    # terminal; after expiry the frontend 401 interceptor clears the token and
+    # returns to login, for the on-duty person to log in again.
     jwt_lifetime_seconds: int = 8 * 3600
 
-    # ---- OpenTelemetry（订单 16 T3）----
-    # 留空 = **关闭**（默认）。工厂内网常无 OTLP collector，为空即 no-op，
-    # 绝不因未配置而启动失败（见 app/telemetry_tracing.py 的分层降级）。
-    # 填 `http://collector:4318` 即启用，本模块会补全 /v1/traces 路径。
+    # ---- OpenTelemetry (order 16 T3) ----
+    # Empty = **off** (default). A factory intranet often has no OTLP collector,
+    # so empty is no-op and never fails to start from being unconfigured (see the
+    # layered degradation in app/telemetry_tracing.py).
+    # Filling `http://collector:4318` enables it; this module completes the
+    # /v1/traces path.
     otel_exporter_otlp_endpoint: str = ""
     otel_service_name: str = "robot_backend"
 
-    # ---- Redis 频道（spec/00 §5.2/§5.4）----
+    # ---- Redis channels (spec/00 SS5.2/SS5.4) ----
     chan_stream_all: str = "robot:stream:all"
     chan_stream_one: str = "robot:stream:{robot_id}"
     chan_alerts: str = "robot:alerts"
 
-    # ---- 오프라인 버퍼 (경쟁 벤치마크 C: store-and-forward, Netdata/ORO 참조)----
-    # TimescaleDB 장애 시 batch_writer 가 행을 버리던(rejected) 것을 Redis 백업 큐에
-    # 직렬화 보관하고, DB 복구 시 재생(replay)한다. 중앙집중형이라 네트워크 단절 시
-    # blind spot 이 생기던 한계를 메운다.
-    # 기본 켜짐. Redis 불가 시 안전 폴백: 호출 측이 기존 rejected 로 계수.
+    # ---- Offline buffer (competitive benchmark C: store-and-forward, cf. Netdata/ORO) ----
+    # When TimescaleDB fails, batch_writer used to drop rows (rejected); now they
+    # are serialized into a Redis backup queue and replayed once the DB recovers.
+    # This closes the centralized-deployment blind spot that network isolation
+    # would otherwise create.
+    # On by default. If Redis is unavailable, safe fallback: the caller counts
+    # them as the original rejected.
     offline_buffer_enabled: bool = True
     offline_buffer_key: str = "robot:buffer:telemetry"
-    # 용량 상한: 1000 msg/s × 200s 분량. 초과 시 가장 오래된 항목 잘림(메모리 폭주 방지).
+    # Capacity cap: 1000 msg/s x 200s worth. Beyond that the oldest items are
+    # trimmed (prevents memory runaway).
     offline_buffer_maxlen: int = 200_000
-    # 재생 루프 주기(초). 버퍼가 비어 있으면 ping 조차 하지 않음(오버헤드 0).
+    # Replay loop period (seconds). If the buffer is empty it does not even ping
+    # (zero overhead).
     offline_buffer_replay_interval_s: float = 5.0
 
     @property
     def robot_ids(self) -> list[str]:
-        """100 台机器人 ID（与 init.sql 预置的 robot_metadata 一致）。"""
+        """100 robot IDs (consistent with the pre-seeded robot_metadata in init.sql)."""
         return [f"humanoid-{i:03d}" for i in range(1, 101)]
 
 

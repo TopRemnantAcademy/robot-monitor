@@ -1,28 +1,34 @@
-"""OpenTelemetry 链路接线（订单 16 T3）：MQTT → 后端 → DB。
+"""OpenTelemetry tracing wiring (order 16 T3): MQTT -> backend -> DB.
 
-设计前提：**默认关闭，必须可降级**（订单 16 §1 T3 + §2 验收）。
-工厂内网经常没有 OTLP collector，若 import 时就硬依赖 OTel 包，
-或 endpoint 未配置就抛错，本服务会在**没开观测的环境**直接起不来 ——
-这是"为可观测性牺牲可用性"，方向反了。
+Design premise: **off by default, must be degradable** (order 16 SS1 T3 + SS2
+acceptance). A factory intranet often has no OTLP collector; if we hard-depend on
+the OTel package at import time, or raise when the endpoint is unset, this service
+would fail to start in **environments without observability** -- that is
+"sacrificing availability for observability", backwards.
 
-因此本模块的分层是：
-  1. 所有 OTel import 放在函数体内（模块顶层零依赖）→ 没装包也不影响 `import app.main`；
-  2. `configure_tracing()` 是**唯一**入口，任何异常都在内部消化并降级为 no-op；
-  3. 返回 bool 表示"是否真的启用"，供启动日志与测试断言。
+So this module's layering is:
+  1. All OTel imports live inside function bodies (zero top-level dependency) ->
+     not having the package installed does not break `import app.main`;
+  2. `configure_tracing()` is the **only** entry point; any exception is digested
+     internally and degrades to no-op;
+  3. returns bool for "actually enabled", for startup logging and test assertions.
 
-覆盖的链路（对应订单 16 的 MQTT → 后端 → DB）：
-  - FastAPI：`FastAPIInstrumentor.instrument_app` → 每个 REST/WS 请求一根 span；
-  - asyncpg：`AsyncPGInstrumentor().instrument()` → 每次 DB 往返一根子 span。
-    batch_writer 的 COPY / executemany 全走 asyncpg，所以落库链自动可见。
+Covered traces (corresponding to order 16's MQTT -> backend -> DB):
+  - FastAPI: `FastAPIInstrumentor.instrument_app` -> one span per REST/WS request;
+  - asyncpg: `AsyncPGInstrumentor().instrument()` -> one child span per DB
+    round-trip. batch_writer's COPY / executemany all go through asyncpg, so the
+    write path is automatically visible.
 
-为什么不用 `opentelemetry-instrument` 自动注入（`opentelemetry-distro`）：
-那要求在启动命令前面包一层 CLI（`opentelemetry-instrument uvicorn ...`），
-会改动 Dockerfile 的 CMD 与本地跑法；本模块走**代码内显式接线**，
-不改任何启动方式，也不依赖环境里存在那个 CLI。改动面最小。
+Why not `opentelemetry-instrument` auto-injection (`opentelemetry-distro`):
+That wraps the start command with a CLI (`opentelemetry-instrument uvicorn ...`),
+which changes the Dockerfile CMD and the local run method; this module does
+**explicit in-code wiring**, changing no launch method and not depending on that
+CLI existing in the environment. Smallest change surface.
 
-版本对齐（实测通过，见 PR「实测」章节）：OTel Python 的 API/SDK 是 1.x，
-而 instrumentation 包是 0.x b 版（`0.43b0` 对应 SDK `1.22.0`）——
-**两者必须成对安装**，且 lower-bound 依赖会自动钉住 SDK。
+Version alignment (measured pass, see the PR "measured" section): OTel Python's
+API/SDK is 1.x, while instrumentation packages are 0.x beta (`0.43b0` matches
+SDK `1.22.0`) -- **the two must be installed as a pair**, and the lower-bound
+dependency auto-pins the SDK.
 """
 
 from __future__ import annotations
@@ -31,32 +37,36 @@ import logging
 
 log = logging.getLogger("telemetry_tracing")
 
-# 服务名：出现在 collector 里的 service.name，与 prometheus.yml 的 job 名对齐。
+# Service name: appears as service.name in the collector, aligned with
+# prometheus.yml's job name.
 SERVICE_NAME = "robot_backend"
 
 _configured = False
 
 
 def configure_tracing(endpoint: str, service_name: str = SERVICE_NAME) -> bool:
-    """按需启用 OTel trace 导出。**永不抛异常**，返回是否启用成功。
+    """Enable OTel trace export on demand. **Never raises**, returns whether it
+    successfully enabled.
 
-    @param endpoint `OTEL_EXPORTER_OTLP_ENDPOINT`，空串 = 关闭（no-op）。
-    @return True = 已接线并开始导出；False = 未配置或降级。
+    @param endpoint `OTEL_EXPORTER_OTLP_ENDPOINT`, empty string = off (no-op).
+    @return True = wired and exporting; False = unconfigured or degraded.
 
-    降级点（每一处都对应一种真实环境）：
-      - endpoint 为空                → 内网无 collector，正常关闭，返回 False；
-      - import 失败（包没装）        → 返回 False，不影响服务；
-      - 初始化期任何异常             → 返回 False 并记 WARNING，不影响服务。
+    Degradation points (each maps to a real environment):
+      - endpoint empty                -> intranet has no collector, normal off, False;
+      - import failure (package missing) -> False, service unaffected;
+      - any exception during init     -> False and WARNING logged, service unaffected.
     """
     global _configured
 
     if not endpoint:
-        # 最常见路径：默认部署。这不是错误，用 INFO 且不打印栈。
+        # Most common path: default deployment. This is not an error; use INFO and
+        # no stack.
         log.info("OTel tracing disabled: OTEL_EXPORTER_OTLP_ENDPOINT not set")
         return False
 
     if _configured:
-        # 幂等保护：重复调用会重复注册 span processor，导致每个 span 被导出 N 次。
+        # Idempotency guard: repeated calls would re-register span processors,
+        # causing each span to be exported N times.
         log.info("OTel tracing already configured")
         return True
 
@@ -69,41 +79,47 @@ def configure_tracing(endpoint: str, service_name: str = SERVICE_NAME) -> bool:
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
-        # Resource 必须先建：service.name 是 collector 侧区分服务的第一步，
-        # 缺失时所有 span 都归到 "unknown_service"，100 台机器人场景下无法下钻。
+        # Resource must be built first: service.name is the collector's first step
+        # to distinguish services; when missing, all spans fall under
+        # "unknown_service" and cannot be drilled down in a 100-robot scenario.
         resource = Resource.create({"service.name": service_name})
         provider = TracerProvider(resource=resource)
 
-        # BatchSpanProcessor（异步批量导出）而非 SimpleSpanProcessor（逐 span 同步导出）：
-        # 后者会在每个请求内**同步阻塞**等 OTLP 网络往返，1000 msg/s 场景下
-        # 直接把事件循环拖死。这是 OTel 官方对生产环境的默认建议。
+        # BatchSpanProcessor (async batch export) rather than SimpleSpanProcessor
+        # (per-span sync export): the latter would **synchronously block** waiting
+        # for the OTLP network round-trip inside every request, and at 1000 msg/s
+        # it would directly kill the event loop. This is OTel's official production
+        # default.
         #
-        # endpoint 直接传 `http(s)://host:port/v1/traces`：OTLPSpanExporter
-        # **不会**自动补 `/v1/traces` 路径（实测签名见 PR），必须由调用方给全。
+        # Pass `http(s)://host:port/v1/traces` as endpoint: OTLPSpanExporter does
+        # **not** auto-complete the `/v1/traces` path (measured signature, see PR),
+        # the caller must give the full path.
         provider.add_span_processor(
             BatchSpanProcessor(OTLPSpanExporter(endpoint=_traces_url(endpoint)))
         )
         trace.set_tracer_provider(provider)
 
-        # asyncpg 是全局 instrument：batch_writer 与 /history 的连接都走它。
+        # asyncpg is global instrumentation: batch_writer and /history both use it.
         AsyncPGInstrumentor().instrument()
-        # FastAPI 侧不在这里 instrument —— 需要拿到 app 实例，由 main.py 调用
-        # `instrument_fastapi(app)`（见下），避免本模块反向依赖 app 单例。
-        _provider = provider  # 持有强引用，防止被 GC 回收导致 span 丢失
+        # FastAPI is not instrumented here -- we need the app instance, which is
+        # done by main.py calling `instrument_fastapi(app)` (see below), so this
+        # module does not reverse-depend on the app singleton.
+        _provider = provider  # hold a strong reference to prevent GC reclaim losing spans
         globals()["_provider"] = _provider
         _configured = True
         log.info("OTel tracing enabled: endpoint=%s service=%s", endpoint, service_name)
         return True
-    except Exception as exc:  # noqa: BLE001 —— 可观测性绝不能拖垮可用性
+    except Exception as exc:  # noqa: BLE001 -- observability must never drag down availability
         log.warning("OTel tracing disabled (init failed): %s", exc)
         return False
 
 
 def _traces_url(endpoint: str) -> str:
-    """把 base endpoint 规范成 OTLP/HTTP 的 traces 全路径。
+    """Normalize the base endpoint into the OTLP/HTTP full traces path.
 
-    用户可能填 `http://collector:4318` 或 `http://collector:4318/v1/traces`，
-    两种都要能用 —— 只补一次，避免拼成 `.../v1/traces/v1/traces`。
+    The user may fill `http://collector:4318` or
+    `http://collector:4318/v1/traces`; both must work -- only append once, to
+    avoid `.../v1/traces/v1/traces`.
     """
     base = endpoint.rstrip("/")
     if base.endswith("/v1/traces"):
@@ -112,7 +128,7 @@ def _traces_url(endpoint: str) -> str:
 
 
 def instrument_fastapi(app) -> bool:
-    """给 FastAPI app 挂上 OTel 中间件。未启用时静默跳过。"""
+    """Attach OTel middleware to the FastAPI app. Silently skips when not enabled."""
     if not _configured:
         return False
     try:
@@ -126,8 +142,9 @@ def instrument_fastapi(app) -> bool:
 
 
 def shutdown_tracing() -> None:
-    """冲刷未导出的 span。进程退出前调用，否则 BatchSpanProcessor 队列里
-    最后几秒的 span（恰好是关闭原因最相关的那段时间）会随进程一起消失。"""
+    """Flush unexported spans. Call before process exit, otherwise the last few
+    seconds of spans in the BatchSpanProcessor queue (exactly the most relevant
+    window for the shutdown reason) vanish with the process."""
     if not _configured:
         return
     try:

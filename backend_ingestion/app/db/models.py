@@ -1,14 +1,17 @@
-"""SQLAlchemy 2.0 ORM 模型（与 infra/init.sql 严格对齐）。
+"""SQLAlchemy 2.0 ORM models (strictly aligned with infra/init.sql).
 
-要点：
-- robot_telemetry 的复合主键为 (time, robot_id) ——
-  TimescaleDB 要求唯一索引必须包含分区列 time，故顺序不可颠倒。
-- 三个关节列与 detail 必须是 **JSONB**（init.sql 用的是 JSONB）。
-  用 sqlalchemy.JSON 会编译成 `JSON`（非 JSONB）→ ORM 侧 DDL 与库内真实类型不一致，
-  元数据漂移且丢失 JSONB 的索引/操作符能力。
-  见 models.py:RobotTelemetry.joint_temperatures 的 JSONB 标注。
+Key points:
+- robot_telemetry's composite primary key is (time, robot_id) --
+  TimescaleDB requires the unique index to include the partitioning column time,
+  so the order must not be reversed.
+- The three joint columns and detail must be **JSONB** (init.sql uses JSONB).
+  Using sqlalchemy.JSON compiles to `JSON` (not JSONB) -> ORM-side DDL diverges
+  from the real in-DB type, causing metadata drift and losing JSONB's index/
+  operator capabilities.
+  See models.py:RobotTelemetry.joint_temperatures's JSONB annotation.
 
-写路径由 asyncpg 批量完成（见 services/batch_writer.py），此处模型用于读路径与 schema 对齐。
+The write path is done by asyncpg in bulk (see services/batch_writer.py); the
+models here are for the read path and schema alignment.
 """
 
 from __future__ import annotations
@@ -59,18 +62,24 @@ class RobotMetadata(Base):
 
 
 class RobotAlert(Base):
-    """告警表（hypertable）。主键真实存在，与 init.sql:75-88 逐列一致。
+    """Alert table (hypertable). The primary key really exists, column-by-column
+    consistent with init.sql:75-88.
 
-    身份语义：`(time, alert_id)`。
-    - 主键必须含分区列 time（TimescaleDB 硬性要求），故顺序为 (time, alert_id)。
-    - alert_id 是列级真实主键（BIGSERIAL，库侧自增），唯一标识「同机器人同时刻的
-      哪一条」告警：一轮 tick 内 motor_temp / battery_low / joint_stuck 各有独立
-      去重窗口，同一 (time, robot_id) 可合法对应多条不同规则告警。
-    - 因此**不再需要**映射级 `__mapper_args__` 权宜之计：ORM 身份与 DDL 同源，
-      `metadata.create_all()` 不会与 init.sql 漂移。
-    - ack_at / ack_by 由订单 19 建字段、订单 17 接 ack/unack 端点；
-      escalated 由订单 17 新增（severity=3 超时未确认的升级标记）；
-      suppressed / suppressed_by 由订单 35 新增（抑制落库，使 REST 契约可查被压制的告警）。
+    Identity semantics: `(time, alert_id)`.
+    - The primary key must include the partitioning column time (hard TimescaleDB
+      requirement), so the order is (time, alert_id).
+    - alert_id is a real column-level primary key (BIGSERIAL, DB-side auto-
+      increment), uniquely identifying "which one" of multiple alerts at the same
+      robot and same moment: within one tick, motor_temp / battery_low /
+      joint_stuck each have an independent dedup window, so the same (time,
+      robot_id) can legitimately correspond to multiple different-rule alerts.
+    - Therefore the mapping-level `__mapper_args__` stopgap is **no longer
+      needed**: ORM identity and DDL are co-sourced, and `metadata.create_all()`
+      will not drift from init.sql.
+    - ack_at / ack_by were created by order 19 and wired to ack/unack endpoints by
+      order 17; escalated was added by order 17 (severity=3 unacked-timeout
+      escalation flag); suppressed / suppressed_by were added by order 35
+      (suppression persisted, so the REST contract can query suppressed alerts).
     """
 
     __tablename__ = "robot_alert"
@@ -85,18 +94,24 @@ class RobotAlert(Base):
     ack: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     ack_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     ack_by: Mapped[str | None] = mapped_column(Text)
-    # 订单 17：severity=3 且超时未 ack → TRUE。索引 idx_alert_escalation（init.sql:206）。
+    # Order 17: severity=3 and unacked past timeout -> TRUE. Index
+    # idx_alert_escalation (init.sql:206).
     escalated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    # 订单 35：被抑制标记（TRUE = 已判定被压制，不推 WS 不通知，但行保留可查）。
-    # 列序、类型、默认值必须与 init.sql 的 robot_alert 逐列一致 ——
-    # tests/test_schema_contract.py 的 `init["cols"] == orm["cols"]` 会当场抓漂移。
+    # Order 35: suppression flag (TRUE = judged suppressed: no WS push, no
+    # notification, but row retained and queryable).
+    # Column order, type, default must be column-by-column consistent with
+    # init.sql's robot_alert -- tests/test_schema_contract.py's
+    # `init["cols"] == orm["cols"]` will catch drift on the spot.
     suppressed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    # 压制它的根因规则（offline / motor_temp / ...），与 suppressed 成对（TRUE 时必非空）。
+    # The root-cause rule that suppressed it (offline / motor_temp / ...), paired
+    # with suppressed (must be non-null when TRUE).
     suppressed_by: Mapped[str | None] = mapped_column(Text)
 
-    # 显式声明 PK 列顺序 (time, alert_id)，与 init.sql 逐字一致。
-    # 必要性（已实测）：SQLAlchemy 生成复合 PK 时会把 BIGSERIAL 列排到最前，
-    # 只靠 primary_key=True 会编译出 PRIMARY KEY (alert_id, time)，
-    # 与 init.sql 的 (time, alert_id) 不同序 —— 契约测试会（且应当）报错。
-    # 列声明顺序也与 init.sql 的物理列顺序一致。
+    # Explicitly declare PK column order (time, alert_id), verbatim consistent
+    # with init.sql.
+    # Necessity (measured): when SQLAlchemy generates a composite PK it puts the
+    # BIGSERIAL column first; relying only on primary_key=True would compile
+    # PRIMARY KEY (alert_id, time), differing in order from init.sql's
+    # (time, alert_id) -- the contract test would (and should) error.
+    # The column declaration order also matches init.sql's physical column order.
     __table_args__ = (PrimaryKeyConstraint("time", "alert_id"),)
