@@ -46,7 +46,7 @@ When assembling the command the project name must be consistent: use **one** `do
 
 ```
 prometheus.yml
-├── prometheus                 localhost:9090      自身健康
+├── prometheus                 localhost:9090      self-health
 ├── robot_backend              backend:8000/m      backend_ingestion/app/metrics.py
 ├── robot_alert_engine         alert-engine:8001/m alert_engine/app/metrics.py
 ├── emqx                       emqx:18083/api/v5/prometheus/stats

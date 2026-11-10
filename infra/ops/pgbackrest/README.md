@@ -46,35 +46,35 @@ Under `pgbackrest/*` there are only the `test` / `doc` repos. So this solution b
 ## Quick start
 
 ```bash
-# 1) 在宿主机 .env 配好仓库加密口令（禁止明文入库）
+# 1) configure the repo encryption passphrase in host .env (no plaintext in repo)
 echo "PGBACKREST_CIPHER_PASS=$(openssl rand -base64 48)" >> .env
 
-# 1.5) 生成双端 TLS 证书（compose 挂载 pgbackrest-certs 卷的前置条件）
-#      完整命令见 docs/DR-RUNBOOK.md §5.1
+# 1.5) generate mutual-TLS certs (prerequisite for the compose-mounted pgbackrest-certs volume)
+#      full commands: docs/DR-RUNBOOK.md §5.1
 
-# 2) 起带灾备的一整套
+# 2) bring up the full DR-enabled stack
 docker compose -f infra/docker-compose.yml \
                -f infra/ops/pgbackrest/docker-compose.dr.yml up -d --build
 
-# 3) 初始化 stanza + 校验
+# 3) initialize stanza + verify
 DC="docker compose -f infra/docker-compose.yml -f infra/ops/pgbackrest/docker-compose.dr.yml"
 $DC exec pgbackrest pgbackrest --stanza=robot_monitor --log-level-console=info stanza-create
 $DC exec pgbackrest /opt/dr/run-backup.sh check
 
-# 4) 首份全量
+# 4) first full backup
 $DC exec pgbackrest /opt/dr/run-backup.sh full
 ```
 
 ## How to run verification (two levels, don't mix)
 
 ```bash
-# ① 静态：文件形态对不对（无需 Docker，秒级）
+# ① static: is the file shape correct (no Docker, sub-second)
 bash infra/ops/pgbackrest/verify-drs.sh
 
-# ② 运行时：备份到底可不可用（需要真实仓库，**有真断言**）
-#    在 pgbackrest 仓库边车内执行：
-/opt/dr/verify.sh              # L1 校验和 + L2 新鲜度
-/opt/dr/verify.sh --scratch    # 追加 L3：真恢复到临时目录并比对行数/时间戳
+# ② runtime: is the backup actually usable (requires a real repo, **with real assertions**)
+#    run inside the pgbackrest repo sidecar container:
+/opt/dr/verify.sh              # L1 checksum + L2 freshness
+/opt/dr/verify.sh --scratch    # add L3: actually restore to a temp dir and compare row counts/timestamps
 ```
 
 ① only guarantees "the config won't fail to start due to syntax problems"; **backup usability is judged only by ②**.

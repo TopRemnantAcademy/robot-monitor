@@ -31,8 +31,8 @@ Row width is accumulated column by column from `robot_telemetry` in `infra/init.
 | **Total** | **≈ 1.34 KB/row** |
 
 ```
-1000 row/s × 86400 s = 86,400,000 行/天
-86,400,000 × 1.34 KB ≈ 116 GB/天（原始）
+1000 row/s × 86400 s = 86,400,000 rows/day
+86,400,000 × 1.34 KB ≈ 116 GB/day (raw)
 ```
 
 | Retention | Raw | 10x compression | 15x compression |

@@ -43,10 +43,10 @@ python mock_fleet.py --robots 100 --broker localhost --port 1883 --fault-rate 0.
 `mock_fleet.py` only produces independent waveforms; `task_sim.py` layers a **task scheduler** on top of its payload constructor and MQTT publisher, making multiple robots' telemetry temporally correlated (assembly-line station rotation / fault propagation). The correlation comes entirely from the scheduling logic, **with no hardcoded correlation coefficients**.
 
 ```bash
-# 流水线场景：纯仿真 + 相关性断言（无需 broker，用于验收）
+# pipeline scenario: pure simulation + correlation assertion (no broker needed, for acceptance)
 python simulator/task_sim.py --scenario pipeline --stations 3 --cycle 12 --no-broker --duration 60
 
-# 故障传播场景：发给真实 broker
+# fault-propagation scenario: send to a real broker
 python simulator/task_sim.py --scenario fault --robots 12 --broker localhost --port 1883
 ```
 
@@ -65,16 +65,16 @@ Acceptance evidence: the `--no-broker` mode exports 60s of telemetry and compute
 G-7 once planned to use AgentVerse to drive this simulator for a 100-robot task-level simulation. **Measured verdict: not feasible**: AgentVerse is an LLM text-dialog framework; its `step()` returns natural-language `Message`s and produces no telemetry values. The probe script is kept here for reproduction and future review:
 
 ```bash
-# 前置：clone AgentVerse（物料不随本仓交付）+ 装依赖（aliyun 镜像）
+# prerequisite: clone AgentVerse (materials not shipped with this repo) + install deps (aliyun mirror)
 git clone --depth 1 https://github.com/OpenBMB/AgentVerse /tmp/agentverse_probe
 pip install -i https://mirrors.aliyun.com/pypi/simple/ \
     numpy "openai==1.1.0" "httpx==0.25.0" colorama colorlog \
     py3langid "tiktoken==0.5.1" rapidfuzz "langchain==0.0.157" scikit-learn astunparse
 
-# 三探针：import gate / 构造 100 agent / step 产物是否命中遥测契约
+# three probes: import gate / construct 100 agents / does the step output hit the telemetry contract
 python simulator/agentverse_probe/verify_agentverse.py --av-root /tmp/agentverse_probe
 
-# 对照实验：给一个可用的本地 LLM，看是否就产遥测（结论：仍不产）
+# controlled experiment: give it a working local LLM and see if it produces telemetry (conclusion: still does not)
 bash simulator/agentverse_probe/verify_with_local_llm.sh
 ```
 

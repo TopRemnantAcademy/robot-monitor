@@ -53,15 +53,15 @@ The backend `backend_ingestion` must be started first (`ws://localhost:8000/ws/r
 ```
 src/
 ├── components/
-│   ├── FleetOverviewCards.tsx   # 100 卡网格（grid-cols-5 md:grid-cols-10）
-│   ├── HealthSummaryHeader.tsx  # 顶栏三 KPI + WS 状态点
-│   ├── RobotDetailDrawer.tsx    # 单机关节诊断 Drawer（480px）
-│   ├── JointHeatmap.tsx         # 24 关节温度色块阵列
-│   └── AlertLogTable.tsx        # 底部实时告警流（200px）
-├── hooks/useRobotWebSocket.ts   # WS 接入 + 100ms 节流 + 指数退避重连
-├── store/robotStore.ts          # Zustand 状态树
-├── types/robot.ts               # 类型 + 24 关节键名（spec/00 §5.5）
-├── theme/tokens.ts              # 设计 token（spec/03 §3）
+│   ├── FleetOverviewCards.tsx   # 100-card grid (grid-cols-5 md:grid-cols-10)
+│   ├── HealthSummaryHeader.tsx  # top-bar 3 KPIs + WS status dot
+│   ├── RobotDetailDrawer.tsx    # per-robot joint-diagnosis Drawer (480px)
+│   ├── JointHeatmap.tsx         # 24-joint temperature color-block array
+│   └── AlertLogTable.tsx        # bottom real-time alert stream (200px)
+├── hooks/useRobotWebSocket.ts   # WS connection + 100ms throttle + exponential-backoff reconnect
+├── store/robotStore.ts          # Zustand state tree
+├── types/robot.ts               # types + 24-joint key names (spec/00 §5.5)
+├── theme/tokens.ts              # design tokens (spec/03 §3)
 ├── App.tsx  main.tsx  index.css
 ```
 
