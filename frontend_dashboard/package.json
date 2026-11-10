@@ -2,6 +2,7 @@
   "name": "robot-monitor-frontend-dashboard",
   "private": true,
   "version": "1.0.0",
+  "license": "AGPL-3.0",
   "type": "module",
   "description": "100 台人形机器人工厂监控大屏（spec/03）",
   "scripts": {

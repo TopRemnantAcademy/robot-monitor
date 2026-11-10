@@ -13,7 +13,7 @@ High-frequency telemetry (100 robots × 10 Hz = 1000 msg/s) flows over MQTT → 
 
 <p align="center">
   <a href="https://github.com/TopRemnantAcademy/robot-monitor/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/TopRemnantAcademy/robot-monitor/actions/workflows/ci.yml/badge.svg"></a>
-  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green">
+  <img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL3.0-green">
   <img alt="i18n EN|KO|ZH|JA" src="https://img.shields.io/badge/i18n-EN%20%7C%20KO%20%7C%20ZH%20%7C%20JA-blue">
   <img alt="Stack FastAPI|TimescaleDB|React" src="https://img.shields.io/badge/stack-FastAPI%20%7C%20TimescaleDB%20%7C%20React-9cf">
   <img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-brightgreen">
@@ -227,4 +227,4 @@ Good first issues are tagged [`good first issue`](https://github.com/TopRemnantA
 
 ## License
 
-[MIT](./LICENSE) — free for commercial and personal use.
+[AGPL-3.0](./LICENSE) — free software; network use requires offering source.
