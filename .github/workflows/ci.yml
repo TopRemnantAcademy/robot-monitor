@@ -23,14 +23,14 @@ concurrency:
 
 jobs:
   backend:
-    name: Backend tests (Python 3.11)
+    name: Backend tests (Python 3.12)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
       - uses: actions/setup-node@v5
         with:
           node-version: "20"   # test_payload_contract.py needs node to actually run payload.js
@@ -102,7 +102,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
       - name: Install Rust toolchain (builds iso21423_rs extension)
         uses: dtolnay/rust-toolchain@stable
       - name: Set up venv, install deps, build Rust extension
@@ -179,7 +179,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
       - uses: actions/setup-node@v5
         with:
           node-version: "20"
@@ -217,7 +217,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
       # The README tech-stack graph is GENERATED from the real manifests
       # (docker-compose.yml, requirements.txt, package.json) by
       # scripts/gen_techstack.py. This job regenerates it and fails the build

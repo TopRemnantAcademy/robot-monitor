@@ -73,7 +73,7 @@ main:
   push:
     - name: test
       docker:
-        image: python:3.11
+        image: python:3.12
       stages:
         - name: pytest
           script: |
@@ -217,7 +217,7 @@ main:
       # not by a human remembering to change it in three places (Order 32's change added lines to push/PR but not crontab,
       # exactly the inevitable result of "three copies maintained by hand").
       docker: &e2e-image
-        image: python:3.11-slim
+        image: python:3.12-slim
       services: [docker]
       env: &e2e-env
         # 40s x 100 units x 10Hz ~ 40,000 frames, plenty of headroom over the 30,000 threshold.
@@ -374,7 +374,7 @@ main:
   pull_request:
     - name: test
       docker:
-        image: python:3.11
+        image: python:3.12
       stages:
         - name: pytest
           script: |
