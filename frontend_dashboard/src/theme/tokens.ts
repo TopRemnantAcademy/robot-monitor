@@ -1,5 +1,5 @@
-// spec/03 §3 / orders/05「设计 token」—— 严格照抄，禁止自改色。
-// 组件里需要按数值计算颜色（电量条、温度色块）时统一从这里取，避免散落魔法字符串。
+// spec/03 §3 / orders/05 "design tokens" — copy strictly, do not change colors yourself.
+// When components need value-based colors (battery bar, temperature blocks), take them from here to avoid scattered magic strings.
 
 import type { RobotStatus } from '../types/robot';
 
@@ -14,11 +14,11 @@ export const COLORS = {
   statusWarning: '#F1C40F',
   statusFault: '#FF4D4F',
   statusOffline: '#5A6472',
-  /** Drawer 遮罩：#0B0E14 的 55% 透明度（由 bgBase 派生，不引入新色相） */
+  /** Drawer overlay: #0B0E14 at 55% opacity (derived from bgBase, no new hue). */
   overlay: 'rgba(11, 14, 20, 0.55)',
 } as const;
 
-/** 字号/圆角 token（spec/03 §3）。需要内联 style 时引用此处。 */
+/** Font-size / radius tokens (spec/03 §3). Reference here when an inline style is needed. */
 export const FONT = {
   cardId: { fontSize: '13px', fontWeight: 600 },
   metric: { fontSize: '11px', fontWeight: 400 },
@@ -30,7 +30,7 @@ export const RADIUS = {
   drawer: '0px',
 } as const;
 
-/** status_code → 状态色（0 离线 / 1 正常 / 2 预警 / 3 故障） */
+/** status_code → state color (0 offline / 1 normal / 2 warning / 3 fault). */
 export const STATUS_COLOR: Record<RobotStatus, string> = {
   0: COLORS.statusOffline,
   1: COLORS.statusNormal,
@@ -39,29 +39,29 @@ export const STATUS_COLOR: Record<RobotStatus, string> = {
 };
 
 export const STATUS_LABEL: Record<RobotStatus, string> = {
-  0: '离线',
-  1: '正常',
-  2: '预警',
-  3: '故障',
+  0: 'offline',
+  1: 'normal',
+  2: 'warning',
+  3: 'fault',
 };
 
 /**
- * 大屏展示态：online / warning / fault / stale / offline（ISSUE #77）。
+ * Big-screen display state: online / warning / fault / stale / offline (ISSUE #77).
  *
- * 为什么不直接用 `status_code`：`status_code` 是**机器人自述**的最后一帧状态，
- * 它不回答"这台机器现在还活着吗"。后端下发的 `is_online` 才回答。
- * 于是卡片上有两个正交的维度：**还在不在**（is_online）× **状态好不好**（status_code）。
- * 这个枚举把两维压成一个可着色的值，且**不让 status_code 覆盖离线结论** ——
- * 一台停报的"预警"机器人必须显示「失联」，而不是继续保持黄色预警。
+ * Why not use `status_code` directly: `status_code` is the robot's own last reported frame state,
+ * it does not answer "is this machine still alive right now". The backend's `is_online` answers that.
+ * So a card has two orthogonal dimensions: **still present** (is_online) × **state good or not** (status_code).
+ * This enum collapses the two into one colorable value, and **never lets status_code override the offline conclusion** ——
+ * a "warning" robot that stopped reporting must show "lost", not stay yellow warning.
  *
- * stale 与 offline 的区别（两者同色但不同事）：
- *   stale   —— 收到过、现在停了：**该去现场**；
- *   offline —— 从未收到过：init.sql 预置的空位，开机即可消。
- * 两者都不在线，但处置动作完全不同，故不合并。
+ * Difference between stale and offline (same color, different meaning):
+ *   stale   —— received before, now stopped: **go on-site**;
+ *   offline —— never received: an empty slot pre-seeded by init.sql, cleared once powered on.
+ * Both are offline, but the handling action is completely different, so they are not merged.
  */
 export type RobotDisplayState = 'online' | 'warning' | 'fault' | 'stale' | 'offline';
 
-/** 展示态 → 色。stale / offline 复用 statusOffline 灰：不新造色相（spec/03 §3）。 */
+/** Display state → color. stale / offline reuse statusOffline gray: no new hue (spec/03 §3). */
 export const DISPLAY_COLOR: Record<RobotDisplayState, string> = {
   online: COLORS.statusNormal,
   warning: COLORS.statusWarning,
@@ -70,26 +70,26 @@ export const DISPLAY_COLOR: Record<RobotDisplayState, string> = {
   offline: COLORS.statusOffline,
 };
 
-/** 展示态 → 文案。`stale` → 「失联」（而不是「离线」），见 RobotDisplayState 注释。 */
+/** Display state → text. `stale` → "lost" (not "offline"); see RobotDisplayState comment. */
 export const DISPLAY_LABEL: Record<RobotDisplayState, string> = {
-  online: '正常',
-  warning: '预警',
-  fault: '故障',
-  stale: '失联',
-  offline: '离线',
+  online: 'normal',
+  warning: 'warning',
+  fault: 'fault',
+  stale: 'lost',
+  offline: 'offline',
 };
 
-/** 展示态是否代表「后端已判定不在线」（stale / offline 两种）。 */
+/** Whether the display state means "backend judged it offline" (the two kinds: stale / offline). */
 export function isOfflineDisplay(state: RobotDisplayState): boolean {
   return state === 'stale' || state === 'offline';
 }
 
 /**
- * 由「后端在线标志 + 最后一帧状态码 + 是否有过数据」推出展示态。
+ * Derive the display state from "backend online flag + last frame status code + whether telemetry was ever seen".
  *
- * @param isOnline 后端下发的在线标志（ISSUE #77；唯一权威）
- * @param statusCode 最后一帧自述状态（仅在 isOnline 为真时参与着色）
- * @param hasSeen 是否收到过遥测（区分「失联」与「从未上报」）
+ * @param isOnline the backend's online flag (ISSUE #77; sole authority)
+ * @param statusCode the last self-reported status (only affects coloring when isOnline is true)
+ * @param hasSeen whether telemetry was ever received (distinguishes "lost" from "never reported")
  */
 export function robotDisplayState(
   isOnline: boolean,
@@ -97,37 +97,37 @@ export function robotDisplayState(
   hasSeen: boolean,
 ): RobotDisplayState {
   if (!isOnline) return hasSeen ? 'stale' : 'offline';
-  // 在线时 status_code 才有意义（它是"此刻状态好不好"），离线时它只是最后一帧的残影。
+  // status_code only matters when online (it means "how good is the state right now"); offline it is just the last frame's afterimage.
   if (statusCode === 3) return 'fault';
   if (statusCode === 2) return 'warning';
   return 'online';
 }
 
 /**
- * 是否**收到过**该机器人遥测。
+ * Whether telemetry for this robot was **ever received**.
  *
- * `last_seen` 由后端下发（ISSUE #77），`null` = 从未上报。
- * 老后端不给该字段时回落为「从未上报」——保守，且与 `offlinePlaceholder` 语义一致。
+ * `last_seen` is sent by the backend (ISSUE #77), `null` = never reported.
+ * When an old backend omits this field, fall back to "never reported" — conservative, and consistent with `offlinePlaceholder` semantics.
  */
 export function hasEverReported(robot: { last_seen?: number | null }): boolean {
   return robot.last_seen !== null && robot.last_seen !== undefined;
 }
 
-/** 温度色阶：0~50 绿 / 50~70 黄 / >70 红（spec/03 §5.1 第 4 条、§5.4） */
+/** Temperature color scale: 0~50 green / 50~70 yellow / >70 red (spec/03 §5.1 item 4, §5.4). */
 export function tempColor(temp: number): string {
   if (temp > 70) return COLORS.statusFault;
   if (temp >= 50) return COLORS.statusWarning;
   return COLORS.statusNormal;
 }
 
-/** 电量色阶：>50 绿 / 15~50 黄 / <15 红（spec/03 §5.1 第 3 条） */
+/** Battery color scale: >50 green / 15~50 yellow / <15 red (spec/03 §5.1 item 3). */
 export function batteryColor(pct: number): string {
   if (pct < 15) return COLORS.statusFault;
   if (pct <= 50) return COLORS.statusWarning;
   return COLORS.statusNormal;
 }
 
-/** 告警 severity → 色（沿用状态色，避免自创配色） */
+/** Alert severity → color (reuses state colors to avoid inventing a palette). */
 export function severityColor(severity: number): string {
   if (severity >= 3) return COLORS.statusFault;
   if (severity === 2) return COLORS.statusWarning;

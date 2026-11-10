@@ -1,18 +1,18 @@
-// spec/03 §5.5 —— 底部实时告警流（固定高 200px，新告警置顶）
-// 订单 17 T4：加确认按钮（仅 admin）、已确认降噪、升级标记、筛选、分页。
-// 订单 35 T3：被抑制项行内标「已抑制」（降视觉权重、**行不消失**）+
-//             「显示已抑制」开关（默认关：抑制项不进未确认流）。
+// spec/03 §5.5 —— bottom real-time alert stream (fixed height 200px, newest alerts on top)
+// Order 17 T4: added acknowledge button (admin only), acknowledged-noise reduction, escalation marker, filtering, pagination.
+// Order 35 T3: suppressed items marked inline "Suppressed" (reduced visual weight, **row does not disappear**) +
+//             "Show suppressed" toggle (default off: suppressed items don't enter the unacknowledged stream).
 //
-// 【两个数据源，职责不同 —— 这是本组件最重要的设计点】
-//   - WS `type:"alert"`：**增量**新告警的实时推送（spec/00 §5.2 ③）。只含"刚发生"，
-//     且 ack/escalated 这类**事后变化**不会推给你。
-//   - `GET /alerts`：**权威分页视图**。含 ack/escalated 的当前值、支持筛选与分页。
-// 因此本表以 REST 为权威（决定"有哪些行、每行 ack 状态"），WS 只负责把最新一条
-// prepend 进来，让值班员不用手动刷新就能看到新告警。筛选/翻页时重拉 REST。
+// NOTE — Two data sources with different responsibilities (this is the most important design point of this component):
+//   - WS `type:"alert"`: **incremental** real-time push of new alerts (spec/00 §5.2 ③). Only contains "just happened",
+//     and post-hoc changes like ack/escalated are NOT pushed to you.
+//   - `GET /alerts`: **authoritative paginated view**. Contains current values of ack/escalated, supports filtering and pagination.
+// So this table treats REST as authoritative (decides "which rows exist, each row's ack state"), WS only prepends the latest one,
+// so the operator can see new alerts without manually refreshing. Re-fetch REST on filter/page change.
 //
-// 【性能：告警是低频事件，其余 UI 应静】
-// 行组件 memo：新告警到达时只有新增那一行挂载，已有行 props 未变 → 不重渲染。
-// 确认按钮的回调用 useCallback 固定引用，否则 memo 恒失效（同 R-01 §6 护栏）。
+// NOTE — Performance: alerts are low-frequency events, the rest of the UI should stay quiet:
+// Row component memo: when a new alert arrives, only the new row mounts, existing rows' props unchanged → no re-render.
+// The ack button's callback uses useCallback to fix the reference, otherwise memo is always defeated (same R-01 §6 guardrail).
 
 import { memo, useCallback, useEffect, useState } from 'react';
 import { COLORS, FONT, severityColor } from '../theme/tokens';
@@ -22,7 +22,7 @@ import { ackAlert, fetchAlerts, unackAlert } from '../auth/alertsApi';
 import type { AlertApiItem, AlertFilter, RobotAlert } from '../types/robot';
 import { useI18n } from '../i18n/I18nProvider';
 
-/** 每页条数。20 是"一屏可见 + 翻页不频繁"的折中（200px 高度可见约 6 行）。 */
+/** Items per page. 20 is a compromise of "visible on one screen + infrequent paging" (≈6 rows visible at 200px height). */
 export const ALERT_PAGE_SIZE = 20;
 
 function formatTime(ts: number): string {
@@ -40,7 +40,7 @@ export const RULE_KEY: Record<string, string> = {
   joint_stuck: 'rule.joint_stuck',
 };
 
-/** 统一行模型：WS 实时条目与 REST 条目都归一到这里再渲染。 */
+/** Unified row model: both WS real-time items and REST items are normalized here before rendering. */
 interface Row {
   id: string;
   alertId: number | null;
@@ -51,9 +51,9 @@ interface Row {
   ts: number;
   ack: boolean;
   escalated: boolean;
-  /** 被抑制（订单 35）：只降视觉权重，不隐藏（可追溯是硬前提）。 */
+  /** Suppressed (Order 35): only reduce visual weight, don't hide (traceability is a hard requirement). */
   suppressed: boolean;
-  /** 压制它的根因规则，如 offline / motor_temp；未抑制时为 null。 */
+  /** The root-cause rule that suppresses it, e.g. offline / motor_temp; null when not suppressed. */
   suppressedBy: string | null;
 }
 
@@ -68,8 +68,8 @@ function fromWsAlert(a: RobotAlert): Row {
     ts: a.ts,
     ack: a.ack ?? false,
     escalated: a.escalated ?? false,
-    // WS 流里恒为 false/undefined —— 被抑制的告警**不会**被 PUBLISH（见 types/robot.ts）。
-    // 写出来是为了让 Row 的来源映射对称，读的时候不必分情况。
+    // In the WS stream this is always false/undefined —— suppressed alerts are **not** PUBLISHed (see types/robot.ts).
+    // Written out to make the Row's source mapping symmetric, so you don't need to branch when reading.
     suppressed: a.suppressed ?? false,
     suppressedBy: a.suppressed_by ?? null,
   };
@@ -101,16 +101,16 @@ interface AlertRowProps {
 
 const AlertRow = memo(function AlertRow({ row, canAck, busy, onOpen, onToggleAck }: AlertRowProps) {
   const { t } = useI18n();
-  // 已确认 / 已抑制：降噪（灰度 + opacity），但**不隐藏** ——
-  // 派工单禁止项 5（订单 17）与订单 35 的「行不得消失」，都是可追溯要求。
-  // 两者共用一个 dimmed 表达：视觉上「不用现在处理」，语义由行内文字标签区分。
+  // Acknowledged / suppressed: reduce noise (grayscale + opacity), but **don't hide** ——
+  // work-order prohibition #5 (Order 17) and Order 35's "rows must not disappear" are both traceability requirements.
+  // Both share one dimmed expression: visually "no need to handle now", semantics distinguished by inline text labels.
   const dimmed = row.ack || row.suppressed;
   return (
     <div
       className="w-full flex items-center gap-3 px-3 py-0.5 whitespace-nowrap"
       style={{
         borderBottom: `1px solid ${COLORS.border}`,
-        // 升级告警左侧加一条醒目竖条（不改背景，避免整行抢眼到看不清文字）
+        // Escalated alert gets a prominent vertical bar on the left (doesn't change background, to avoid the whole row being so eye-catching you can't read the text)
         boxShadow: row.escalated ? `inset 3px 0 0 ${COLORS.statusWarning}` : undefined,
         opacity: dimmed ? 0.45 : 1,
         filter: dimmed ? 'grayscale(1)' : undefined,
@@ -161,10 +161,10 @@ const AlertRow = memo(function AlertRow({ row, canAck, busy, onOpen, onToggleAck
           </span>
         )}
         {row.suppressed && (
-          // 订单 35：被抑制行必须**在场**且可归因。title 带上根因规则，
-          // 让「这条为什么没弹出来」在告警台内就能回答 —— 不必换到日志系统。
-          // 用 textSecondary 而非 statusFault/Warning：抑制不是故障，
-          // 是「根因已知，衍生症状无处置价值」，配色不该喊成一次新事故。
+          // Order 35: suppressed rows must be **present** and attributable. The title carries the root-cause rule,
+          // so "why didn't this pop up" can be answered within the alert console —— no need to switch to the log system.
+          // Use textSecondary rather than statusFault/Warning: suppression is not a fault,
+          // it's "root cause known, derivative symptom has no handling value", the color shouldn't scream like a new incident.
           <span
             className="shrink-0"
             style={{ ...FONT.metric, color: COLORS.textSecondary }}
@@ -228,11 +228,11 @@ export default function AlertLogTable() {
   const [page, setPage] = useState(0);
   const [pageRows, setPageRows] = useState<Row[]>([]);
   const [total, setTotal] = useState(0);
-  // 订单 35：抑制项默认**不进**未确认流（它们是"根因已知、暂时无处置价值"的行，
-  // 混在待处理列表里只会掩盖真正要动手的那几条）。开关打开后才拉取。
+  // Order 35: suppressed items are **not** in the unacknowledged stream by default (they are rows where "root cause is known, temporarily no handling value",
+  // mixed into the to-do list they'd only mask the few that actually need action). Only fetched after the toggle is turned on.
   const [showSuppressed, setShowSuppressed] = useState(false);
-  // 被抑制行的分页游标。刻意**独立**于 `page`：抑制行是少数，
-  // 与主列表共用一个 offset 会让两边互相带偏页码（且 total 语义也不同）。
+  // The pagination cursor for suppressed rows. Deliberately **independent** from `page`: suppressed rows are few,
+  // sharing one offset with the main list would skew each other's page numbers (and the total semantics also differ).
   const [suppressedPage, setSuppressedPage] = useState(0);
   const [suppressedRows, setSuppressedRows] = useState<Row[]>([]);
   const [suppressedTotal, setSuppressedTotal] = useState(0);
@@ -240,8 +240,8 @@ export default function AlertLogTable() {
   const [suppressedLoading, setSuppressedLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
-  // 已本地确认/撤回的告警 ID → 最新状态。REST 重拉后用它对账，
-  // 避免"刚确认完翻页回来又变未确认"（后端其实已改，只是拉取有延迟）。
+  // Locally acked/withdrawn alert IDs → their latest state. Reconciled against this after a REST re-fetch,
+  // so a just-acked alert doesn't flip back to unacked when paging back (backend already changed, just fetch lag).
   const [localAck, setLocalAck] = useState<Record<number, boolean>>({});
 
   const load = useCallback(
@@ -249,9 +249,9 @@ export default function AlertLogTable() {
       setLoading(true);
       setError(null);
       try {
-        // `suppressed: false` —— 主列表显式排除被抑制行（订单 35）。
-        // 不靠"后端默认排除"，因为契约刻意保持中立（见 router.list_alerts 的注释）；
-        // 展示口径由本组件表达，别的地方（如 Drawer 的 200 条拉取）可以要全集。
+        // `suppressed: false` —— the main list explicitly excludes suppressed rows (Order 35).
+        // Not relying on "backend excludes by default", because the contract deliberately stays neutral (see router.list_alerts comment);
+        // the display contract is expressed by this component; other places (e.g. the Drawer's 200-item fetch) may want the full set.
         const res = await fetchAlerts({
           filter: f,
           limit: ALERT_PAGE_SIZE,
@@ -269,7 +269,7 @@ export default function AlertLogTable() {
     [t],
   );
 
-  // 被抑制行单独一页：只在开关打开时拉（关着就不打这次 DB —— 默认视图零额外开销）。
+  // Suppressed rows get their own page: only fetched when the toggle is on (when off, don't hit the DB —— zero extra cost for the default view).
   const loadSuppressed = useCallback(async (p: number) => {
     setSuppressedLoading(true);
     setError(null);
@@ -289,18 +289,18 @@ export default function AlertLogTable() {
     }
   }, [t]);
 
-  // 首屏 + 筛选/翻页变化时重拉。WS 新告警不触发重拉（否则每来一条都打 DB）。
+  // Re-fetch on first screen + filter/page change. WS new alerts don't trigger re-fetch (otherwise every incoming one would hit the DB).
   useEffect(() => {
     void load(filter, page);
   }, [filter, page, load]);
 
-  // 开关打开时拉被抑制页；关闭时保留已拉到的数据（再打开无需重拉，减少 DB 往返）。
+  // Fetch the suppressed page when the toggle is on; when off, keep the already-fetched data (re-opening needs no re-fetch, reducing DB round-trips).
   useEffect(() => {
     if (showSuppressed) void loadSuppressed(suppressedPage);
   }, [showSuppressed, suppressedPage, loadSuppressed]);
 
-  // 把 REST 行与本地 ack 状态、以及 WS 最新告警合并。
-  // WS 只在第 0 页且"全部"筛选下 prepend —— 翻页/筛选时插新行会让分页错位。
+  // Merge REST rows with local ack state, and the latest WS alerts.
+  // WS only prepends on page 0 with the "all" filter —— inserting new rows during paging/filtering would misalign pagination.
   const rows: Row[] = (() => {
     const base = pageRows.map((r) => {
       if (r.alertId !== null && r.alertId in localAck && localAck[r.alertId] !== r.ack) {
@@ -309,7 +309,7 @@ export default function AlertLogTable() {
       return r;
     });
     if (page !== 0 || filter !== 'all') return base;
-    // WS 流里「未在 REST 页中出现」的新告警（用 robot+ts+rule 去重）
+    // New alerts in the WS stream that are "not in the REST page" (dedupe by robot+ts+rule)
     const seen = new Set(base.map((r) => `${r.robotId}-${r.ts}-${r.ruleId}`));
     const extra = wsAlerts
       .map(fromWsAlert)
@@ -325,9 +325,9 @@ export default function AlertLogTable() {
       try {
         const res = row.ack ? await unackAlert(id) : await ackAlert(id);
         setLocalAck((prev) => ({ ...prev, [id]: res.ack }));
-        // 同步更新 WS 流里的那条（若存在），让列表立即可见变化。
+        // Sync-update the matching one in the WS stream (if present), so the list reflects the change immediately.
         applyAlertAck(id, { ack: res.ack, ack_at: res.ack_at, ack_by: res.ack_by });
-        // 幂等命中（changed=false）时不报错：状态已是目标值，UI 无忧。
+        // On idempotent hit (changed=false) don't error: the state is already the target value, UI is fine.
       } catch (e) {
         setError(e instanceof Error ? e.message : t('error.op'));
       } finally {
@@ -376,9 +376,9 @@ export default function AlertLogTable() {
         </div>
         <div className="flex items-center gap-3">
           {error && <span style={{ ...FONT.metric, color: COLORS.statusFault }}>{error}</span>}
-          {/* 订单 35：抑制项的显示开关。刻意做成**方框**而非常驻筛选 tab ——
-              它表达的是"要不要看见被压住的行"，与「看哪一类」的 tab 是正交维度，
-              用同一个视觉语言会让人以为它与「全部/未确认/已升级」互斥。 */}
+          {/* Order 35: the display toggle for suppressed items. Deliberately made a **checkbox** rather than a persistent filter tab ——
+              it expresses "whether to see the suppressed rows", orthogonal to the "which category" tabs,
+              using the same visual language would make people think it's mutually exclusive with "all/unacknowledged/escalated". */}
           <button
             type="button"
             role="switch"
@@ -444,9 +444,9 @@ export default function AlertLogTable() {
                 onToggleAck={handleToggleAck}
               />
             ))}
-            {/* 被抑制区：与主行流**同一张表**（同一 AlertRow 组件、同一条代码路径），
-                只在末尾加一条分隔说明。不做成第二个表格/弹层 —— 抑制项与正常项
-                除了标记外形态完全一致，分开渲染只会让两处样式各自漂移。 */}
+            {/* Suppressed zone: the **same table** as the main row flow (same AlertRow component, same code path),
+                only adds a separator note at the end. Not made into a second table/popover —— suppressed items and normal items
+                are identical in form except for the marker; separate rendering would only let the two styles drift apart. */}
             {showSuppressed && (
               <>
                 <div

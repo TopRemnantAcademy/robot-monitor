@@ -1,47 +1,47 @@
-// 认证状态（订单 15 T4）
+// Auth state (Order 15 T4)
 //
-// 【为什么用 sessionStorage 而不是 localStorage】
-// 大屏是**公共终端**：车间里一台挂在墙上的机器，谁走过去都能操作。
-// localStorage 跨标签、跨会话常驻，上一班的人登出后下一个人开浏览器还是登录态；
-// sessionStorage 随标签页关闭即清，符合"一人一班、用完即走"的物理语义。
-// 订单 15 禁止项明确：禁止 localStorage。
+// 【Why sessionStorage instead of localStorage】
+// The dashboard is a **public terminal**: a machine hung on the wall in the workshop that anyone walking by can operate.
+// localStorage persists across tabs and sessions — after the previous shift logs out, the next person opening the browser is still logged in;
+// sessionStorage is cleared when the tab closes, matching the physical semantics of "one person per shift, leave when done".
+// Order 15's forbidden items explicitly prohibit localStorage.
 //
-// 【为什么 token 不放进 Zustand store】
-// token 只在两处被读：fetch 组装请求头、WS 拼 URL。放进全局 store 会让
-// 每次登录/登出触发整棵组件树的订阅通知，而它本身不参与渲染。
+// 【Why the token is not put into the Zustand store】
+// The token is only read in two places: assembling the fetch request header and building the WS URL. Putting it in the global store would
+// trigger subscription notifications across the entire component tree on every login/logout, while it itself does not participate in rendering.
 
 const TOKEN_KEY = 'robotmonitor.jwt';
 
-/** 会话内读取 token（未登录返回 null）。 */
+/** Read token within the session (returns null if not logged in). */
 export function getToken(): string | null {
   try {
     return window.sessionStorage.getItem(TOKEN_KEY);
   } catch {
-    // 隐私模式/存储被禁用时 sessionStorage 会抛。返回 null = 未登录，
-    // 让用户看到登录页，而不是整个应用白屏。
+    // In private mode / when storage is disabled, sessionStorage throws. Returning null = not logged in,
+    // so the user sees the login page instead of the whole app white-screening.
     return null;
   }
 }
 
-/** 写入 token。仅登录成功后调用。 */
+/** Write token. Only called after successful login. */
 export function setToken(token: string): void {
   try {
     window.sessionStorage.setItem(TOKEN_KEY, token);
   } catch {
-    // 同上：写不进去就只能维持"未登录"，不能让它冒泡成未捕获异常。
+    // Same as above: if it can't be written, just stay "not logged in"; don't let it bubble up as an uncaught exception.
   }
 }
 
-/** 清除 token。登出与 401 拦截共用这一个出口。 */
+/** Clear token. Shared single exit point for logout and 401 interception. */
 export function clearToken(): void {
   try {
     window.sessionStorage.removeItem(TOKEN_KEY);
   } catch {
-    /* 见 getToken */
+    /* see getToken */
   }
 }
 
-/** 带 Authorization 头的请求头。无 token 时不加，让后端返回 401。 */
+/** Request headers with the Authorization header. When there's no token, don't add it, letting the backend return 401. */
 export function authHeaders(extra?: Record<string, string>): Record<string, string> {
   const token = getToken();
   return {

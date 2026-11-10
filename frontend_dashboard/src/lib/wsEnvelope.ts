@@ -1,27 +1,27 @@
-// 订单 18 T4 —— WS 信封的**开发模式**校验。
+// Order 18 T4 —— WS envelope **dev-mode** validation.
 //
-// 【为什么 WS 要单独出一套契约】
-// FastAPI 的 /openapi.json **不描述 WebSocket**（OpenAPI 3.1 规范里没有 WS 的位置），
-// 所以 openapi-typescript 生成的 api.gen.ts 里天然没有 snapshot/telemetry/alert。
-// 于是 WS 三分支（backend_ingestion/app/main.py:288/303/305）是契约盲区 ——
-// 事实来源是 docs/contracts/ws-envelope.schema.json，本模块用 ajv 消费它。
+// WHY WS NEEDS ITS OWN CONTRACT
+// FastAPI's /openapi.json does **not describe WebSocket** (the OpenAPI 3.1 spec has no place for WS),
+// so openapi-typescript's generated api.gen.ts naturally has no snapshot/telemetry/alert.
+// Thus the WS three branches (backend_ingestion/app/main.py:288/303/305) are a contract blind spot ——
+// the source of truth is docs/contracts/ws-envelope.schema.json, and this module consumes it with ajv.
 //
-// 【为什么只在开发模式校验（AGENTS.md §3 性能护栏）】
-// 100 台 × 10Hz = 1000 msg/s。ajv 单帧校验虽只微秒级，但乘以 1000/s 后
-// 会稳定吃掉主线程时间片，与「100ms 节流防重渲染」的既定方针直接冲突。
-// 因此：`import.meta.env.DEV` 为真才加载 ajv + schema（动态 import，
-// 生产构建时 Vite 静态替换成 false，整段连同 ajv 一起被 tree-shake 掉）。
-// 生产环境**零开销**，卡片上不会多出一个校验分支。
+// WHY ONLY VALIDATE IN DEV MODE (AGENTS.md §3 performance guardrail)
+// 100 robots × 10Hz = 1000 msg/s. A single ajv frame check is only microseconds, but multiplied by 1000/s
+// it would steadily eat the main-thread time slice, directly conflicting with the "100ms throttle prevents re-render" policy.
+// Therefore: ajv + schema are loaded only when `import.meta.env.DEV` is true (dynamic import,
+// which Vite statically replaces with false in production builds, tree-shaking the whole thing along with ajv).
+// Production environment has **zero overhead**; no extra validation branch appears on the cards.
 
 import type { WsEnvelope } from '../types/robot';
 
-/** 校验结果：ok 或 人类可读的错误列表（不抛异常，调用方自行决定怎么处理）。 */
+/** Validation result: ok or a human-readable list of errors (does not throw; the caller decides how to handle it). */
 export interface EnvelopeCheck {
   ok: boolean;
   errors: string[];
 }
 
-/** 生产环境直通：不加载 ajv、不引入 schema。 */
+/** Production short-circuit: does not load ajv or import the schema. */
 export function shouldValidate(): boolean {
   return import.meta.env.DEV;
 }
@@ -31,19 +31,19 @@ let ajvErrors: (() => string[]) | null = null;
 let loadPromise: Promise<void> | null = null;
 
 /**
- * 懒加载 ajv + schema（仅开发模式调用）。
+ * Lazily load ajv + schema (called only in dev mode).
  *
- * 用 dynamic import 而不是顶层 import：顶层 import 会让 ajv（约 120 kB）
- * 无论 DEV 与否都进 bundle，直接违反"体积无显著增长"的验收项。
+ * Use a dynamic import rather than a top-level import: a top-level import would pull ajv (~120 kB)
+ * into the bundle regardless of DEV, directly violating the "no significant bundle growth" acceptance item.
  */
 async function ensureValidator(): Promise<void> {
   if (loadPromise) return loadPromise;
   loadPromise = (async () => {
-    // 用 ajv 的 2020-12 入口：schema 声明的是 draft 2020-12（$defs / oneOf）。
-    // schema 走 Vite 的 `?raw` 内联（见 vite.config.ts 的 define 注释）：
-    // docs/contracts/ 在 tsconfig 的 include（仅 ["src"]）之外，直接 import json
-    // 会 TS2307；`?raw` 让 Vite 在构建期把文件内容变成字符串，**单一事实来源仍在
-    // docs/contracts/ws-envelope.schema.json**，不需要维护第二份拷贝。
+    // Use ajv's 2020-12 entry: the schema declares draft 2020-12 ($defs / oneOf).
+    // The schema is inlined via Vite's `?raw` (see the define comment in vite.config.ts):
+    // docs/contracts/ is outside tsconfig's include (only ["src"]), so importing the json directly
+    // would be TS2307; `?raw` makes Vite turn the file content into a string at build time, and the
+    // **single source of truth remains docs/contracts/ws-envelope.schema.json** —— no second copy to maintain.
     const [{ default: Ajv2020 }, schemaModule] = await Promise.all([
       import('ajv/dist/2020'),
       import('../../../docs/contracts/ws-envelope.schema.json?raw'),
@@ -61,11 +61,12 @@ async function ensureValidator(): Promise<void> {
 }
 
 /**
- * 校验一个已 JSON.parse 的信封。**仅开发模式**返回真实结果；
- * 生产模式恒返回 `{ok: true}` 且不做任何工作。
+ * Validate an already JSON.parse'd envelope. Returns the real result **in dev mode only**;
+ * in production it always returns `{ok: true}` and does no work.
  *
- * 用法（见 hooks/useRobotWebSocket.ts 的 handleEnvelope）：
- * 校验失败**不丢弃消息**（避免开发期白屏），而是打 console.error 提示契约漂移。
+ * Usage (see hooks/useRobotWebSocket.ts's handleEnvelope):
+ * on validation failure it does **not drop the message** (to avoid a white screen in dev),
+ * but logs a console.error hinting at contract drift.
  */
 export function checkEnvelope(envelope: unknown): EnvelopeCheck {
   if (!shouldValidate() || !validateFn || !ajvErrors) return { ok: true, errors: [] };
@@ -74,15 +75,15 @@ export function checkEnvelope(envelope: unknown): EnvelopeCheck {
 }
 
 /**
- * 开发模式初始化：加载校验器。返回一个已就绪的判定函数。
- * 在测试里可直接 `await initWsValidator()` 后再断言 checkEnvelope 的结果。
+ * Dev-mode initialization: load the validator. Returns a ready-to-use judgment function.
+ * In tests you can directly `await initWsValidator()` before asserting checkEnvelope's result.
  */
 export async function initWsValidator(): Promise<void> {
   if (!shouldValidate()) return;
   await ensureValidator();
 }
 
-/** 便于类型收窄：把 unknown 断言为 WsEnvelope（仅供已通过校验的调用方使用）。 */
+/** Convenience for type narrowing: assert unknown to WsEnvelope (for callers that already passed validation only). */
 export function asWsEnvelope(value: unknown): WsEnvelope | null {
   return value && typeof value === 'object' && 'type' in value ? (value as WsEnvelope) : null;
 }

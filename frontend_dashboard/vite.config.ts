@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
-// spec/03 §2：纯 SPA 构建产物。dev 端口固定 5173，便于与后端 WS/8000 联调。
+// spec/03 §2: pure SPA build output. Dev port is fixed at 5173 to ease joint debugging with the backend WS/8000.
 export default defineConfig({
   plugins: [react()],
   server: {

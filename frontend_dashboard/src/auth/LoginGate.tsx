@@ -1,12 +1,12 @@
-// 登录门（订单 15 T4）
+// Login gate (Order 15 T4)
 //
-// 形态说明：派工单说"本单可先在 App.tsx 前置一个 gate"，故这里不做独立路由页，
-// 而是在 App 顶层按 authStore.status 三态渲染：
-//   unknown        → 极简占位（首屏在探 token，避免登录页闪一下）
-//   anonymous      → 登录表单
-//   authenticated  → 正常大屏
+// Form note: the work order says "this order can first add a gate in front of App.tsx", so this is not a standalone route page,
+// but renders in three states at the App top level based on authStore.status:
+//   unknown        → minimal placeholder (first screen probing token, avoid login-page flash)
+//   anonymous      → login form
+//   authenticated  → normal dashboard
 //
-// 样式沿用 design token（spec/03 §3），不引入新的色值。
+// Styling reuses design tokens (spec/03 §3), no new color values introduced.
 
 import { useState } from 'react';
 import { login } from './api';
@@ -22,7 +22,7 @@ export default function LoginGate({ children }: { children: React.ReactNode }) {
         className="h-screen w-screen flex items-center justify-center"
         style={{ backgroundColor: COLORS.bgBase, color: COLORS.textSecondary }}
       >
-        正在检查登录状态…
+        Checking login status…
       </div>
     );
   }
@@ -44,11 +44,11 @@ function LoginForm() {
     setError(null);
     try {
       await login(email, password);
-      // 登录只换来 token，role 还在 token 里 —— 复用 bootstrap 的同一路径：
-      // 它拿到 /users/me 的结果后写入 store。这里直接调用可避免读两次接口。
+      // Login only exchanges for a token; the role is still inside the token —— reuse bootstrap's same path:
+      // it writes to the store after getting the /users/me result. Calling it directly here avoids reading the API twice.
       await useAuthStore.getState().bootstrap();
     } catch (err) {
-      setError(err instanceof Error ? err.message : '登录失败');
+      setError(err instanceof Error ? err.message : 'Login failed');
     } finally {
       setBusy(false);
     }
@@ -69,10 +69,10 @@ function LoginForm() {
           width: 340,
         }}
       >
-        <h1 style={{ ...FONT.title, color: COLORS.textPrimary }}>机器人工厂监控</h1>
+        <h1 style={{ ...FONT.title, color: COLORS.textPrimary }}>Robot Factory Monitor</h1>
 
         <label className="flex flex-col gap-1" style={{ color: COLORS.textSecondary, ...FONT.metric }}>
-          邮箱
+          Email
           <input
             type="email"
             required
@@ -85,7 +85,7 @@ function LoginForm() {
         </label>
 
         <label className="flex flex-col gap-1" style={{ color: COLORS.textSecondary, ...FONT.metric }}>
-          密码
+          Password
           <input
             type="password"
             required
@@ -109,7 +109,7 @@ function LoginForm() {
           className="py-2 font-semibold disabled:opacity-60"
           style={{ backgroundColor: COLORS.accent, color: '#FFFFFF', borderRadius: RADIUS.card }}
         >
-          {busy ? '登录中…' : '登录'}
+          {busy ? 'Signing in…' : 'Sign in'}
         </button>
       </form>
     </div>

@@ -1,10 +1,10 @@
-// 认证相关类型（订单 15 T4）
-// 字段名逐字对齐后端 app/auth/schemas.py:UserRead，禁止改名。
+// Auth-related types (Order 15 T4)
+// Field names are verbatim-aligned with the backend app/auth/schemas.py:UserRead; do not rename.
 
-/** 两级 RBAC 角色。与后端 app/auth/roles.py:Role 一一对应。 */
+/** Two-level RBAC roles. Corresponds one-to-one with the backend app/auth/roles.py:Role. */
 export type Role = 'viewer' | 'admin';
 
-/** `GET /users/me` 的响应。 */
+/** Response of `GET /users/me`. */
 export interface CurrentUser {
   id: number;
   email: string;
@@ -13,7 +13,7 @@ export interface CurrentUser {
   role: Role;
 }
 
-/** `POST /auth/jwt/login` 的响应。 */
+/** Response of `POST /auth/jwt/login`. */
 export interface LoginResult {
   accessToken: string;
   tokenType: string;

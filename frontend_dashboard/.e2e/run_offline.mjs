@@ -1,9 +1,9 @@
-// 验证要求 6：100 台无数据时渲染离线占位卡（humanoid-001..100），不得空白
+// Verify requirement 6: when there is no data for the 100 robots, render offline placeholder cards (humanoid-001..100); must not be blank.
 import puppeteer from 'puppeteer';
 const browser = await puppeteer.launch({ args: ['--no-sandbox'] });
 const page = await browser.newPage();
 await page.setViewport({ width: 1600, height: 900 });
-// 阻断 WS，模拟「后端不可达」
+// Block WS to simulate "backend unreachable".
 await page.evaluateOnNewDocument(() => {
   class DeadWS { constructor() { setTimeout(() => this.onclose && this.onclose(), 50); } close() {} send() {} }
   DeadWS.OPEN = 1; DeadWS.CONNECTING = 0;
@@ -19,26 +19,26 @@ const info = await page.evaluate(() => {
   return {
     cardCount: cards.length,
     first: ids[0], last: ids[ids.length - 1],
-    allOffline: cards.every((c) => c.innerText.includes('离线')),
-    offlineLabels: (body.match(/离线/g) || []).length,
-    onlineRate: (body.match(/在线率\s*\n?([\d.]+%)/) || [])[1],
-    wsDot: body.includes('WS 断开重连中'),
+    allOffline: cards.every((c) => c.innerText.includes('Offline')),
+    offlineLabels: (body.match(/Offline/g) || []).length,
+    onlineRate: (body.match(/Online rate\s*\n?([\d.]+%)/) || [])[1],
+    wsDot: body.includes('WS Reconnecting'),
   };
 });
-console.log('卡片数        :', info.cardCount, '(期望 100)');
-console.log('首/末 ID      :', info.first, '/', info.last, '(期望 H-001 / H-100)');
-console.log('全部为离线    :', info.allOffline);
-console.log('“离线”出现次数:', info.offlineLabels);
-console.log('在线率        :', info.onlineRate, '(期望 0.0%)');
-console.log('WS 状态点     :', info.wsDot ? '断开重连中 ✅' : '❌');
+console.log('Card count      :', info.cardCount, '(expected 100)');
+console.log('First/last ID   :', info.first, '/', info.last, '(expected H-001 / H-100)');
+console.log('All offline     :', info.allOffline);
+console.log('"Offline" count :', info.offlineLabels);
+console.log('Online rate     :', info.onlineRate, '(expected 0.0%)');
+console.log('WS status dot   :', info.wsDot ? 'Reconnecting ✅' : '❌');
 await page.screenshot({ path: '/tmp/shot-offline.png' });
 
 const checks = [
-  ['无数据时仍渲染 100 张卡', info.cardCount === 100, info.cardCount],
-  ['ID 为 humanoid-001..100 本地生成', info.first === 'H-001' && info.last === 'H-100', `${info.first}/${info.last}`],
-  ['无数据时为离线占位（不空白）', info.allOffline, ''],
-  ['在线率 0.0%', info.onlineRate === '0.0%', info.onlineRate],
-  ['WS 断开时状态点提示', info.wsDot, ''],
+  ['Renders 100 cards even with no data', info.cardCount === 100, info.cardCount],
+  ['IDs humanoid-001..100 generated locally', info.first === 'H-001' && info.last === 'H-100', `${info.first}/${info.last}`],
+  ['Offline placeholder when no data (not blank)', info.allOffline, ''],
+  ['Online rate 0.0%', info.onlineRate === '0.0%', info.onlineRate],
+  ['WS status dot shown when disconnected', info.wsDot, ''],
 ];
 let fail = 0;
 for (const [n, ok, ex] of checks) { console.log(ok ? '  ✅' : '  ❌', n, ex !== '' ? `[${ex}]` : ''); if (!ok) fail++; }

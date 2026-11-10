@@ -1,21 +1,21 @@
-// 订单 35 T3 — 告警「抑制」呈现的组件测试（vitest + testing-library）。
+// Order 35 T3 — alert "suppression" presentation component test (vitest + testing-library).
 //
-// 钉住三件事（每一条都是"写错就退化"的点）：
-//   1. 被抑制行**必须在场**且带「已抑制」标记 + 根因规则的可读 title；
-//      「降视觉权重而非删除」是可追溯要求，行消失即视为回归。
-//   2. 「显示已抑制」开关默认**关**：主列表请求必须显式带 `suppressed=false`
-//      （抑制项不进未确认流）；打开后另发一条 `suppressed=true` 的请求。
-//   3. `RobotDetailDrawer` 的本机告警区同样标记 —— 且它**不**过滤 suppressed
-//      （排障时要看见"为什么没弹出来"）。
+// Pins down three things (each is a point where "writing it wrong causes regression"):
+//   1. Suppressed rows **must be present** with a "Suppressed" marker + readable root-cause-rule title;
+//      "reduce visual weight rather than delete" is a traceability requirement, a disappearing row is treated as regression.
+//   2. The "Show suppressed" toggle is **off** by default: the main list request must explicitly carry `suppressed=false`
+//      (suppressed items don't enter the unacknowledged stream); after turning on, a separate `suppressed=true` request is sent.
+//   3. `RobotDetailDrawer`'s local-alert area also marks —— and it does **not** filter suppressed
+//      (when troubleshooting you need to see "why didn't this pop up").
 //
-// 【网络层：受控 fetch 替身，不用 msw（Issue #78 根因）】
-//   happy-dom 会把全局 `Response`/`ReadableStream` 换成自己的实现，而 msw/node
-//   拦截器返回的 body 是 Node(undici) 的 ReadableStream —— happy-dom 的
-//   `Response.json()` 读不动这条流，200 用例会永久挂起（只读 res.status 的 500
-//   用例反而正常）。本仓 vitest 已切回 jsdom（vitest.config.ts 注释有完整实测记录），
-//   但为与既有 `RobotDetailDrawer.test.tsx` 保持同一写法（受控替身 + 断言真实 URL），
-//   这里继续用受控替身：它返回 Node 原生 `Response`，既绕开环境差异，
-//   又能抓住「URL 拼错 / 过滤参数漏传 / 字段改名」这类回归。
+// NOTE — Network layer: controlled fetch double, not msw (Issue #78 root cause):
+//   happy-dom overrides the global `Response`/`ReadableStream` with its own implementation, while msw/node
+//   interceptor-returned bodies are Node (undici) ReadableStreams —— happy-dom's
+//   `Response.json()` can't read this stream, the 200 case hangs forever (only the 500 case that reads res.status
+//   works normally). This repo's vitest has switched back to jsdom (vitest.config.ts comments have the full measured record),
+//   but to keep the same writing style as the existing `RobotDetailDrawer.test.tsx` (controlled double + assert real URL),
+//   here we continue with the controlled double: it returns the native Node `Response`, both bypassing environment differences,
+//   and catching regressions like "wrong URL / missing filter param / renamed field".
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
@@ -37,8 +37,8 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 /**
- * 一条**被抑制**的告警：humanoid-042 的 battery_low(sev2)，
- * 被同机 motor_temp(sev3) 压住 —— 与 alert_engine 的 InhibitionRecord 同形。
+ * A **suppressed** alert: humanoid-042's battery_low (sev2),
+ * pinned down by the same machine's motor_temp (sev3) —— same shape as alert_engine's InhibitionRecord.
  */
 const SUPPRESSED_ITEM = {
   alert_id: 21,
@@ -46,7 +46,7 @@ const SUPPRESSED_ITEM = {
   robot_id: 'humanoid-042',
   rule_id: 'battery_low',
   severity: 2,
-  message: '电量 17.4% 低于 20%',
+  message: 'Battery 17.4% below 20%',
   detail: { suppressed_reason: 'severity', suppressed_source_rule: 'motor_temp' },
   ack: false,
   ack_at: null,
@@ -56,14 +56,14 @@ const SUPPRESSED_ITEM = {
   suppressed_by: 'motor_temp',
 };
 
-/** 一条正常的未确认告警（对照组：必须**不被**标记）。*/
+/** A normal unacknowledged alert (control group: must **not** be marked). */
 const NORMAL_ITEM = {
   alert_id: 22,
   time: '2026-10-10T23:44:00Z',
   robot_id: 'humanoid-042',
   rule_id: 'joint_stuck',
   severity: 2,
-  message: '左肩关节卡死',
+  message: 'Left shoulder joint stuck',
   detail: null,
   ack: false,
   ack_at: null,
@@ -73,13 +73,13 @@ const NORMAL_ITEM = {
   suppressed_by: null,
 };
 
-/** 记录每次 /alerts 请求的完整 URL，供「过滤参数」断言。 */
+/** Records the full URL of each /alerts request, for the "filter param" assertion. */
 const alertsUrls: string[] = [];
 
 /**
- * 受控 fetch：按 URL 里的 `suppressed` 参数分流。
- * `suppressed=true` → 只有被抑制那条；否则 → 只有正常那条（模拟后端三态过滤）。
- * 这样「开关关着时错发 true / 打开时错发 false」都会立刻被断言抓住。
+ * Controlled fetch: routes by the `suppressed` param in the URL.
+ * `suppressed=true` → only the suppressed one; otherwise → only the normal one (simulating the backend's tri-state filter).
+ * This way "sends true when switch is off / sends false when switch is on" are both immediately caught by assertions.
  */
 function urlBehaviour(input: RequestInfo | URL): Response {
   const url = String(input);
@@ -90,10 +90,10 @@ function urlBehaviour(input: RequestInfo | URL): Response {
   return jsonResponse({ items, total: items.length, limit: ALERT_PAGE_SIZE, offset: 0 });
 }
 
-// —— ECharts 替身（与 RobotDetailDrawer.test.tsx 同写法）——
-// jsdom 没有 canvas，真渲染 ECharts 会抛 `Cannot read properties of null (reading
-// 'clearRect')`（本机实测，zrender 的 Layer.clear）。把 option dump 进 DOM 即可：
-// 本文件测的是抑制标记，图表怎么画像素不在范围内。
+// —— ECharts double (same writing style as RobotDetailDrawer.test.tsx) ——
+// jsdom has no canvas, rendering real ECharts throws `Cannot read properties of null (reading
+// 'clearRect')` (measured on this machine, zrender's Layer.clear). Just dump option into DOM:
+// this file tests the suppression marker, how the chart draws pixels is out of scope.
 vi.mock('echarts-for-react/lib/core', () => ({
   default: ({ option }: { option: unknown }) => (
     <pre data-testid="echarts-option">{JSON.stringify(option)}</pre>
@@ -131,63 +131,63 @@ function telemetry(id = 'humanoid-042'): RobotTelemetry {
 }
 
 /**
- * 每个用例开头复位替身与请求记录（用例之间不共享调用历史）。
+ * Reset the double and request records at the start of each case (cases don't share call history).
  *
- * **刻意不用 `mockReset()`**：reset 会把实现清成 undefined，而 `render()` 之后
- * react-query 的首个查询可能在本次 `arm()` 与下一次 `arm()` 之间仍在途 ——
- * reset 造成"第一次请求返回 undefined.json 崩掉"的假失败（本机实测）。
- * 只换 implementation 即可达到"每例隔离"的目的。
+ * **Deliberately not using `mockReset()`**: reset clears the implementation to undefined, while after `render()`
+ * react-query's first query might still be in-flight between this `arm()` and the next `arm()` ——
+ * reset causes a fake failure of "first request returns undefined.json crash" (measured on this machine).
+ * Only swapping the implementation achieves the "per-case isolation" goal.
  */
 function arm(impl = urlBehaviour): void {
   alertsUrls.length = 0;
   fetchMock.mockImplementation(async (input: RequestInfo | URL) => impl(input));
 }
 
-describe('AlertLogTable — 抑制呈现（订单 35）', () => {
-  it('开关默认关闭：主列表请求带 suppressed=false，且不渲染被抑制行', async () => {
+describe('AlertLogTable — suppression presentation (Order 35)', () => {
+  it('Toggle off by default: main list request carries suppressed=false, and suppressed row not rendered', async () => {
     arm();
     render(<AlertLogTable />);
 
-    // 关键：主列表**显式**带 suppressed=false（不依赖后端默认值，契约刻意中立）
+    // Key: main list **explicitly** carries suppressed=false (doesn't rely on backend default, contract deliberately neutral)
     await waitFor(() => expect(alertsUrls.length).toBeGreaterThan(0));
     expect(alertsUrls[0]).toContain('suppressed=false');
-    // 正常行在场（ruleLabel: joint_stuck → Joint stuck）。
-    // 用 waitFor 而非 findByText：react-query 的 resolve → setState → 重渲染
-    // 是一条 async 链，findByText 的 1s 默认窗口在本机实测会偶发超时。
-    await waitFor(() => expect(screen.getByText('左肩关节卡死')).toBeInTheDocument());
+    // Normal row present (ruleLabel: joint_stuck → Joint stuck).
+    // Use waitFor not findByText: react-query's resolve → setState → re-render
+    // is an async chain, findByText's 1s default window occasionally times out on this machine.
+    await waitFor(() => expect(screen.getByText('Left shoulder joint stuck')).toBeInTheDocument());
     expect(screen.getByText('Joint stuck · S2')).toBeInTheDocument();
-    // 被抑制行不在默认视图里（后端已按 suppressed=false 过滤，前端也不该出现）
+    // Suppressed row not in default view (backend already filtered by suppressed=false, frontend shouldn't show it either)
     expect(screen.queryByText('⊘ Suppressed')).not.toBeInTheDocument();
-    // 开关是 off
+    // Switch is off
     expect(screen.getByRole('switch', { name: /Show suppressed/ })).toHaveAttribute(
       'aria-checked',
       'false',
     );
   });
 
-  it('打开「显示已抑制」后另拉 suppressed=true，并在行内标「已抑制」+ 根因 title', async () => {
+  it('After opening "Show suppressed" fetch suppressed=true separately, and mark "Suppressed" inline + root-cause title', async () => {
     const user = userEvent.setup();
     arm();
     render(<AlertLogTable />);
 
     await user.click(await screen.findByRole('switch', { name: /Show suppressed/ }));
 
-    // 专用查询带 suppressed=true（与主列表的 false 是两条独立请求）
+    // Dedicated query carries suppressed=true (a separate request from the main list's false)
     await waitFor(() => expect(alertsUrls.some((u) => u.includes('suppressed=true'))).toBe(true));
 
-    // 行**在场**（降视觉权重而非删除）且标记可见
+    // Row **present** (reduce visual weight rather than delete) and marker visible
     const tag = await screen.findByText('⊘ Suppressed');
     expect(tag).toBeInTheDocument();
-    // 归因可读：title 把根因规则翻译为英文标签（motor_temp → Motor overheat）
+    // Readable attribution: title translates the root-cause rule to an English label (motor_temp → Motor overheat)
     expect(tag).toHaveAttribute('title', 'Suppressed by higher-severity alert (root cause: Motor overheat)');
-    // 被抑制的行仍在表格里（同一 AlertRow 渲染路径），消息文本可查
-    expect(screen.getByText('电量 17.4% 低于 20%')).toBeInTheDocument();
-    // 关闭开关回默认态：标记随之消失（但不清空缓存，故不重拉）
+    // The suppressed row is still in the table (same AlertRow render path), message text queryable
+    expect(screen.getByText('Battery 17.4% below 20%')).toBeInTheDocument();
+    // Turn off switch back to default: marker disappears (but cache not cleared, so no refetch)
     await user.click(screen.getByRole('switch', { name: /Show suppressed/ }));
     await waitFor(() => expect(screen.queryByText('⊘ Suppressed')).not.toBeInTheDocument());
   });
 
-  it('被抑制行只降视觉权重：opacity/grayscale 生效但行不被移除（可追溯）', async () => {
+  it('Suppressed row only reduces visual weight: opacity/grayscale take effect but row not removed (traceable)', async () => {
     const user = userEvent.setup();
     arm();
     const { container } = render(<AlertLogTable />);
@@ -195,10 +195,10 @@ describe('AlertLogTable — 抑制呈现（订单 35）', () => {
     await user.click(await screen.findByRole('switch', { name: /Show suppressed/ }));
     const tag = await screen.findByText('⊘ Suppressed');
 
-    // 标记所在按钮的行容器 = 该行的根 div（AlertRow 的 <div> 包着一个 <button>）
+    // The row container of the marker's button = the row's root div (AlertRow's <div> wraps a <button>)
     const rowDiv = tag.closest('button')?.parentElement as HTMLElement | null;
     expect(rowDiv).not.toBeNull();
-    // 降权重：opacity < 1 且加灰度；**不是** display:none（行必须还在 DOM 里）
+    // Reduce weight: opacity < 1 and grayscale; **not** display:none (row must still be in DOM)
     expect(rowDiv!.style.opacity).toBe('0.45');
     expect(rowDiv!.style.filter).toBe('grayscale(1)');
     expect(rowDiv!.style.display).not.toBe('none');
@@ -206,12 +206,12 @@ describe('AlertLogTable — 抑制呈现（订单 35）', () => {
   });
 });
 
-describe('RobotDetailDrawer — 抑制标记（订单 35）', () => {
-  it('本机告警区标记「已抑制」，且**不**过滤 suppressed（排障要看见被压制的行）', async () => {
+describe('RobotDetailDrawer — suppression marker (Order 35)', () => {
+  it('Local-alert area marks "Suppressed", and does **not** filter suppressed (troubleshooting needs to see the suppressed rows)', async () => {
     arm((input) => {
       const url = String(input);
       if (url.includes('/alerts')) {
-        // 抽屉刻意不带 suppressed 参数：要全集，才能回答"为什么没弹出来"
+        // Drawer deliberately doesn't carry suppressed param: wants the full set, to answer "why didn't this pop up"
         return jsonResponse({ items: [SUPPRESSED_ITEM, NORMAL_ITEM], total: 2, limit: 200, offset: 0 });
       }
       return jsonResponse(SAMPLE_HISTORY);
@@ -223,22 +223,22 @@ describe('RobotDetailDrawer — 抑制标记（订单 35）', () => {
     render(<RobotDetailDrawer />);
 
     const aside = screen.getByRole('complementary');
-    // 被抑制行在场 + 标记可读（复用 AlertLogTable 的同一措辞与 token）
+    // Suppressed row present + marker readable (reuses AlertLogTable's same wording and token)
     const tag = await within(aside).findByText('⊘ Suppressed');
     expect(tag).toHaveAttribute('title', 'Suppressed by higher-severity alert (root cause: Motor overheat)');
-    expect(within(aside).getByText('电量 17.4% 低于 20%')).toBeInTheDocument();
-    // 对照组：正常告警 render 但**不带**标记 —— 标记只属于被抑制那条
-    expect(within(aside).getByText('左肩关节卡死')).toBeInTheDocument();
+    expect(within(aside).getByText('Battery 17.4% below 20%')).toBeInTheDocument();
+    // Control group: normal alert renders but **without** marker —— marker belongs only to the suppressed one
+    expect(within(aside).getByText('Left shoulder joint stuck')).toBeInTheDocument();
     expect(within(aside).getAllByText('⊘ Suppressed')).toHaveLength(1);
 
-    // 抽屉的请求**没有** suppressed 过滤参数（刻意要全集：排障时被压制的行才是重点）。
-    // 本轮用例用**自定义** implementation（按端点分流），不再走 `arm()` 的默认
-    // `urlBehaviour` —— 因此这条断言不用 `alertsUrls`（那是默认实现里的记录器），
-    // 而是从替身调用记录里取实际 URL。Drawer 先发 /history 再发 /alerts，
-    // 顺序不由测试决定，故扫描全部调用取那一条 /alerts。
+    // The Drawer's request has **no** suppressed filter param (deliberately wants the full set: suppressed rows are the focus when troubleshooting).
+    // This case uses a **custom** implementation (routes by endpoint), no longer going through `arm()`'s default
+    // `urlBehaviour` —— so this assertion doesn't use `alertsUrls` (that's the recorder in the default implementation),
+    // but takes the actual URL from the double's call records. The Drawer sends /history first then /alerts,
+    // order not decided by the test, so scan all calls to take that one /alerts.
     const calls = fetchMock.mock.calls.map((c) => String(c[0]));
     const alertCall = calls.find((u) => u.includes('/alerts'));
-    expect(alertCall, `未发出 /alerts 请求，实际：${JSON.stringify(calls)}`).toBeDefined();
+    expect(alertCall, `No /alerts request was issued; actual: ${JSON.stringify(calls)}`).toBeDefined();
     expect(alertCall).not.toContain('suppressed=');
   });
 });

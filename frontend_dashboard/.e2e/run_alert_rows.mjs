@@ -1,7 +1,7 @@
-// 验证：新告警到达只挂载 1 行，不重建整表（AlertLogTable memo 生效）
+// Verify: when a new alert arrives, only 1 row is mounted; the whole table is not rebuilt (AlertLogTable memo working).
 //
-// 反证方式：本用例在「告警行未 memo」的旧实现下必然失败 ——
-// 每 push 1 条告警，整表 60 行都会因 diff 失败而被重建。
+// Proof-by-contradiction: this case would inevitably fail under the old implementation where alert rows were not memoized ——
+// each pushed alert would cause all 60 rows to be rebuilt due to a failed diff.
 import { JSDOM } from 'jsdom';
 import { createRequire } from 'node:module';
 
@@ -25,16 +25,16 @@ const ReactDOM = require('react-dom/client');
 const React = require('react');
 
 const root = document.getElementById('root');
-// 入口已挂载，这里只需等待首次提交完成
+// The entry is already mounted; here we only wait for the first commit to finish.
 await new Promise((r) => setTimeout(r, 100));
 
 const mk = (i, sev) => ({
   robot_id: `humanoid-${String(i % 100 + 1).padStart(3, '0')}`,
   rule_id: 'motor_temp', severity: sev,
-  message: `关节温度过高 #${i}`, ts: Date.now() + i,
+  message: `Joint temp too high #${i}`, ts: Date.now() + i,
 });
 
-// ① 先预置 40 行（分多次 push，settle 后每行已 memo 稳定）
+// ① First pre-seed 40 rows (pushed in batches; after settling each row's memo is stable).
 for (let i = 0; i < 40; i++) {
   ReactDOM.flushSync ? ReactDOM.flushSync(() => {}) : null;
   window.__ALERT__.push(mk(i, 2));
@@ -43,7 +43,7 @@ for (let i = 0; i < 40; i++) {
 await new Promise((r) => setTimeout(r, 150));
 const beforeRows = (root.textContent.match(/S\d/g) || []).length;
 
-// ② 再 push 5 条新告警，统计新增 DOM 行数
+// ② Then push 5 new alerts and count the newly added DOM rows.
 window.__ALERT__.reset();
 for (let i = 100; i < 105; i++) {
   window.__ALERT__.push(mk(i, 3));
@@ -54,14 +54,14 @@ await new Promise((r) => setTimeout(r, 200));
 const created = window.__ALERT__.rowCreations;
 const afterRows = (root.textContent.match(/S\d/g) || []).length;
 
-console.log('预置告警行数      :', beforeRows, '(期望 40)');
-console.log('push 5 条后行数   :', afterRows, '(期望 45)');
-console.log('新增 DOM 行节点数 :', created, '(期望 ≈5，旧实现约 5×45=225)');
+console.log('Pre-seeded alert rows   :', beforeRows, '(expected 40)');
+console.log('Rows after pushing 5    :', afterRows, '(expected 45)');
+console.log('New DOM row nodes added :', created, '(expected ≈5; old impl ≈ 5×45=225)');
 
 const checks = [
-  ['前置告警确实渲染了 40 行', beforeRows === 40, beforeRows],
-  ['新告警被追加渲染', afterRows === beforeRows + 5, `${beforeRows}→${afterRows}`],
-  ['每条新告警只重建 1 行（memo 生效）', created > 0 && created <= 8, created],
+  ['Pre-seeded alerts really rendered 40 rows', beforeRows === 40, beforeRows],
+  ['New alerts appended', afterRows === beforeRows + 5, `${beforeRows}→${afterRows}`],
+  ['Each new alert rebuilds only 1 row (memo working)', created > 0 && created <= 8, created],
 ];
 let fail = 0;
 for (const [n, ok, ex] of checks) { console.log(ok ? '  ✅' : '  ❌', n, `[${ex}]`); if (!ok) fail++; }

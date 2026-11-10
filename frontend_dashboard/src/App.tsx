@@ -1,10 +1,10 @@
-// spec/03 §4 布局 —— 三区网格，整体 h-screen flex flex-col overflow-hidden（禁止页面级滚动）
+// spec/03 §4 layout — three-zone grid, overall h-screen flex flex-col overflow-hidden (no page-level scrolling)
 //
-// 订单 15：最外层套 LoginGate。未登录时**不渲染**任何看板组件，
-// 也就不会建立 WS 连接、不会发 REST 请求 —— 未授权者连"看板长什么样"都拿不到。
+// Order 15: wrap the outermost layer with LoginGate. When not logged in, **do not render** any dashboard component,
+// so no WS connection is established and no REST request is sent — an unauthorized user cannot even see "what the dashboard looks like".
 //
-// 订单 26（I-20）：App 外层套 ErrorBoundary（渲染异常兜底，不再白屏）+
-// QueryClientProvider（服务端状态缓存/重试；zustand 继续管 WS 客户端状态，两者互补）。
+// Order 26 (I-20): wrap App with ErrorBoundary (render-failure fallback, no more white screen) +
+// QueryClientProvider (server-side state caching/retry; zustand continues to manage WS client state, complementing each other).
 
 import { useEffect, useState } from 'react';
 import { ErrorBoundary } from 'react-error-boundary';
@@ -24,14 +24,14 @@ import { COLORS } from './theme/tokens';
 import { makeQueryClient } from './lib/queryClient';
 import ErrorFallback from './ErrorFallback';
 
-/** 已登录后的看板主体。只有在这里才建立 WS —— 未登录时不连。 */
+/** Dashboard body shown after login. WS is only established here — not when unauthenticated. */
 function Dashboard() {
-  // 全局唯一的 WS 接入点：100ms 节流刷库（spec/03 §6）
+  // Single global WS entry point: 100ms throttled store flush (spec/03 §6)
   useRobotWebSocket();
 
-  // 订单 16 T2：每 5s 打印一行重渲染摘要（wsMsgs / storeCommits / cardRenders / ratio）。
-  // 挂在 Dashboard（而非 App）是刻意的：未登录时 LoginGate 不渲染 Dashboard，
-  // 也就不会起一个只打印全 0 的定时器污染控制台。
+  // Order 16 T2: print one re-render summary every 5s (wsMsgs / storeCommits / cardRenders / ratio).
+  // Mounted on Dashboard (not App) deliberately: when unauthenticated, LoginGate does not render Dashboard,
+  // so it won't start a timer that only prints all-zeros and pollutes the console.
   useEffect(() => startObservabilityReport(), []);
 
   return (
@@ -40,8 +40,8 @@ function Dashboard() {
       style={{ backgroundColor: COLORS.bgBase, color: COLORS.textPrimary }}
     >
       <HealthSummaryHeader />
-      {/* UI 强化：机群级分布 + 趋势层（见 FleetHealthAnalytics 顶部说明）。
-          fixed-height strip（shrink-0），卡片墙 flex-1 自适应收缩，页面仍禁滚动。 */}
+      {/* UI enhancement: fleet-level distribution + trend layer (see FleetHealthAnalytics top comment).
+          fixed-height strip (shrink-0), card wall flex-1 auto-shrink, page still no scroll. */}
       <FleetHealthAnalytics />
       <SupportedRobotsPanel />
       <FleetOverviewCards />
@@ -54,20 +54,20 @@ function Dashboard() {
 export default function App() {
   const bootstrap = useAuthStore((s) => s.bootstrap);
 
-  // QueryClient 只在 App 生命周期内建一次：用 useState 惰性初始化，
-  // 避免每次 render 重建（重建会清空缓存）。React 18 StrictMode 双调用也只留一份。
+  // QueryClient is built only once within App's lifecycle: lazy init via useState,
+  // to avoid rebuilding on every render (which would clear the cache). React 18 StrictMode double-invoke also keeps just one.
   const [queryClient] = useState(makeQueryClient);
 
   useEffect(() => {
-    // 401 的统一出口：任何业务请求收到 401 都清 token 回登录页。
-    // 注册在 api 层而不是每个调用点上，避免漏掉新加的请求。
+    // Unified 401 exit: any business request receiving 401 clears token and returns to login.
+    // Registered at the api layer rather than at each call site, so newly added requests aren't missed.
     setUnauthorizedHandler(() => useAuthStore.getState().markAnonymous());
     void bootstrap();
     return () => setUnauthorizedHandler(null);
   }, [bootstrap]);
 
   return (
-    // ErrorBoundary 在 Provider 之外：Provider 自身异常也能被兜住。
+    // ErrorBoundary is outside the Provider: even the Provider's own exceptions are caught.
     <ErrorBoundary FallbackComponent={ErrorFallback}>
       <QueryClientProvider client={queryClient}>
         <LoginGate>

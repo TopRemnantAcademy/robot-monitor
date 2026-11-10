@@ -1,17 +1,17 @@
-// ISSUE #77 回归：在线判定必须来自后端 is_online，而不是 status_code。
+// ISSUE #77 regression: online judgment must come from the backend's is_online, not status_code.
 //
-// 【为什么单独一个文件而不并进组件测试】
-// 这一组断言的是 store/选择器的**纯逻辑**：给定一个 robots Map，在线数是多少。
-// 它不渲染组件、不需要 QueryClientProvider、不依赖 msw —— 于是它能独立于
-// Issue #78（Drawer 测试基座缺 provider）单独验证本单的核心结论。
-// 已验证的事实：本文件全绿、`RobotDetailDrawer.test.tsx` 仍 8/8 红 —— 两者互不干扰。
+// WHY A SEPARATE FILE INSTEAD OF MERGING INTO THE COMPONENT TEST
+// This group asserts the **pure logic** of the store/selectors: given a robots Map, what is the online count.
+// It doesn't render components, doesn't need QueryClientProvider, doesn't depend on msw —— so it can independently
+// verify this issue's core conclusion, separate from Issue #78 (Drawer test base missing a provider).
+// Verified fact: this file is all green while `RobotDetailDrawer.test.tsx` is still 8/8 red —— the two don't interfere.
 
 import { describe, expect, it } from 'vitest';
 import { offlinePlaceholder, selectStatusCounts, useRobotStore } from '../robotStore';
 import { isRobotOnline } from '../../types/robot';
 import type { RobotStatus, RobotTelemetry } from '../../types/robot';
 
-/** 造一份 telemetry：status_code 是**机器人自述**的最后一帧，is_online 是**后端**的判定。 */
+/** Build a telemetry: status_code is the robot's **self-reported** last frame, is_online is the **backend's** judgment. */
 function telemetry(
   robotId: string,
   statusCode: RobotStatus,
@@ -28,13 +28,13 @@ function telemetry(
   };
 }
 
-describe('ISSUE #77 · selectStatusCounts 只认 is_online', () => {
-  it('停报但最后一帧"正常"的机器人必须计入离线（旧实现会把它算作在线）', () => {
+describe('ISSUE #77 · selectStatusCounts only trusts is_online', () => {
+  it('A robot that stopped reporting but whose last frame was "normal" must count as offline (the old impl counted it online)', () => {
     const now = Math.floor(Date.now() / 1000);
     const robots = new Map<string, RobotTelemetry>([
-      // 1 小时前见过，之后停了；它自述的 status_code 停在 1（正常）
+      // Seen an hour ago, then stopped; its self-reported status_code is stuck at 1 (normal)
       ['humanoid-001', telemetry('humanoid-001', 1, false, now - 3600)],
-      // 正在上报
+      // Currently reporting
       ['humanoid-002', telemetry('humanoid-002', 3, true, now)],
     ]);
 
@@ -42,11 +42,11 @@ describe('ISSUE #77 · selectStatusCounts 只认 is_online', () => {
     expect(counts.total).toBe(2);
     expect(counts.online).toBe(1);
     expect(counts.offline).toBe(1);
-    // 「失联」= 收到过、现在停了 —— 与「从未上报」分开计数（处置动作不同）
+    // "Lost" = received before, now stopped —— counted separately from "never reported" (different handling action)
     expect(counts.stale).toBe(1);
   });
 
-  it('从未上报的占位卡是离线，且不算失联（首屏语义不得破坏）', () => {
+  it('A never-reported placeholder card is offline and not "lost" (first-paint semantics must not break)', () => {
     const robots = new Map<string, RobotTelemetry>([
       ['humanoid-001', offlinePlaceholder('humanoid-001')],
     ]);
@@ -54,30 +54,30 @@ describe('ISSUE #77 · selectStatusCounts 只认 is_online', () => {
     expect(counts.online).toBe(0);
     expect(counts.offline).toBe(1);
     expect(counts.stale).toBe(0);
-    // 占位必须显式声明 is_online=false，而不是让下游靠 status_code===0 去猜
+    // The placeholder must explicitly declare is_online=false, rather than letting the downstream guess from status_code===0
     expect(offlinePlaceholder('humanoid-002').is_online).toBe(false);
     expect(offlinePlaceholder('humanoid-002').last_seen).toBeNull();
   });
 
-  it('反向护栏：旧判据（status_code !== 0）在本场景下会给出不同结论', () => {
+  it('Reverse guardrail: the old criterion (status_code !== 0) yields a different conclusion in this scenario', () => {
     const stale = telemetry('humanoid-001', 1, false, 1_600_000_000);
     const newVerdict = isRobotOnline(stale);
     const oldVerdict = stale.status_code !== 0;
     expect(newVerdict).toBe(false);
     expect(oldVerdict).toBe(true);
-    // 两者不等价 ⇒ 上面的断言确实在盯着"依据是哪一个字段"
+    // The two are not equivalent ⇒ the assertions above are truly watching "which field is the basis"
     expect(newVerdict).not.toBe(oldVerdict);
   });
 
-  it('字段缺失（老后端）时保守判离线，不谎报在线', () => {
+  it('When a field is missing (legacy backend), conservatively judge offline, never falsely report online', () => {
     const legacy = { ...telemetry('humanoid-001', 1, false, null) } as Partial<RobotTelemetry>;
     delete legacy.is_online;
     expect(isRobotOnline(legacy as RobotTelemetry)).toBe(false);
   });
 });
 
-describe('ISSUE #77 · applySnapshot 不把后端下发的在线标志丢掉', () => {
-  it('snapshot 落库后仍保留 is_online / last_seen', () => {
+describe('ISSUE #77 · applySnapshot does not drop the backend-issued online flag', () => {
+  it('is_online / last_seen are preserved after the snapshot is persisted', () => {
     const now = Math.floor(Date.now() / 1000);
     useRobotStore.getState().applySnapshot([telemetry('humanoid-007', 2, true, now)]);
     const got = useRobotStore.getState().robots.get('humanoid-007');
@@ -85,7 +85,7 @@ describe('ISSUE #77 · applySnapshot 不把后端下发的在线标志丢掉', (
     expect(got?.last_seen).toBe(now);
     expect(got?.status_code).toBe(2);
 
-    // 快照里没出现的机器人回落到离线占位（首屏 100 张卡的骨架必须还在）
+    // Robots absent from the snapshot fall back to offline placeholder (the first-paint 100-card skeleton must remain)
     const missing = useRobotStore.getState().robots.get('humanoid-008');
     expect(missing?.is_online).toBe(false);
   });

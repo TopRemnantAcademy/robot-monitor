@@ -1,37 +1,36 @@
-// spec/03 §7 类型定义（与 spec/00 §5.2 信封对齐）
+// spec/03 §7 type definitions (aligned with the spec/00 §5.2 envelope)
 //
-// 【订单 18 · 契约即代码】REST 侧类型不再手写，改为**从后端 /openapi.json 生成**：
-//   docs/contracts/openapi.snapshot.json  →  src/types/api.gen.ts（openapi-typescript）
-//   本文件做**桥接（re-export）**，对外导出名一个都不改，组件无需改动。
+// ORDER 18 · CONTRACT AS CODE: REST-side types are no longer hand-written, but **generated from the backend /openapi.json**:
+//   docs/contracts/openapi.snapshot.json  →  src/types/api.gen.ts (openapi-typescript)
+//   This file does a **bridge (re-export)**, keeping every exported name unchanged so components need no change.
 //
-// 为什么用桥接而不是直接改组件 import：
-//   10 个文件从本模块 import 类型（`grep -rn "types/robot" src/`），
-//   直接把 `RobotTelemetry` 换成 `components['schemas']['RobotTelemetryOut']`
-//   会波及全部调用点，且生成名一旦随后端改名就会全线崩。
-//   bridge 只在这一个文件里做名字映射，爆炸半径 = 1 个文件。
+// Why a bridge instead of changing component imports directly:
+//   10 files import types from this module (`grep -rn "types/robot" src/`),
+//   replacing `RobotTelemetry` with `components['schemas']['RobotTelemetryOut']`
+//   would touch every call site, and if a generated name later changes with the backend the whole line breaks.
+//   The bridge does the name mapping in just this one file; blast radius = 1 file.
 //
-// 手写与生成的分工：
-//   - **生成**：所有 REST 响应（`/robots`、`/robots/{id}/history`、`/healthz`）——
-//     它们的字段由后端 response_model 决定，人手抄写必然漂移（本仓已真实翻车过一次）。
-//   - **手写**：WS 信封（snapshot/telemetry/alert）—— WebSocket 不在 OpenAPI 描述范围内，
-//     FastAPI **不会**把 WS 路由写进 /openapi.json。其机器可读契约见
-//     `docs/contracts/ws-envelope.schema.json`，前端由 `src/lib/wsEnvelope.ts` 在
-//     开发模式下用 ajv 校验。
-
+// Division of labor between hand-written and generated:
+//   - **Generated**: all REST responses (`/robots`, `/robots/{id}/history`, `/healthz`) ——
+//     their fields are decided by the backend response_model; hand-copying inevitably drifts (this repo already truly crashed once).
+//   - **Hand-written**: the WS envelope (snapshot/telemetry/alert) —— WebSocket is outside OpenAPI's description scope,
+//     FastAPI **will not** write WS routes into /openapi.json. Its machine-readable contract is
+//     `docs/contracts/ws-envelope.schema.json`, which the frontend validates with ajv in
+//     dev mode via `src/lib/wsEnvelope.ts`.
 import type { components } from './api.gen';
 
-// --------------------------------------------------------------- 生成类型的快捷别名
+// --------------------------------------------------------------- Short aliases for generated types
 //
-// 直接 re-export 生成类型本身（而不是复制字段），保证「生成即事实」：
-// 后端删一个字段 → 重新生成 → 这里立刻编译报错，不会静默留一个幽灵类型。
+// Directly re-export the generated types themselves (rather than copying fields), guaranteeing "generated = truth":
+// backend removes a field → regenerate → this immediately fails to compile, instead of silently leaving a ghost type.
 type Schemas = components['schemas'];
 
-// --------------------------------------------------------------- 关节与状态（手写）
+// --------------------------------------------------------------- Joints and status (hand-written)
 
-/** 0 离线 / 1 正常 / 2 预警 / 3 故障（spec/00 §4.1 status_code 注释） */
+/** 0 offline / 1 normal / 2 warning / 3 fault (spec/00 §4.1 status_code comment). */
 export type RobotStatus = 0 | 1 | 2 | 3;
 
-/** 24 关节标准键名，唯一事实来源 spec/00 §5.5 */
+/** 24 standard joint key names, sole source of truth spec/00 §5.5. */
 export const JOINT_NAMES = [
   'left_shoulder_pitch', 'left_shoulder_roll', 'left_shoulder_yaw', 'left_elbow_pitch',
   'left_wrist_pitch', 'left_wrist_roll',
@@ -47,70 +46,71 @@ export type JointName = (typeof JOINT_NAMES)[number];
 
 export type JointDict = Record<string, number>;
 
-// --------------------------------------------------------------- REST 类型（由 openapi.json 生成）
+// --------------------------------------------------------------- REST types (generated from openapi.json)
 
 /**
- * GET /robots 响应（生成自 `RobotListResponse`）。
+ * GET /robots response (generated from `RobotListResponse`).
  *
- * `Omit` 的理由（**实测踩坑，记录在此避免回退**）：OpenAPI 只能表达
- * `status_code` 是 `integer`，生成出来就是 `number`；而手写版是 `RobotStatus`
- * 的字面量联合 `0|1|2|3`，`theme/tokens.ts` 的 `STATUS_COLOR: Record<RobotStatus, string>`
- * 靠这个收窄做穷尽查找。放任 `number` 直通会让
- * `STATUS_COLOR[robot.status_code]` 报 TS7053（实测 4 处：FleetOverviewCards.tsx:17/63、
- * RobotDetailDrawer.tsx:159/185）—— 等于为了"自动生成"去改组件，恰好是本单禁止项。
- * 故此处只把 `status_code` 重新收窄回 `RobotStatus` 并**原样拼回其余字段**：
- * 字段集合仍由生成类型决定（多一个/少一个都会编译报错），收窄只影响精度。
+ * Reason for `Omit` (**measured pitfall, recorded here to avoid reverting**): OpenAPI can only express
+ * `status_code` as `integer`, so it generates `number`; but the hand-written version is the `RobotStatus`
+ * literal union `0|1|2|3`, which `theme/tokens.ts`'s `STATUS_COLOR: Record<RobotStatus, string>`
+ * relies on for exhaustive lookup. Letting `number` pass through raw would make
+ * `STATUS_COLOR[robot.status_code]` raise TS7053 (measured at 4 sites: FleetOverviewCards.tsx:17/63,
+ * RobotDetailDrawer.tsx:159/185) —— i.e. changing components for the sake of "auto-generation", exactly this issue's forbidden item.
+ * So here we only narrow `status_code` back to `RobotStatus` and **reassemble the rest of the fields verbatim**:
+ * the field set is still decided by the generated type (one extra/missing would fail to compile); narrowing only affects precision.
  */
 export type RobotTelemetry = Omit<Schemas['RobotTelemetryOut'], 'status_code'> & {
   status_code: RobotStatus;
 };
 
 /**
- * 「这台机器人现在还活着吗」—— **只信后端下发的 `is_online`**（ISSUE #77）。
+ * "Is this robot still alive right now" —— **only trust the backend-issued `is_online`** (ISSUE #77).
  *
- * 为什么不能再用 `status_code === 0` 反推：
- *   `status_code` 是**机器人自述**的最后一帧状态。机器人停报后没人来改写它，
- *   它就冻在最后那个值上；于是断电一小时的机器人只要最后上报时是"正常"，
- *   大屏就把永久把它算作在线（ISSUE #77 的「在线 100 / 离线 0」假象）。
- *   `is_online` 来自**接收侧事实**（后端 `now - last_seen <= 阈值`，
- *   见 backend_ingestion/app/services/liveness.py），停报即不再前进。
+ * Why we can no longer infer from `status_code === 0`:
+ *   `status_code` is the robot's **self-reported** last frame state. After a robot stops reporting nobody rewrites it,
+ *   so it freezes at that last value; thus a robot powered off for an hour, as long as its last report was "normal",
+ *   would be permanently counted as online by the dashboard (ISSUE #77's "online 100 / offline 0" illusion).
+ *   `is_online` comes from the **receiving-side fact** (backend `now - last_seen <= threshold`,
+ *   see backend_ingestion/app/services/liveness.py); once reporting stops it stops advancing.
  *
- * 老数据/老后端兼容：字段缺失时 `Boolean(undefined) === false` —— 保守判离线，
- * 不谎报在线。这与「宁可漏报在线」的取舍一致（谎报在线会掩盖真实掉线）。
+ * Legacy data/backend compatibility: when a field is missing, `Boolean(undefined) === false` —— conservatively judge offline,
+ * never falsely report online. This matches the "rather miss an online report than falsely report online" trade-off
+ * (falsely reporting online would hide a real dropout).
  */
 export function isRobotOnline(robot: Pick<RobotTelemetry, 'is_online'>): boolean {
   return robot.is_online === true;
 }
 
-/** GET /robots 响应（生成自 `RobotListResponse`）。 */
+/** GET /robots response (generated from `RobotListResponse`). */
 export type RobotListResponse = Omit<Schemas['RobotListResponse'], 'robots'> & {
   robots: RobotTelemetry[];
 };
 
 /**
- * GET /robots/{id}/history 的单个时间桶（生成自 `HistoryPointOut`）。
+ * Single time bucket of GET /robots/{id}/history (generated from `HistoryPointOut`).
  *
- * 注意：`/history` **带 `status_code`**（后端 SQL 用 `last(status_code, time)` 取桶内最新值，
- * main.py:189），而手写版 HistoryPoint 此前**漏了这一列** ——
- * 也就是说"生成类型"第一次跑就发现了一处存量漂移。此处按后端为准补齐，
- * 不改前端任何调用点（Drawer 只用 time/joint_* 三键，多一个字段不影响）。
+ * Note: `/history` **includes `status_code`** (the backend SQL uses `last(status_code, time)` for the bucket's latest value,
+ * main.py:189), whereas the hand-written HistoryPoint previously **missed this column** ——
+ * i.e. the first run of "generated types" already surfaced one piece of existing drift. Fill it in per the backend here,
+ * without changing any front-end call site (the Drawer only uses time/joint_* keys, an extra field doesn't matter).
  */
 export type HistoryPoint = Schemas['HistoryPointOut'];
 
-/** GET /robots/{id}/history 响应（生成自 `RobotHistoryResponse`）。 */
+/** GET /robots/{id}/history response (generated from `RobotHistoryResponse`). */
 export type RobotHistoryResponse = Schemas['RobotHistoryResponse'];
 
-/** GET /healthz 响应（生成自 `HealthResponse`）。 */
+/** GET /healthz response (generated from `HealthResponse`). */
 export type HealthResponse = Schemas['HealthResponse'];
 
 // --------------------------------------------------------------- /supported-robots
 //
-// ⚠️ 手写（非 openapi 生成）：该端点是 2026-11-09 新增，`docs/contracts/openapi.snapshot.json`
-// 尚未重新生成。字段与后端 `app/schemas/api.py:SupportedRobotOut` / `SupportedRobotsResponse`
-// 逐字对齐。**下次跑 `scripts/export-openapi.py` + `frontend_dashboard/scripts/gen-types.mjs`
-// 后，应改为从 `api.gen.ts` 的 `components['schemas']['SupportedRobotOut']` 生成**。
-
-/** GET /supported-robots 单机型（镜像后端 `SupportedRobotOut`）。 */
+// ⚠️ Hand-written (not openapi-generated): this endpoint was added 2026-11-09, and
+// `docs/contracts/openapi.snapshot.json` has not been regenerated yet. Fields are verbatim-aligned with the backend
+// `app/schemas/api.py:SupportedRobotOut` / `SupportedRobotsResponse`.
+// **After the next run of `scripts/export-openapi.py` + `frontend_dashboard/scripts/gen-types.mjs`,
+// it should be switched to generating from `api.gen.ts`'s `components['schemas']['SupportedRobotOut']`.**
+/** GET /supported-robots single model (mirrors backend `SupportedRobotOut`). */
 export interface SupportedRobot {
   model_type: string;
   display_name: string;
@@ -118,33 +118,32 @@ export interface SupportedRobot {
   dof: number;
   vendor: string;
   description: string;
-  /** true = 目录元数据未登记，由后端回退占位（不编造展示信息） */
+  /** true = catalog metadata unregistered, backend falls back to a placeholder (no fabricated display info). */
   generic: boolean;
-  /** 该机型在册机器人总数 */
+  /** Total robots registered for this model. */
   total: number;
-  /** 其中当前在线数（is_online） */
+  /** Of those, currently online count (is_online). */
   online: number;
-  /** 在册固件版本去重列表 */
+  /** Deduplicated list of registered firmware versions. */
   firmware_versions: string[];
-  /** 分配到的工位去重计数 */
+  /** Deduplicated count of assigned stations. */
   stations: number;
 }
 
-/** GET /supported-robots 响应（镜像后端 `SupportedRobotsResponse`）。 */
+/** GET /supported-robots response (mirrors backend `SupportedRobotsResponse`). */
 export interface SupportedRobotsResponse {
   models: SupportedRobot[];
   total_robots: number;
 }
 
-/** react-query key（与 SupportedRobotsPanel 共用）。 */
+/** react-query key (shared with SupportedRobotsPanel). */
 export const supportedRobotsKey = ['supported-robots'] as const;
 
-// --------------------------------------------------------------- WS 专属类型（手写）
+// --------------------------------------------------------------- WS-only types (hand-written)
 //
-// OpenAPI 管不到 WS，故以下四类保持手写；其结构与
-// `docs/contracts/ws-envelope.schema.json` 一一对应（后者是机器可读的事实来源）。
-
-/** 告警（spec/00 §5.2 ③）。字段与后端 WS `{"type":"alert","data":{...}}` 的 data 一致。 */
+// OpenAPI can't reach WS, so the following four types stay hand-written; their structure is
+// one-to-one with `docs/contracts/ws-envelope.schema.json` (the latter is the machine-readable source of truth).
+/** Alert (spec/00 §5.2 ③). Fields match the data of the backend WS `{"type":"alert","data":{...}}`. */
 export interface RobotAlert {
   robot_id: string;
   rule_id: string;
@@ -152,39 +151,39 @@ export interface RobotAlert {
   message: string;
   ts: number;
   /**
-   * 告警主键（订单 17）。WS 初发信封由 alert_engine/app/store.py 的
-   * `INSERT ... RETURNING alert_id` 带回；DB 故障时后端会发 null，
-   * 此时本条告警无法寻址（确认按钮应禁用）。
+   * Alert primary key (Order 17). The WS initial envelope carries it back from alert_engine/app/store.py's
+   * `INSERT ... RETURNING alert_id`; on DB failure the backend sends null,
+   * in which case this alert can't be addressed (the ack button should be disabled).
    */
   alert_id?: number | null;
-  /** 是否已升级重发（订单 17）：true 时前端显著色 + 「⚠ 已升级」。 */
+  /** Whether it was escalated and re-sent (Order 17): true shows a prominent color + "⚠ Escalated". */
   escalated?: boolean;
-  /** 是否已确认（订单 17）：来自 GET /alerts 或本地 ack 后的乐观更新。 */
+  /** Whether it was acknowledged (Order 17): from GET /alerts or the optimistic update after a local ack. */
   ack?: boolean;
   ack_at?: string | null;
   ack_by?: string | null;
   /**
-   * 是否被抑制（订单 35）。
+   * Whether it is suppressed (Order 35).
    *
-   * 恒为 false/undefined 就是**对**的：抑制判定发生在 alert_engine 的 `emit()` 里，
-   * 被抑制的告警**不 PUBLISH** `robot:alerts`（那正是抑制的语义：不推给看板实时流）。
-   * 这个字段留在 WS 类型里只为对齐 `AlertApiItem` 的行模型，值永远取自 REST。
+   * It is **correct** for this to always be false/undefined: suppression is decided inside alert_engine's `emit()`,
+   * and suppressed alerts are **not PUBLISH**ed to `robot:alerts` (that is exactly the suppression semantics: not pushed to the live board stream).
+   * This field stays in the WS type only to align with `AlertApiItem`'s row model; its value always comes from REST.
    */
   suppressed?: boolean;
-  /** 压制它的根因规则（订单 35）：offline / motor_temp / ... */
+  /** The root-cause rule that suppresses it (Order 35): offline / motor_temp / ... */
   suppressed_by?: string | null;
 }
 
-/** 告警筛选（订单 17 T4）：全部 / 未确认 / 已升级。
+/** Alert filter (Order 17 T4): all / unacknowledged / escalated.
  *
- * 订单 35 说明：「已抑制」**刻意不做成第四个筛选项**。
- * 抑制的正交维度是「显示 / 不显示」而不是「看哪一类」——做成 tab 会让
- * 「未确认 ∪ 已抑制」这类组合无法表达。故它落在 `AlertLogTable` 的独立开关上
- * （见该组件的 `showSuppressed`），筛选 tab 仍是三选一。
+ * Order 35 note: "suppressed" is **deliberately not made a fourth filter tab**.
+ * Suppression's orthogonal dimension is "show / don't show" rather than "which category" —— making it a tab
+ * would make combinations like "unacknowledged ∪ suppressed" unexpressible. So it lands on `AlertLogTable`'s
+ * independent toggle (see that component's `showSuppressed`); the filter tabs stay three-way.
  */
 export type AlertFilter = 'all' | 'unacked' | 'escalated';
 
-/** `GET /alerts` 单条（与后端 app/alerts/schemas.py:AlertItem 逐字段对齐）。 */
+/** `GET /alerts` single item (field-by-field alignment with backend app/alerts/schemas.py:AlertItem). */
 export interface AlertApiItem {
   alert_id: number;
   time: string;
@@ -198,18 +197,18 @@ export interface AlertApiItem {
   ack_by: string | null;
   escalated: boolean;
   /**
-   * 是否被抑制（订单 35，来自 `GET /alerts?suppressed=…`）。
+   * Whether it is suppressed (Order 35, from `GET /alerts?suppressed=…`).
    *
-   * 「已抑制」= 这条告警当时被同机更高 severity 的根因告警（或整机离线）压住，
-   * 只落库、没出流。它**不是**"已经不用管了"——根因恢复后原告警会重新报出来，
-   * 故前端只降视觉权重、不隐藏。
+   * "Suppressed" = this alert was at the time pressed down by a higher-severity root-cause alert on the same machine
+   * (or whole-machine offline); it only landed in the DB, not in the stream. It is **not** "no longer needs handling" ——
+   * once the root cause recovers the original alert will be reported again, so the frontend only reduces visual weight, not hides it.
    */
   suppressed: boolean;
-  /** 压制它的根因规则；`suppressed=false` 时为 null。 */
+  /** The root-cause rule that suppresses it; null when `suppressed=false`. */
   suppressed_by: string | null;
 }
 
-/** `GET /alerts` 分页响应（app/alerts/schemas.py:AlertPage）。 */
+/** `GET /alerts` paginated response (app/alerts/schemas.py:AlertPage). */
 export interface AlertPage {
   items: AlertApiItem[];
   total: number;
@@ -217,17 +216,17 @@ export interface AlertPage {
   offset: number;
 }
 
-/** `POST /alerts/{id}/ack|unack` 响应（app/alerts/schemas.py:AckResult）。 */
+/** `POST /alerts/{id}/ack|unack` response (app/alerts/schemas.py:AckResult). */
 export interface AckResult {
   alert_id: number;
   ack: boolean;
   ack_at: string | null;
   ack_by: string | null;
-  /** false = 幂等命中（已是目标状态），不是错误。 */
+  /** false = idempotent hit (already at the target state), not an error. */
   changed: boolean;
 }
 
-/** ws://{host}:8000/ws/robots 统一信封（spec/00 §5.2） */
+/** ws://{host}:8000/ws/robots unified envelope (spec/00 §5.2). */
 export interface SnapshotEnvelope {
   type: 'snapshot';
   data: { robots: RobotTelemetry[] };

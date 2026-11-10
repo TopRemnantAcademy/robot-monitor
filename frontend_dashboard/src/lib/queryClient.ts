@@ -1,21 +1,21 @@
-// 订单 26（I-20）：服务端状态层 —— TanStack Query。
+// Order 26 (I-20): server-side state layer —— TanStack Query.
 //
-// 职责边界（external/INTEGRATION-PLAN.md §8.10 明确）：
-//   - Query 管**服务端**状态：历史查询的缓存、去重、重试、失效。
-//   - Zustand 管**客户端**状态：WS 100ms 节流后的实时遥测与告警（robotStore.ts 不变）。
-// 两者互补，**不互相替换** —— 前轮「zustand 不升 v5」决策不变。
+// Responsibility boundary (stated in external/INTEGRATION-PLAN.md §8.10):
+//   - Query manages **server** state: caching, deduplication, retry, and invalidation of history queries.
+//   - Zustand manages **client** state: the real-time telemetry and alerts after the 100ms WS throttle (robotStore.ts unchanged).
+// The two complement each other, **not replace each other** —— the earlier "don't upgrade zustand to v5" decision stands.
 
 import { QueryClient } from '@tanstack/react-query';
 
 /**
- * 全局 QueryClient。
+ * Global QueryClient.
  *
- * 默认值取舍：
- *   - retry: 2 —— 历史查询是可重试的幂等 GET；但对 4xx（含 401/404）不重试，
- *     401 由调用点走 notifyUnauthorized() 回登录页，重试只会重复弹登录。
- *   - staleTime: 10s —— 与历史点的 10s 分辨率对齐：桶内重复打开不重复打后端。
- *   - gcTime: 5min —— 关闭 Drawer 后缓存保留 5 分钟，来回切换机器人不必冷启动。
- *   - refetchOnWindowFocus: false —— 大屏常驻前台，窗口焦点抖动不该触发重拉。
+ * Default-value trade-offs:
+ *   - retry: 2 —— history queries are retryable idempotent GETs; but 4xx (including 401/404) is not retried,
+ *     401 is handled by the caller via notifyUnauthorized() sending the user to the login page; retrying would only repeat the login prompt.
+ *   - staleTime: 10s —— aligned with the 10s resolution of history points: reopening within a bucket doesn't re-hit the backend.
+ *   - gcTime: 5min —— after closing the Drawer the cache is kept for 5 minutes, so switching back and forth between robots needs no cold start.
+ *   - refetchOnWindowFocus: false —— the big screen is permanently foreground; window-focus jitter should not trigger a refetch.
  */
 export function makeQueryClient(): QueryClient {
   return new QueryClient({
@@ -25,7 +25,7 @@ export function makeQueryClient(): QueryClient {
         gcTime: 5 * 60_000,
         refetchOnWindowFocus: false,
         retry: (failureCount, error) => {
-          // HTTP 4xx 是确定性失败（认证/路由/参数），重试无意义。
+          // HTTP 4xx is a deterministic failure (auth/routing/params); retrying is pointless.
           const status = (error as { status?: number })?.status;
           if (typeof status === 'number' && status >= 400 && status < 500) return false;
           return failureCount < 2;

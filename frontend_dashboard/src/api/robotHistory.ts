@@ -1,28 +1,28 @@
-// 订单 26（I-20）：Drawer 历史查询的服务端调用点（原内联在 RobotDetailDrawer.tsx）。
+// Order 26 (I-20): server-side call point for Drawer history queries (previously inlined in RobotDetailDrawer.tsx).
 //
-// 只负责「取数 + 归一化错误」，缓存/重试交给 react-query（见 lib/queryClient.ts）。
-// 401 仍走全局出口 notifyUnauthorized() —— 这是订单 15 定下的唯一处理姿势。
+// Only responsible for "fetching data + normalizing errors"; caching/retry is delegated to react-query (see lib/queryClient.ts).
+// 401 still goes through the global exit notifyUnauthorized() — this is the single handling approach defined by Order 15.
 
 import { API_BASE } from '../auth/api';
 import { notifyUnauthorized } from '../auth/api';
 import { authHeaders } from '../auth/session';
 import type { HistoryPoint, RobotHistoryResponse } from '../types/robot';
 
-/** 历史查询窗口（spec/00 §5.3：默认最近 5 分钟，10s 分辨率） */
+/** History query window (spec/00 §5.3: default last 5 minutes, 10s resolution) */
 export const HISTORY_MINUTES = 5;
 export const HISTORY_RESOLUTION = '10s';
 
 /**
- * Drawer 历史窗口可选项（分钟）。
- * 后端 `GET /robots/{id}/history` 的 `minutes` 查询参数**无上限约束**
- * （backend main.py: `minutes: int = 5`，`span_s = max(1, minutes) * 60`），
- * 因此加窗口纯属前端选择，不需要任何后端改动。
+ * Available Drawer history window options (in minutes).
+ * The backend `GET /robots/{id}/history` `minutes` query param has **no upper bound constraint**
+ * (backend main.py: `minutes: int = 5`, `span_s = max(1, minutes) * 60`),
+ * so adding a window is purely a frontend choice and requires no backend changes.
  */
 export const HISTORY_WINDOW_OPTIONS = [5, 30, 60] as const;
 
 /**
- * 带 HTTP 状态码的错误。
- * react-query 的重试策略依据 `status` 判断「4xx 不重试」（见 lib/queryClient.ts）。
+ * Error carrying an HTTP status code.
+ * react-query's retry strategy uses `status` to decide "no retry on 4xx" (see lib/queryClient.ts).
  */
 export class HistoryHttpError extends Error {
   readonly status: number;
@@ -34,9 +34,9 @@ export class HistoryHttpError extends Error {
 }
 
 /**
- * react-query queryKey：以 (robot_id, minutes) 为维度缓存。
- * minutes 进 key 是刻意的——切换窗口时 key 变化 → react-query 自动重新拉取，
- * 不需要手写 effect；同窗口内同机器人复用缓存、换机器人/换窗口各自缓存。
+ * react-query queryKey: cached by (robot_id, minutes) dimensions.
+ * Including minutes in the key is deliberate — switching windows changes the key → react-query automatically refetches,
+ * no manual effect needed; same window + same robot reuses cache, different robot/window each has its own cache.
  */
 export function robotHistoryKey(
   robotId: string,
@@ -48,8 +48,8 @@ export function robotHistoryKey(
 /**
  * GET {API_BASE}/robots/{id}/history?minutes=N&resolution=10s
  *
- * 401 → notifyUnauthorized()（清 token 回登录页）+ 抛错。抛出的错误带 status=401，
- * queryClient 据此判定 4xx 不重试，避免"登录过期"时反复重试刷屏。
+ * 401 → notifyUnauthorized() (clear token, return to login) + throw. The thrown error carries status=401,
+ * queryClient uses this to decide no retry on 4xx, avoiding repeated retries spamming on "login expired".
  */
 export async function fetchRobotHistory(
   robotId: string,
@@ -60,7 +60,7 @@ export async function fetchRobotHistory(
   const res = await fetch(url, { signal, headers: authHeaders() });
 
   if (res.status === 401) {
-    // token 过期/被吊销：走全局出口，而不是当作一次普通加载失败。
+    // token expired/revoked: go through global exit, not treated as a normal load failure.
     notifyUnauthorized();
     throw new HistoryHttpError(401);
   }

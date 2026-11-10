@@ -1,4 +1,4 @@
-// spec/03 §5.2 —— 顶栏三 KPI（在线率 / 当前告警数 / 平均电量）+ WS 连接状态点
+// spec/03 §5.2 —— top-bar three KPIs (online rate / current alert count / average battery) + WS connection status dot
 
 import { useMemo } from 'react';
 import { COLORS, FONT } from '../theme/tokens';
@@ -24,29 +24,28 @@ export default function HealthSummaryHeader() {
   const alerts = useRobotStore((s) => s.alerts);
   const wsStatus = useRobotStore((s) => s.wsStatus);
 
-  // ISSUE #75 结构性共享：不再订阅整张 robots Map（每个 100ms 刷库帧都会让
-  // 顶栏重渲染一次）。改为 useShallow 包装的**派生统计选择器** —— 输出按字段
-  // 浅比较，只有「屏幕上真正显示的值」变化时才重渲染：
-  //   - onlineRate/avgBattery 四舍五入到 1 位小数（与 .toFixed(1) 显示精度一致，
-  //     否则 57.03→57.06 这类纯浮点抖动也会穿透浅比较触发无意义重渲染）；
-  //   - online/total/stale 本身就是低频整数；
-  //   - alerts / wsStatus 保持各自单字段订阅（低频，且 useShallow 对数组/字符串
-  //     无收益）。
-  // selectStatusCounts 接收 { robots } 而非闭包 Map —— 保持与原实现同一取数路径。
+  // ISSUE #75 structural sharing: no longer subscribe to the whole robots Map (every 100ms store-flush frame would make
+  // the top bar re-render once). Switch to a **derived stats selector** wrapped in useShallow —— output is shallow-compared per field,
+  // only re-renders when "the value actually displayed on screen" changes:
+  //   - onlineRate/avgBattery rounded to 1 decimal (consistent with .toFixed(1) display precision,
+  //     otherwise pure float jitter like 57.03→57.06 would also penetrate the shallow compare and trigger meaningless re-renders);
+  //   - online/total/stale are themselves low-frequency integers;
+  //   - alerts / wsStatus keep their own single-field subscriptions (low-frequency, and useShallow gives no benefit for arrays/strings).
+  // selectStatusCounts receives { robots } rather than a closure Map —— keeps the same data-fetch path as the original implementation.
   const stats = useRobotStore(
     useShallow((s) => {
       const counts = selectStatusCounts(s);
       let batterySum = 0;
       let batteryCount = 0;
-      // ISSUE #77：在线数与平均电量**从后端下发的 is_online 来**，
-      // 不再用 `status_code !== 0` 自己数 —— 后者把停报机器人永久算作在线。
+      // ISSUE #77: online count and average battery come **from the backend's is_online**,
+      // no longer self-counted with `status_code !== 0` —— the latter permanently counts stopped-reporting robots as online.
       for (const r of s.robots.values()) {
         if (r.is_online === true) {
           batterySum += r.battery_pct;
           batteryCount += 1;
         }
       }
-      // 在线率 = 在线数 / 100（spec/03 §5.2），离线/失联机器人不计入平均电量
+      // online rate = online count / 100 (spec/03 §5.2), offline/lost-contact robots not counted in average battery
       return {
         onlineRate: counts.total === 0 ? 0 : Math.round((counts.online / counts.total) * 1000) / 10,
         online: counts.online,
@@ -57,7 +56,7 @@ export default function HealthSummaryHeader() {
     }),
   );
 
-  // 当前告警数 = severity ≥ 2 的告警（spec/03 §5.2；未 ack 语义由前端流式计算）
+  // Current alert count = alerts with severity ≥ 2 (spec/03 §5.2; un-acked semantics computed streamingly on the frontend)
   const activeAlerts = useMemo(() => alerts.filter((a) => a.severity >= 2).length, [alerts]);
 
   const dotColor =
@@ -81,8 +80,8 @@ export default function HealthSummaryHeader() {
         <Kpi
           label={t('kpi.onlineRate')}
           value={stats.onlineRate.toFixed(1)}
-          // 失联台数直接挂在括号里：只看百分比看不出"是有 1 台还是 40 台掉了"，
-          // 而这两者的处置动作完全不同（前者去现场，后者先查 Redis/MQTT 链路）。
+          // The lost-contact count is shown directly in parentheses: looking at the percentage alone you can't tell "1 dropped or 40 dropped",
+          // and the handling actions for the two are completely different (the former goes on-site, the latter first checks the Redis/MQTT link).
           unit={`% (${stats.online}/${stats.total}${stats.stale > 0 ? t('unit.lost', { n: stats.stale }) : ''})`}
           color={stats.onlineRate >= 90 ? COLORS.statusNormal : COLORS.statusWarning}
         />

@@ -1,25 +1,25 @@
-// 订单 24 T2 — RobotDetailDrawer 组件测试（vitest + testing-library）。
+// Order 24 T2 — RobotDetailDrawer component test (vitest + testing-library).
 //
-// 为什么挑 Drawer 而不是别的组件：
-//   STATUS.md §六第 2 条记录过一次**真实事故** —— `/history` 不返回
-//   `joint_positions`，导致 Drawer 第三条折线「角度(rad)」恒空，靠人眼看出来的。
-//   本用例把「REST 返回 → 组件解析 → 交给 ECharts 的 series」这条链钉成断言，
-//   再改字段名就会在这里红，而不是等到大屏上少一条线才被发现。
+// Why pick the Drawer over other components:
+//   STATUS.md §six #2 recorded a **real incident** —— `/history` didn't return
+//   `joint_positions`, causing the Drawer's third line chart "Angle (rad)" to be permanently empty, spotted by eye.
+//   This case nails the chain "REST returns → component parses → hands series to ECharts" into an assertion,
+//   so renaming a field goes red here instead of waiting until a line is missing on the dashboard.
 //
-// 关于 ECharts：jsdom 没有 canvas，真渲染 ECharts 会抛错。这里 mock 掉
-// `echarts-for-react/lib/core`，把它收到的 `option` 原样 dump 到 DOM（data-testid），
-// 于是我们能断言「组件算出来的图表模型」这一层 —— 这正是最该测的纯逻辑层，
-// 而 ECharts 自身怎么画像素不在本仓职责内。
+// About ECharts: jsdom has no canvas, rendering real ECharts throws. Here we mock
+// `echarts-for-react/lib/core`, dumping the `option` it receives into the DOM (data-testid),
+// so we can assert the "chart model computed by the component" layer —— which is exactly the pure-logic layer that should be tested,
+// while how ECharts itself draws pixels is outside this repo's responsibility.
 //
-// 【网络层：为什么用受控 fetch 替身而不是 msw（Issue #78 根因）】
-//   happy-dom 会把全局 `Response`/`ReadableStream` 覆盖成自己的实现，而 msw/node
-//   拦截器返回的 Response body 是 Node(undici) 的 ReadableStream —— happy-dom 的
-//   `Response.json()` 读不动这条流，于是在 200 用例里 `res.json()` 永久挂起（只读
-//   `res.status` 的 500 用例反而正常）。这是**环境层**问题，与组件实现无关。
-//   实测本沙箱内 msw 这条路不通，故这里改用受控的全局 `fetch` 替身：它返回 Node 原生
-//   `Response`（其 `.json()` 可正确解析），既保留「真实 fetch → 解析 → chart」链路断言，
-//   又绕开环境挂起。组件里仍走真实的 `fetchRobotHistory`（用全局 fetch），所以
-//   URL 拼错 / 头漏带 / 字段改名 这一类回归依然会被本用例抓住。
+// NOTE — Network layer: why use a controlled fetch double instead of msw (Issue #78 root cause):
+//   happy-dom overrides the global `Response`/`ReadableStream` with its own implementation, while msw/node
+//   interceptor-returned Response bodies are Node (undici) ReadableStreams —— happy-dom's
+//   `Response.json()` can't read this stream, so in the 200 case `res.json()` hangs forever (only reading
+//   `res.status` in the 500 case works normally). This is an **environment-layer** problem, unrelated to the component implementation.
+//   Measured: msw doesn't work in this sandbox, so here we use a controlled global `fetch` double: it returns the native Node
+//   `Response` (its `.json()` parses correctly), preserving the "real fetch → parse → chart" chain assertion,
+//   while bypassing the environment hang. The component still uses the real `fetchRobotHistory` (via global fetch), so
+//   regressions like wrong URL / missing header / renamed field are still caught by this case.
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
@@ -31,11 +31,11 @@ import { useAuthStore } from '../../auth/authStore';
 import { JOINT_NAMES } from '../../types/robot';
 import type { RobotTelemetry } from '../../types/robot';
 import { SAMPLE_HISTORY } from '../../test/msw/handlers';
-// 共享渲染：已包裹 QueryClientProvider，使使用 useQuery 的组件可在测试里渲染
-// （修复 Issue #78：main 此前 npm test 8/8 全红）。
+// Shared render: already wrapped in QueryClientProvider, so components using useQuery can render in tests
+// (fixes Issue #78: main previously had npm test 8/8 all red).
 import { render } from '../../test/render';
 
-/** 抽屉「该机器人最近告警」用例的 /alerts 响应：一条本机 + 一台他机（验证过滤）。 */
+/** Drawer "this robot's recent alerts" case's /alerts response: one local + one other-robot (verifies filtering). */
 const SAMPLE_ALERT_PAGE = {
   items: [
     {
@@ -44,7 +44,7 @@ const SAMPLE_ALERT_PAGE = {
       robot_id: 'humanoid-042',
       rule_id: 'motor_temp',
       severity: 3,
-      message: '左肘电机温度超限',
+      message: 'Left elbow motor over temp',
       detail: null,
       ack: false,
       ack_at: null,
@@ -57,7 +57,7 @@ const SAMPLE_ALERT_PAGE = {
       robot_id: 'humanoid-007',
       rule_id: 'battery_low',
       severity: 2,
-      message: '电量低',
+      message: 'Low battery',
       detail: null,
       ack: true,
       ack_at: null,
@@ -70,16 +70,16 @@ const SAMPLE_ALERT_PAGE = {
   offset: 0,
 };
 
-// —— ECharts 替身：把 option 序列化进 DOM，供断言 ——
+// —— ECharts double: serialize option into DOM for assertions ——
 vi.mock('echarts-for-react/lib/core', () => ({
   default: ({ option }: { option: unknown }) => (
     <pre data-testid="echarts-option">{JSON.stringify(option)}</pre>
   ),
 }));
 
-// —— 受控 fetch 替身（替代 msw，绕开 happy-dom + msw 的 body 挂起）——
-// 默认实现：命中 /history 就返回样例数据（SAMPLE_HISTORY），其余一律 200 空 JSON。
-// 各用例可用 `fetchMock.mockImplementation(...)` 临时改写响应（见下方面 500 / 空 / 鉴权用例）。
+// —— Controlled fetch double (replaces msw, bypassing happy-dom + msw body hang) ——
+// Default implementation: hit /history returns sample data (SAMPLE_HISTORY), everything else 200 empty JSON.
+// Each case can use `fetchMock.mockImplementation(...)` to temporarily rewrite the response (see the 500 / empty / auth cases below).
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -87,12 +87,12 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-// 签名刻意**带第二个形参**（`RequestInit`），尽管默认实现用不到它：
-// 下游 `Authorization` 用例要用 `init.headers` 断言请求头，若这里只声明 1 个参数，
-// `mockImplementation(async (_input, init) => ...)` 的第二参就退化成隐式 any
-// （TS7006），并且整体签名不兼容（TS2345）—— 这是 `npm run build` 里
-// `tsc --noEmit` 长期存在 3 个错误的唯一来源（ISSUE #62 验收要求 0 错误）。
-// 形参名前导下划线是"我真的不用它"的约定，不是笔误。
+// The signature deliberately **has a second parameter** (`RequestInit`), though the default implementation doesn't use it:
+// the downstream `Authorization` case needs `init.headers` to assert the request header; if only 1 parameter is declared here,
+// `mockImplementation(async (_input, init) => ...)`'s second arg degrades to implicit any
+// (TS7006), and the overall signature is incompatible (TS2345) —— this is the sole source of the 3 long-standing errors in `npm run build`'s
+// `tsc --noEmit` (ISSUE #62 acceptance requires 0 errors).
+// Leading underscore on the param name is the convention for "I really don't use it", not a typo.
 const fetchMock = vi.fn(
   async (_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> => jsonResponse(SAMPLE_HISTORY),
 );
@@ -117,17 +117,17 @@ function telemetry(over: Partial<RobotTelemetry> = {}): RobotTelemetry {
     joint_positions: { ...zeros, left_elbow_pitch: 0.55 },
     error_code: 0,
     ts: Date.parse('2026-10-10T23:49:10Z'),
-    // ISSUE #77：is_online 现在是生成契约里的 required 字段。
-    // 取 `true` 是刻意的：本文件的用例全部在验「有数据的机器人」的渲染，
-    // 取 false 会让 Drawer 显示「失联」并隐藏温度，与断言意图无关地改变输出。
-    // 真正的离线/失联渲染断言在 src/store/__tests__/robotStore.liveness.test.ts。
+    // ISSUE #77: is_online is now a required field in the generation contract.
+    // Taking `true` is deliberate: every case in this file verifies the rendering of "a robot with data",
+    // taking false would make the Drawer show "lost contact" and hide the temperature, changing output unrelated to the assertion intent.
+    // The real offline/lost-contact rendering assertions are in src/store/__tests__/robotStore.liveness.test.ts.
     is_online: true,
     last_seen: Math.floor(Date.parse('2026-10-10T23:49:10Z') / 1000),
     ...over,
   };
 }
 
-/** 预置一台机器人到 store 并打开 Drawer。 */
+/** Preset a robot into the store and open the Drawer. */
 function openDrawer(id = 'humanoid-042') {
   const st = useRobotStore.getState();
   st.applyTelemetryBatch([telemetry({ robot_id: id })]);
@@ -139,8 +139,8 @@ interface ChartOption {
 }
 
 /**
- * Drawer 现在挂两块图（关节折线 + 电量趋势），mock 对每个实例都渲染同 testid 的 <pre>。
- * index 0 = 关节折线（DOM 序在前），index 1 = 电量趋势。
+ * The Drawer now mounts two charts (joint line + battery trend), the mock renders the same testid <pre> for each instance.
+ * index 0 = joint line (first in DOM order), index 1 = battery trend.
  */
 async function readChartOption(index = 0): Promise<ChartOption> {
   const els = await screen.findAllByTestId('echarts-option');
@@ -148,12 +148,12 @@ async function readChartOption(index = 0): Promise<ChartOption> {
 }
 
 describe('RobotDetailDrawer', () => {
-  it('未选中机器人时不渲染任何内容（避免空 Drawer 遮住主区）', () => {
+  it('No content rendered when no robot selected (avoid empty Drawer covering main area)', () => {
     const { container } = render(<RobotDetailDrawer />);
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('渲染选中机器人的基本信息：电量 / 最高关节温度 / 状态标签', () => {
+  it('Render selected robot basic info: battery / max joint temp / status label', () => {
     openDrawer();
     render(<RobotDetailDrawer />);
 
@@ -161,11 +161,11 @@ describe('RobotDetailDrawer', () => {
     expect(within(aside).getByText('humanoid-042')).toBeInTheDocument();
     expect(within(aside).getByText('18.4%')).toBeInTheDocument();      // battery_pct
     expect(within(aside).getByText('66.2°C')).toBeInTheDocument();     // max_joint_temp
-    // status_code=2 → Warning（见 theme/tokens 的 DISPLAY_COLOR 映射，i18n 走 display.warning）
+    // status_code=2 → Warning (see theme/tokens DISPLAY_COLOR mapping, i18n uses display.warning)
     expect(within(aside).getByText('Warning')).toBeInTheDocument();
   });
 
-  it('拉取 history 后把 24 关节与包络拆成 四条 series 交给 ECharts', async () => {
+  it('After fetching history, split 24 joints and envelope into four series for ECharts', async () => {
     openDrawer();
     render(<RobotDetailDrawer />);
 
@@ -174,34 +174,34 @@ describe('RobotDetailDrawer', () => {
       expect(parsed.series.map((s) => s.name)).toEqual([
         'Temp (°C)', 'Torque (N·m)', 'Angle (rad)', 'Max joint temp (°C)',
       ]);
-      // 默认选中第 0 个关节（JOINT_NAMES[0]），样例数据里该关节无值 → null
+      // Default-selected joint is the 0th (JOINT_NAMES[0]); sample data has no value for it → null
       expect(parsed.series[0].data).toEqual([null, null]);
-      // 包络线取后端逐桶聚合的 max_joint_temp（66.2 / 67.8），与选中关节无关
+      // Envelope line takes the backend's per-bucket aggregated max_joint_temp (66.2 / 67.8), independent of selected joint
       expect(parsed.series[3].data).toEqual([66.2, 67.8]);
     });
   });
 
-  it('选中关节切换后取该关节的 joint_positions（回归：曾整条角度线恒空）', async () => {
+  it('After switching selected joint, take that joint\'s joint_positions (regression: angle line was once always empty)', async () => {
     const user = userEvent.setup();
     openDrawer();
     render(<RobotDetailDrawer />);
 
-    // Heatmap 关节块的 aria-label 以关节全名为前缀（如 "left_elbow_pitch 62.5°C"）
+    // Heatmap joint block's aria-label is prefixed with the full joint name (e.g. "left_elbow_pitch 62.5°C")
     const chip = await screen.findByRole('button', { name: /^left_elbow_pitch/ });
     await user.click(chip);
 
     await waitFor(async () => {
       const parsed = await readChartOption();
-      // left_elbow_pitch 在样例两点里分别为 60.0/62.5（temp）、1.5/1.7（torque）、0.42/0.55（position）
+      // left_elbow_pitch in the two sample points are 60.0/62.5 (temp), 1.5/1.7 (torque), 0.42/0.55 (position)
       expect(parsed.series[0].data).toEqual([60, 62.5]);
       expect(parsed.series[1].data).toEqual([1.5, 1.7]);
       expect(parsed.series[2].data).toEqual([0.42, 0.55]);
-      // 切关节不影响包络线（max_joint_temp 与选中关节无关）
+      // Switching joint doesn't affect the envelope line (max_joint_temp is independent of selected joint)
       expect(parsed.series[3].data).toEqual([66.2, 67.8]);
     });
   });
 
-  it('history 为空时显示「无历史点」而不是空图', async () => {
+  it('Show "no history points" instead of empty chart when history is empty', async () => {
     fetchMock.mockImplementation(async () =>
       jsonResponse({ robot_id: 'humanoid-042', points: [] }),
     );
@@ -209,26 +209,26 @@ describe('RobotDetailDrawer', () => {
     render(<RobotDetailDrawer />);
 
     expect(await screen.findByText(/No history points/)).toBeInTheDocument();
-    // 关节图与电量趋势图共用同一份历史——空即两块都不得挂载
+    // Joint chart and battery trend chart share the same history — empty means neither should mount
     expect(screen.queryAllByTestId('echarts-option')).toHaveLength(0);
   });
 
-  it('history 请求 500 时显示错误态，且错误文案含 HTTP 状态码（便于排障）', async () => {
+  it('Show error state on history 500, and error text contains HTTP status code (for troubleshooting)', async () => {
     fetchMock.mockImplementation(async () => new Response(null, { status: 500 }));
     openDrawer();
     render(<RobotDetailDrawer />);
 
-    // 5xx 会走 queryClient 的重试（lib/queryClient.ts:27：4xx 不重试，其余重试到 2 次），
-    // retryDelay = min(1000 * 2^attempt, 8000) → 1s + 2s ≈ 3s 后才落到 error 态。
-    // 默认 findByText 只有 1s，会在重试途中判失败。这里显式放宽到 6s（留足余量），
-    // 断言内容不变 —— 仍要求错误文案带 HTTP 状态码。
+    // 5xx goes through queryClient's retry (lib/queryClient.ts:27: no retry on 4xx, retry others up to 2 times),
+    // retryDelay = min(1000 * 2^attempt, 8000) → 1s + 2s ≈ 3s before landing on error state.
+    // Default findByText only has 1s, would judge failure mid-retry. Here explicitly relax to 6s (enough margin),
+    // assertion content unchanged —— still requires the error text to carry the HTTP status code.
     expect(
       await screen.findByText(/History unavailable/, undefined, { timeout: 6000 }),
     ).toBeInTheDocument();
     expect(screen.getByText(/HTTP 500/)).toBeInTheDocument();
   }, 10_000);
 
-  it('关闭按钮把 selectedRobotId 置空（Drawer 卸载）', async () => {
+  it('Close button clears selectedRobotId (Drawer unmounts)', async () => {
     const user = userEvent.setup();
     openDrawer();
     render(<RobotDetailDrawer />);
@@ -237,13 +237,13 @@ describe('RobotDetailDrawer', () => {
     expect(useRobotStore.getState().selectedRobotId).toBeNull();
   });
 
-  it('请求必须带 Authorization 头（订单 15：唯一的 REST 调用点，漏了就全漏）', async () => {
+  it('Request must carry Authorization header (Order 15: the only REST call point, miss it and everything leaks)', async () => {
     const seen: (string | null)[] = [];
     fetchMock.mockImplementation(async (_input, init) => {
       seen.push(new Headers(init?.headers).get('authorization'));
       return jsonResponse(SAMPLE_HISTORY);
     });
-    // 预置 token（sessionStorage）
+    // Preset token (sessionStorage)
     window.sessionStorage.setItem('robotmonitor.jwt', 'test-token');
 
     openDrawer();
@@ -253,7 +253,7 @@ describe('RobotDetailDrawer', () => {
     expect(seen[0]).toBe('Bearer test-token');
   });
 
-  it('告警区按 robot_id 过滤：只显示本机告警，升级标记可见', async () => {
+  it('Alert area filters by robot_id: only this robot\'s alerts shown, escalation marker visible', async () => {
     fetchMock.mockImplementation(async (input) => {
       const url = String(input);
       if (url.includes('/alerts')) return jsonResponse(SAMPLE_ALERT_PAGE);
@@ -263,35 +263,35 @@ describe('RobotDetailDrawer', () => {
     render(<RobotDetailDrawer />);
 
     const aside = screen.getByRole('complementary');
-    // humanoid-042 的 motor_temp 告警渲染（ruleLabel 复用 AlertLogTable 的映射）
+    // humanoid-042's motor_temp alert renders (ruleLabel reuses AlertLogTable's mapping)
     expect(await within(aside).findByText('Motor overheat')).toBeInTheDocument();
     expect(within(aside).getByText('Escalated')).toBeInTheDocument();
-    // humanoid-007 的低电量告警不得串台（规则标签与 message 两个出现点都验）
+    // humanoid-007's low-battery alert must not bleed through (both rule label and message appearance points verified)
     expect(within(aside).queryByText('Low battery')).not.toBeInTheDocument();
-    expect(within(aside).queryByText('电量低')).not.toBeInTheDocument();
+    expect(within(aside).queryByText('Low battery')).not.toBeInTheDocument();
   });
 
-  // —— 订单 27 新增三用例 ——（不改既有 9 用例的任何断言）
+  // —— Order 27 added three cases —— (doesn't change any assertion of the existing 9 cases)
 
-  it('扭矩负载条：aria-label 携带关节名与实时值，点击切换选中关节（与热力图联动）', async () => {
+  it('Torque load bar: aria-label carries joint name and real-time value, click switches selected joint (linked with heatmap)', async () => {
     const user = userEvent.setup();
     openDrawer();
     render(<RobotDetailDrawer />);
 
-    // aria-label 刻意以「扭矩 」开头：热力图关节块的 aria-label 以关节名开头
-    //（/^left_elbow_pitch/ 用例），两者在可访问性树上必须互不混淆。
-    // 实时帧 telemetry().joint_torques.left_elbow_pitch = 1.7 → toFixed(2) = "1.70"
+    // aria-label deliberately starts with "Torque ": the heatmap joint block's aria-label starts with the joint name
+    // (/^left_elbow_pitch/ case), the two must not be confused on the accessibility tree.
+    // Real-time frame telemetry().joint_torques.left_elbow_pitch = 1.7 → toFixed(2) = "1.70"
     const bar = await screen.findByRole('button', { name: 'Torque left_elbow_pitch 1.70N·m' });
     await user.click(bar);
 
-    // 点击后选中关节切换 → 折线的扭矩 series 取 left_elbow_pitch 的历史两点
+    // After click, selected joint switches → the line chart's torque series takes left_elbow_pitch's two history points
     await waitFor(async () => {
       const parsed = await readChartOption();
       expect(parsed.series[1].data).toEqual([1.5, 1.7]);
     });
   });
 
-  it('历史窗口切换：点击 30m 后请求 minutes=30，标题随窗口变化', async () => {
+  it('History window switch: click 30m then request minutes=30, title changes with window', async () => {
     const user = userEvent.setup();
     const urls: string[] = [];
     fetchMock.mockImplementation(async (input) => {
@@ -302,28 +302,28 @@ describe('RobotDetailDrawer', () => {
     render(<RobotDetailDrawer />);
 
     await user.click(await screen.findByRole('button', { name: '30m' }));
-    // queryKey 含 minutes → 切窗口必然产生一条 minutes=30 的新请求
+    // queryKey contains minutes → switching window necessarily produces a new minutes=30 request
     await waitFor(() => expect(urls.some((u) => u.includes('minutes=30'))).toBe(true));
-    // 请求里其他参数不回退（resolution 恒为 10s）
+    // Other params in the request don't regress (resolution always 10s)
     expect(urls.some((u) => u.includes('minutes=30') && u.includes('resolution=10s'))).toBe(true);
-    // 关节图头与电量趋势头都必须反映新窗口（全串精确匹配，避免子串命中多个元素）
+    // Both the joint chart header and battery trend header must reflect the new window (exact full-string match, avoid substring hitting multiple elements)
     expect(screen.getByText('left_shoulder_pitch · Last 30 min (10s resolution)')).toBeInTheDocument();
     expect(screen.getByText('Battery trend · Last 30 min')).toBeInTheDocument();
   });
 
-  // 置于 describe 末尾：本用例会把 authStore 提为 admin，结束前还原，避免污染其他用例。
-  it('告警确认：非 admin 无按钮；admin 点击确认后重拉反映 ack 状态', async () => {
+  // Placed at the end of describe: this case promotes authStore to admin, restores before finishing, to avoid polluting other cases.
+  it('Alert acknowledge: no button for non-admin; admin click-acknowledge then refetch reflects ack state', async () => {
     const user = userEvent.setup();
     let acked = false;
     fetchMock.mockImplementation(async (input, init) => {
       const url = String(input);
       if (url.includes('/alerts')) {
-        // POST {API_BASE}/alerts/{id}/ack —— AckResult 契约（types/robot.ts）
+        // POST {API_BASE}/alerts/{id}/ack —— AckResult contract (types/robot.ts)
         if (init?.method === 'POST') {
           acked = true;
           return jsonResponse({ alert_id: 11, ack: true, ack_at: '2026-10-10T23:50:00Z', ack_by: 'a@b.c', changed: true });
         }
-        // GET /alerts：ack 后第一次返回的 alert 11 翻成 ack=true（权威视图对账）
+        // GET /alerts: the first return after ack flips alert 11 to ack=true (authoritative view reconciliation)
         const page = {
           ...SAMPLE_ALERT_PAGE,
           items: [{ ...SAMPLE_ALERT_PAGE.items[0], ack: acked }, SAMPLE_ALERT_PAGE.items[1]],
@@ -336,17 +336,17 @@ describe('RobotDetailDrawer', () => {
     render(<RobotDetailDrawer />);
 
     const aside = screen.getByRole('complementary');
-    // 非 admin（默认 role=null）：确认按钮不渲染——"不让用户看见点不动的东西"
+    // Non-admin (default role=null): acknowledge button not rendered —— "don't let users see the unclickable thing"
     await within(aside).findByText('Motor overheat');
     expect(within(aside).queryByRole('button', { name: 'Acknowledge' })).not.toBeInTheDocument();
 
-    // 提为 admin → 按钮出现 → 点击 → POST /alerts/11/ack → invalidate 重拉 → 已确认
+    // Promote to admin → button appears → click → POST /alerts/11/ack → invalidate refetch → acknowledged
     useAuthStore.setState({ status: 'authenticated', email: 'a@b.c', role: 'admin' });
     await user.click(await within(aside).findByRole('button', { name: 'Acknowledge' }));
     await waitFor(() => expect(acked).toBe(true));
     expect(await within(aside).findByText('Acknowledged')).toBeInTheDocument();
 
-    // 还原全局 auth 状态（本用例必须保持在 describe 末尾的原因）
+    // Restore global auth state (why this case must stay at the end of describe)
     useAuthStore.setState({ status: 'unknown', email: null, role: null });
   });
 });

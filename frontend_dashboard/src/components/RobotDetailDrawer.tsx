@@ -1,14 +1,14 @@
-// spec/03 §5.3 —— 单机关节热力诊断 Drawer（右滑 480px，不挤压主区）
+// spec/03 §5.3 —— single-robot joint heatmap diagnostics Drawer (slides in from right, 480px, doesn't squeeze the main area)
 //
-// 数据来源：
-//   1) 实时增量：直接从 Zustand 的 robots Map 取（该机器人 10Hz 更新）
-//   2) 历史折线：GET {VITE_API_BASE}/robots/{id}/history?minutes=5&resolution=10s（spec/00 §5.3）
+// Data sources:
+//   1) Real-time increment: taken directly from Zustand's robots Map (this robot updates at 10Hz)
+//   2) History line chart: GET {VITE_API_BASE}/robots/{id}/history?minutes=5&resolution=10s (spec/00 §5.3)
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-// 订单 09：走 echarts-for-react 的 core 入口 + 按需注册的 echarts 实例，
-// 取代默认入口（默认入口内部 require 整个 echarts 包，无法 tree-shake）。
-// 注册清单见 src/lib/echartsCore.ts（只含本 Drawer 用到的折线图相关模块）。
+// Order 09: use echarts-for-react's core entry + on-demand registered echarts instance,
+// replacing the default entry (the default entry internally requires the entire echarts package, can't tree-shake).
+// Registration list see src/lib/echartsCore.ts (only contains the line-chart-related modules used by this Drawer).
 import ReactEChartsCore from 'echarts-for-react/lib/core';
 import echarts from '../lib/echartsCore';
 import JointHeatmap from './JointHeatmap';
@@ -36,14 +36,14 @@ import {
   robotHistoryKey,
 } from '../api/robotHistory';
 
-// 订单 26：Drawer 不再自持 REST 基址，统一从 auth/api 取（同时 re-export 兼容既有引用点）。
+// Order 26: Drawer no longer holds its own REST base URL, uniformly taken from auth/api (re-export to keep existing references compatible).
 import { API_BASE } from '../auth/api';
 
 export { API_BASE };
 
 /**
- * 「最后更新」的毫秒时间戳：优先后端的 `last_seen`（接收侧事实，秒 → 毫秒），
- * 缺失时才回落到机器人自述的 `ts`（毫秒）。两者都没有 → null（显示 `--`）。
+ * "Last updated" millisecond timestamp: prefer the backend's `last_seen` (receiver-side fact, seconds → milliseconds),
+ * fall back to the robot's self-reported `ts` (milliseconds) only when missing. Neither → null (shows "--").
  */
 function lastSeenMs(robot: { last_seen?: number | null; ts: number } | undefined): number | null {
   if (!robot) return null;
@@ -51,7 +51,7 @@ function lastSeenMs(robot: { last_seen?: number | null; ts: number } | undefined
   return robot.ts > 0 ? robot.ts : null;
 }
 
-/** 「数据帧龄」：last_seen 距现在的时长（失联诊断用——「3 小时前」比一个时刻数字直观）。 */
+/** "Data frame age": duration from last_seen to now (used for lost-contact diagnosis — "3 hours ago" is more intuitive than a moment number). */
 function frameAge(ms: number | null, t: (k: string, v?: Record<string, string | number>) => string): string {
   if (ms === null) return '--';
   const sec = Math.max(0, Math.round((Date.now() - ms) / 1000));
@@ -69,40 +69,40 @@ interface ChartSeries {
 interface ChartModel {
   xAxis: string[];
   series: ChartSeries[];
-  /** 电量逐桶（HistoryPointOut.battery_pct），供独立电量趋势图使用 */
+  /** Battery per bucket (HistoryPointOut.battery_pct), for the standalone battery trend chart */
   battery: (number | null)[];
 }
 
-/** 折线用色：温度=故障红 / 扭矩=强调蓝 / 角度=正常绿 / 包络=预警黄（全 tokens，不自创色相）。 */
+/** Line colors: temp=fault red / torque=accent blue / angle=normal green / envelope=warning yellow (all tokens, no self-created hues). */
 const SERIES_COLORS = [COLORS.statusFault, COLORS.accent, COLORS.statusNormal, COLORS.statusWarning];
 
 export default function RobotDetailDrawer() {
   const { t, locale } = useI18n();
   const selectedRobotId = useRobotStore((s) => s.selectedRobotId);
   const selectRobot = useRobotStore((s) => s.selectRobot);
-  // ISSUE #75 结构性共享：Drawer 只订阅**它显示的那一格**
-  // （`s.robots.get(selectedRobotId)`），不再订阅整张 Map —— 否则关着 Drawer 时
-  // 每个 100ms 刷库帧也会让它重渲染一遍。选中态切换 / 关闭时选择器自动换挡。
+  // ISSUE #75 structural sharing: Drawer only subscribes to **the cell it displays**
+  // (`s.robots.get(selectedRobotId)`), no longer subscribes to the whole Map —— otherwise while the Drawer is closed
+  // every 100ms store-flush frame would also re-render it once. The selector auto-shifts on selection change / close.
   const robot = useRobotStore((s) => (s.selectedRobotId ? s.robots.get(s.selectedRobotId) : undefined));
 
   const [selectedJoint, setSelectedJoint] = useState<string>(JOINT_NAMES[0]);
-  // 订单 27 T3：历史窗口（分钟）。进 queryKey —— 切窗口即换 key，react-query 自动重拉。
+  // Order 27 T3: history window (minutes). Goes into queryKey —— switching windows changes the key, react-query auto refetches.
   const [historyMinutes, setHistoryMinutes] = useState<number>(HISTORY_MINUTES);
-  // 订单 27 T2：告警确认（仅 admin）。busyId 与错误信息只作用于本 Drawer 的告警区。
+  // Order 27 T2: alert acknowledge (admin only). busyId and error message only apply to this Drawer's alert area.
   const [ackBusyId, setAckBusyId] = useState<number | null>(null);
   const [ackError, setAckError] = useState<string | null>(null);
   const queryClient = useQueryClient();
   const canAck = useIsAdmin();
 
-  // 每次打开 Drawer 重置选中关节，避免残留上一台机器人的选择
+  // Reset selected joint each time the Drawer opens, to avoid leftover selection from the previous robot
   useEffect(() => {
     if (selectedRobotId) setSelectedJoint(JOINT_NAMES[0]);
   }, [selectedRobotId]);
 
-  // 订单 26（I-20）：历史查询交给 react-query 管缓存与重试。
-  //   - 同机器人重复打开：staleTime 内直接命中缓存，不打后端；
-  //   - 失败自动重试（4xx 除外，见 lib/queryClient.ts）；
-  //   - 切换机器人 / 关闭 Drawer 时 react-query 自动取消在途请求（signal 透传给 fetch）。
+  // Order 26 (I-20): history query delegated to react-query for caching and retry.
+  //   - Reopen same robot: hits cache within staleTime, no backend call;
+  //   - Auto-retry on failure (except 4xx, see lib/queryClient.ts);
+  //   - Switching robot / closing Drawer: react-query auto-cancels in-flight requests (signal passed through to fetch).
   const historyQuery = useQuery({
     queryKey: robotHistoryKey(selectedRobotId ?? '', historyMinutes),
     queryFn: ({ signal }) => fetchRobotHistory(selectedRobotId as string, signal, historyMinutes),
@@ -110,7 +110,7 @@ export default function RobotDetailDrawer() {
   });
 
   const history: HistoryPoint[] = historyQuery.data ?? [];
-  // enabled=false（未选中机器人）时 isPending 恒为 true 但并未发请求，故用 fetchStatus 区分。
+  // When enabled=false (no robot selected), isPending is always true but no request was sent, so use fetchStatus to distinguish.
   const loading = historyQuery.isPending && historyQuery.fetchStatus !== 'idle';
   const error = historyQuery.isError
     ? historyQuery.error instanceof Error
@@ -118,7 +118,7 @@ export default function RobotDetailDrawer() {
       : t('error.load')
     : null;
 
-  // ECharts 折线模型：温度/扭矩/角度 三条 series，x 轴为 10s 桶时间
+  // ECharts line model: temp/torque/angle three series, x-axis is 10s bucket time
   const chart = useMemo<ChartModel>(() => {
     const xAxis: string[] = [];
     const temp: (number | null)[] = [];
@@ -138,8 +138,8 @@ export default function RobotDetailDrawer() {
       temp.push(typeof tv === 'number' ? Number(tv.toFixed(2)) : null);
       torque.push(typeof tq === 'number' ? Number(tq.toFixed(2)) : null);
       position.push(typeof po === 'number' ? Number(po.toFixed(3)) : null);
-      // 全关节最高温包络（后端逐桶聚合 max_joint_temp，非客户端推算）：
-      // 单看选中关节会漏「别的关节在发烧」——包络抬升即整机热问题。
+      // Whole-robot max-temperature envelope (backend aggregates max_joint_temp per bucket, not client-computed):
+      // looking only at the selected joint misses "other joints running hot" — envelope rising means a whole-robot heat problem.
       maxTemp.push(
         typeof point.max_joint_temp === 'number' ? Number(point.max_joint_temp.toFixed(2)) : null,
       );
@@ -157,13 +157,13 @@ export default function RobotDetailDrawer() {
     };
   }, [history, selectedJoint, t]);
 
-  // 该机器人最近告警：REST 是权威视图（含 ack/escalated 事后状态，WS 只推增量）。
-  // 后端 /alerts 暂无 robot_id 查询参数，故拉最近 200 条（_MAX_LIMIT=500 内）客户端过滤。
+  // This robot's recent alerts: REST is the authoritative view (includes post-hoc ack/escalated status, WS only pushes increments).
+  // The backend /alerts has no robot_id query param yet, so fetch the latest 200 (_MAX_LIMIT=500 range) and filter client-side.
   //
-  // 订单 35：这条查询**包含**被抑制项（`suppressed` 刻意不传）。
-  // 与 AlertLogTable 默认排除的做法不同，理由是本区的用途 ——
-  // 它是"排障时看这台机器到底报了些什么"，被压住的行正是最需要看见的那一批
-  //（它们解释了"为什么没弹出来"）。所以这里要全集，并在行内标「已抑制」。
+  // Order 35: this query **includes** suppressed items (`suppressed` deliberately not sent).
+  // Different from AlertLogTable's default exclusion, the reason is this area's purpose ——
+  // it's "when troubleshooting, see what this robot actually reported", the suppressed rows are exactly the batch most needing to be seen
+  // (they explain "why didn't this pop up"). So here we want the full set, and mark "suppressed" inline.
   const alertsQuery = useQuery({
     queryKey: ['robot-alerts', selectedRobotId],
     queryFn: () => fetchAlerts({ limit: 200 }),
@@ -175,9 +175,9 @@ export default function RobotDetailDrawer() {
     return items.filter((a) => a.robot_id === selectedRobotId).slice(0, 5);
   }, [alertsQuery.data, selectedRobotId]);
 
-  // 订单 27 T1：24 关节实时扭矩负载行模型（纯 CSS 条，无新 ECharts 实例）。
-  // maxAbs 取当前帧有值关节的最大 |扭矩| 作为满刻度；全零/无数据时钳到 1 防除零，
-  // 此时所有条宽为 0——语义仍是「无负载」而不是报错。
+  // Order 27 T1: 24-joint real-time torque load row model (pure CSS bars, no new ECharts instance).
+  // maxAbs takes the max |torque| of joints with values in the current frame as full scale; clamp to 1 when all-zero/no data to prevent divide-by-zero,
+  // at which point all bar widths are 0 —— the semantics are still "no load" rather than an error.
   const torqueRows = useMemo(() => {
     const torques = robot?.joint_torques ?? {};
     let maxAbs = 0;
@@ -197,8 +197,8 @@ export default function RobotDetailDrawer() {
     });
   }, [robot?.joint_torques]);
 
-  // 订单 27 T2：确认/撤回（仅 admin 可见，403 由后端兜底——前端只是不让看见点不动的东西）。
-  // 成功后 invalidate 本 Drawer 的告警查询：REST 是 ack 状态的权威视图，重拉即对账。
+  // Order 27 T2: acknowledge/withdraw (admin only visible, 403 covered by backend —— frontend just doesn't show the unclickable thing).
+  // On success invalidate this Drawer's alert query: REST is the authoritative view of ack state, re-fetch reconciles.
   const handleToggleAck = useCallback(
     async (a: AlertApiItem) => {
       setAckBusyId(a.alert_id);
@@ -207,8 +207,8 @@ export default function RobotDetailDrawer() {
         await (a.ack ? unackAlert(a.alert_id) : ackAlert(a.alert_id));
         await queryClient.invalidateQueries({ queryKey: ['robot-alerts', selectedRobotId] });
       } catch (e) {
-        // 刻意不透传含 "HTTP 5xx" 的原始文案：500 用例里 getByText(/HTTP 500/)
-        // 必须唯一命中历史图错误（测试契约），且 5xx 对值班员无操作价值。
+        // Deliberately don't pass through the original text containing "HTTP 5xx": in the 500 test case getByText(/HTTP 500/)
+        // must uniquely hit the history-chart error (test contract), and 5xx has no operational value for the operator.
         const msg = e instanceof Error ? e.message : t('error.op');
         setAckError(msg.includes('HTTP 5') ? t('ack.error') : msg);
       } finally {
@@ -255,8 +255,8 @@ export default function RobotDetailDrawer() {
     animation: false,
   };
 
-  // 电量趋势：卡片墙/基本信息只有瞬时电量，「5 分钟掉电 >10%」这类速率异常在这里一眼可见。
-  // 数据为后端逐桶聚合的 battery_pct（HistoryPointOut），非客户端推算。
+  // Battery trend: the card wall / basic info only have instantaneous battery, rate anomalies like "lost >10% in 5 minutes" are visible at a glance here.
+  // Data is the backend's per-bucket aggregated battery_pct (HistoryPointOut), not client-computed.
   const batteryChartOption = {
     backgroundColor: 'transparent',
     tooltip: { trigger: 'axis' },
@@ -285,16 +285,16 @@ export default function RobotDetailDrawer() {
         data: chart.battery,
         lineStyle: { width: 2, color: COLORS.accent },
         itemStyle: { color: COLORS.accent },
-        // accent #3B82F6 的 12% 透明派生（同 tokens.overlay 的派生方式，不引入新色相）
+        // 12% transparent derivation of accent #3B82F6 (same derivation as tokens.overlay, no new hue introduced)
         areaStyle: { color: 'rgba(59, 130, 246, 0.12)' },
       },
     ],
     animation: false,
   };
 
-  // ISSUE #77：Drawer 头部的状态同样只认 is_online。
-  // 旧写法 `STATUS_COLOR[robot.status_code]` 会让一台停报的"预警"机器人
-  // 在 Drawer 里继续保持黄色 —— 与卡片墙上的「失联」灰自相矛盾。
+  // ISSUE #77: the Drawer header's status also only recognizes is_online.
+  // The old `STATUS_COLOR[robot.status_code]` would keep a stopped-reporting "warning" robot
+  // yellow in the Drawer —— contradicting the card wall's "lost contact" gray.
   const displayState = robot
     ? robotDisplayState(robot.is_online === true, robot.status_code, hasEverReported(robot))
     : 'offline';
@@ -303,7 +303,7 @@ export default function RobotDetailDrawer() {
 
   return (
     <>
-      {/* 遮罩层：点击关闭（不阻挡主区布局，Drawer 固定定位） */}
+      {/* Mask layer: click to close (doesn't block the main area layout, Drawer is fixed-positioned) */}
       <div
         className="fixed inset-0 z-30"
         style={{ backgroundColor: COLORS.overlay }}
@@ -337,7 +337,7 @@ export default function RobotDetailDrawer() {
         </div>
 
         <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 flex flex-col gap-4">
-          {/* 基本信息 */}
+          {/* Basic info */}
           <section>
             <h3 style={{ ...FONT.metric, color: COLORS.textSecondary }}>{t('info.title')}</h3>
             <div className="grid grid-cols-3 gap-2 mt-1">
@@ -355,10 +355,10 @@ export default function RobotDetailDrawer() {
               </div>
               <div className="flex flex-col">
                 {/*
-                  「最后更新」优先用后端下发的 last_seen（**我们收到**那一帧的时刻），
-                  而不是机器人自述的 ts：离线诊断时后者是机器人的说法（可能时钟漂移、
-                  也可能是它自己算出来的），前者是坐在服务端这边的物证（ISSUE #77）。
-                  两者都有时优先 last_seen；老后端只给 ts 时回落，不显示空白。
+                  "Last updated" prefers the backend's last_seen (**the moment we received** that frame),
+                  rather than the robot's self-reported ts: for offline diagnosis the latter is the robot's word (possibly clock drift,
+                  or computed by itself), the former is the physical evidence sitting on the server side (ISSUE #77).
+                  When both exist, prefer last_seen; when the old backend only gives ts, fall back, don't show blank.
                 */}
                 <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>{t('info.lastUpdate')}</span>
                 <span className="tabular-nums" style={{ color: COLORS.textPrimary, fontWeight: 600 }}>
@@ -395,7 +395,7 @@ export default function RobotDetailDrawer() {
             </div>
           </section>
 
-          {/* 关节温度热力阵列（24 关节） */}
+          {/* Joint temperature heatmap array (24 joints) */}
           <section>
             <h3 className="mb-1" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
               {t('joint.arrayTitle')}
@@ -407,9 +407,9 @@ export default function RobotDetailDrawer() {
             />
           </section>
 
-          {/* 关节扭矩负载（实时帧快照，纯 CSS 条形——不新增 ECharts 实例以守住包体积。
-              点击切换选中关节，与热力图联动；aria-label 以「扭矩 」开头，
-              与热力图关节块的 aria-label（以关节名开头）在可访问性树上互不混淆）。 */}
+          {/* Joint torque load (real-time frame snapshot, pure CSS bars —— no new ECharts instance to preserve bundle size.
+              Click to switch selected joint, linked with the heatmap; aria-label starts with "torque ",
+              distinct from the heatmap joint block's aria-label (starting with joint name) on the accessibility tree). */}
           <section>
             <h3 className="mb-1" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
               {t('torque.title')}
@@ -455,7 +455,7 @@ export default function RobotDetailDrawer() {
             </div>
           </section>
 
-          {/* 选中关节的历史折线（窗口可切：5/30/60m，切换经 queryKey 自动重拉） */}
+          {/* Selected joint's history line chart (window switchable: 5/30/60m, switching auto-refetches via queryKey) */}
           <section>
             <div className="flex items-center justify-between gap-2 mb-1">
               <h3 style={{ ...FONT.metric, color: COLORS.textSecondary }}>
@@ -504,8 +504,8 @@ export default function RobotDetailDrawer() {
             )}
           </section>
 
-          {/* 电量趋势（后端逐桶聚合值）。只在历史成功加载时挂载——
-              空/错态文案只在上方关节图区块出现一次，避免测试与视觉的双重歧义。 */}
+          {/* Battery trend (backend per-bucket aggregated value). Only mounted when history loaded successfully ——
+              empty/error text appears only once in the joint-chart block above, avoiding dual ambiguity in tests and visuals. */}
           {!loading && !error && chart.xAxis.length > 0 ? (
             <section>
               <h3 className="mb-1" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
@@ -521,8 +521,8 @@ export default function RobotDetailDrawer() {
             </section>
           ) : null}
 
-          {/* 该机器人最近告警（REST 权威视图，按 robot_id 过滤最近 200 条取前 5；
-              订单 27 T2：admin 可就地确认/撤回，成功后 invalidate 重拉对账） */}
+          {/* This robot's recent alerts (REST authoritative view, filter latest 200 by robot_id take first 5;
+              Order 27 T2: admin can acknowledge/withdraw in place, invalidate and re-fetch on success to reconcile) */}
           <section>
             <h3 className="mb-1" style={{ ...FONT.metric, color: COLORS.textSecondary }}>
               {t('alerts.title')}
@@ -535,7 +535,7 @@ export default function RobotDetailDrawer() {
             {alertsQuery.isPending && alertsQuery.fetchStatus !== 'idle' ? (
               <div style={{ ...FONT.metric, color: COLORS.textSecondary }}>{t('alerts.loading')}</div>
             ) : alertsQuery.isError ? (
-              // 刻意不带 HTTP 码：500 用例里 getByText(/HTTP 500/) 必须唯一命中历史图错误
+              // Deliberately without HTTP code: in the 500 test case getByText(/HTTP 500/) must uniquely hit the history-chart error
               <div style={{ ...FONT.metric, color: COLORS.statusFault }}>{t('alerts.loadFail')}</div>
             ) : robotAlerts.length === 0 ? (
               <div style={{ ...FONT.metric, color: COLORS.textSecondary }}>{t('alerts.empty')}</div>
@@ -565,9 +565,9 @@ export default function RobotDetailDrawer() {
                       </span>
                     ) : null}
                     {a.suppressed ? (
-                      // 订单 35：与 AlertLogTable 同一措辞、同一配色 token（textSecondary，
-                      // 不是 statusFault —— 抑制不是一次新故障）。title 给根因规则，
-                      // 让"为什么没弹出来"在本区就能回答。
+                      // Order 35: same wording and same color token as AlertLogTable (textSecondary,
+                      // not statusFault —— suppression is not a new fault). title gives the root-cause rule,
+                      // so "why didn't this pop up" can be answered in this area.
                       <span
                         className="shrink-0"
                         style={{ ...FONT.metric, color: COLORS.textSecondary }}

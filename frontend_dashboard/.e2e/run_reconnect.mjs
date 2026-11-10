@@ -1,4 +1,4 @@
-// 验证：WS 断开后指数退避重连（1s→2s→…→10s）+ 连接状态点变红
+// Verify: after WS disconnect, exponential-backoff reconnect (1s→2s→…→10s) + the connection status dot turns red.
 import { JSDOM } from 'jsdom';
 import { createRequire } from 'node:module';
 import { WebSocketServer, WebSocket as WsClient } from 'ws';
@@ -24,31 +24,31 @@ const { __E2E_MOUNT__ } = await import('./bundle.cjs');
 __E2E_MOUNT__ ? __E2E_MOUNT__() : window.__E2E_MOUNT__();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 await sleep(200);
-console.log('初次连接数      :', connections, '状态:', window.__E2E__.wsStatus);
+console.log('Initial connections:', connections, 'state:', window.__E2E__.wsStatus);
 
-// 服务端主动踢断，触发前端退避重连
+// The server actively kicks the connection, triggering the front-end backoff reconnect.
 wss.clients.forEach((c) => c.terminate());
 await sleep(150);
-console.log('断开后 wsStatus :', window.__E2E__.wsStatus, '(期望 closed = 红点)');
+console.log('wsStatus after disconnect:', window.__E2E__.wsStatus, '(expected closed = red dot)');
 
-// 每轮：等重连成功 → 再踢断，观察退避递增（1s → 2s → 4s）
+// Each round: wait for reconnect success → kick again, observing the backoff increasing (1s → 2s → 4s).
 for (let round = 0; round < 4; round++) {
   const before = connections;
   const t0 = Date.now();
-  // 等本轮重连成功
+  // Wait for this reconnect round to succeed
   while (connections === before && Date.now() - t0 < 12000) await sleep(50);
   const waited = Date.now() - t0;
-  console.log(`  第 ${round + 1} 次重连耗时 ≈ ${waited}ms, 连接数=${connections}`);
+  console.log(`  Reconnect #${round + 1} took ≈ ${waited}ms, connections=${connections}`);
   await sleep(80);
-  wss.clients.forEach((c) => c.terminate()); // 再次踢断，触发下一轮退避
+  wss.clients.forEach((c) => c.terminate()); // Kick it again to trigger the next backoff round
 }
 const gaps = connectTimes.slice(1).map((t, i) => t - connectTimes[i]);
-console.log('重连次数        :', connections - 1);
-console.log('重连间隔(ms)    :', gaps.join(', '), '(期望 1000 → 2000 → 4000 → 8000)');
-// 期望退避 1s→2s→4s→8s（各留 ±40% 网络/定时抖动余量）
+console.log('Reconnect count     :', connections - 1);
+console.log('Reconnect gaps (ms) :', gaps.join(', '), '(expected 1000 → 2000 → 4000 → 8000)');
+// Expected backoff 1s→2s→4s→8s (each with ±40% margin for network/timer jitter).
 const expect = [1000, 2000, 4000, 8000];
 const ok = window.__E2E__.wsStatus === "open"
   && connections >= 5
   && expect.every((v, i) => gaps[i] >= v * 0.6 && gaps[i] <= v * 1.6);
-console.log(ok ? '  ✅ 指数退避重连生效' : '  ❌ 退避异常');
+console.log(ok ? '  ✅ Exponential backoff reconnect works' : '  ❌ Backoff abnormal');
 wss.close(); process.exit(ok ? 0 : 1);

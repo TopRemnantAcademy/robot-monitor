@@ -1,5 +1,5 @@
-// spec/03 §5.4 关节温度色块阵列（Drawer 内）
-// 严格按 spec/00 §5.5 的 24 个标准键名渲染（顺序即 JOINT_NAMES 顺序，左臂→右臂→左腿→右腿）。
+// spec/03 §5.4 joint temperature color-block array (inside Drawer)
+// Strictly renders by the 24 standard key names from spec/00 §5.5 (order is JOINT_NAMES order, left arm → right arm → left leg → right leg).
 
 import { COLORS, tempColor } from '../theme/tokens';
 import { JOINT_NAMES } from '../types/robot';
@@ -8,21 +8,21 @@ import { useI18n } from '../i18n/I18nProvider';
 
 interface JointHeatmapProps {
   temperatures: JointDict;
-  /** 选中的关节高亮描边（与 ECharts 折线联动） */
+  /** Highlight outline for the selected joint (linked with the ECharts line chart) */
   selectedJoint?: string | null;
   onSelectJoint?: (joint: string) => void;
 }
 
 /**
- * 关节 → 两行短名。480px Drawer / 6 列下每块约 66px，
- * 单行完整名（如 "L-shoulder pitch"）必然被截断成 "L-shoulde…"，
- * 故拆成「部位」+「轴向」两行，保证可读（spec/03 §5.4 要求显示关节短名）。
- * 例：left_shoulder_pitch → L·shoulder / pitch
+ * Joint → two-line short name. At 480px Drawer / 6 columns each block is ~66px,
+ * a single-line full name (e.g. "L-shoulder pitch") is inevitably truncated to "L-shoulde…",
+ * so split into "part" + "axis" two lines to keep it readable (spec/03 §5.4 requires showing joint short names).
+ * Example: left_shoulder_pitch → L·shoulder / pitch
  */
 function shortName(joint: string): { group: string; axis: string } {
   const side = joint.startsWith('left_') ? 'L' : joint.startsWith('right_') ? 'R' : '?';
   const body = joint.replace(/^(left|right)_/, '');
-  // 轴向后缀：pitch / roll / yaw
+  // Axis suffix: pitch / roll / yaw
   const m = body.match(/^(.*)_(pitch|roll|yaw)$/);
   const group = m ? m[1] : body;
   const axis = m ? m[2] : '';
@@ -34,7 +34,7 @@ export default function JointHeatmap({ temperatures, selectedJoint, onSelectJoin
   return (
     <div className="grid grid-cols-6 gap-1">
       {JOINT_NAMES.map((joint) => {
-        // 后端未上报该关节时给 undefined，色块显示 "--"，避免伪造 0℃ 绿块
+        // When the backend didn't report this joint, value is undefined, the block shows "--", avoiding a fake 0°C green block
         const value = temperatures?.[joint];
         const hasValue = typeof value === 'number' && Number.isFinite(value);
         const bg = hasValue ? tempColor(value as number) : COLORS.statusOffline;
@@ -52,7 +52,7 @@ export default function JointHeatmap({ temperatures, selectedJoint, onSelectJoin
               backgroundColor: bg,
               border: selected ? `2px solid ${COLORS.accent}` : `1px solid ${COLORS.border}`,
               borderRadius: '6px',
-              // 温度色作为底色时用深色字，保证对比度（配色仍严格取自 token）
+              // When temperature color is the background, use dark text to ensure contrast (colors still strictly from tokens)
             }}
           >
             <span

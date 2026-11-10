@@ -1,11 +1,11 @@
-// 真实浏览器截图：注入 mock WS（假后端），观察 100 卡墙 / 顶栏 KPI / 告警流 / Drawer
+// Real-browser screenshot: inject a mock WS (fake backend) and observe the 100-card wall / top-bar KPIs / alert stream / Drawer.
 import puppeteer from 'puppeteer';
 import { WebSocketServer } from 'ws';
 import http from 'node:http';
 
 const WS_PORT = 8300, API_PORT = 8301;
 
-// --- 假后端：WS 推 snapshot+telemetry+alert ---
+// --- Fake backend: WS pushes snapshot+telemetry+alert ---
 const wss = new WebSocketServer({ port: WS_PORT });
 const JOINT_NAMES = [
   'left_shoulder_pitch','left_shoulder_roll','left_shoulder_yaw','left_elbow_pitch','left_wrist_pitch','left_wrist_roll',
@@ -15,7 +15,7 @@ const JOINT_NAMES = [
 ];
 function makeRobot(i) {
   const id = `humanoid-${String(i + 1).padStart(3, '0')}`;
-  const base = 32 + (i * 7) % 50;                       // 覆盖绿/黄/红三温区
+  const base = 32 + (i * 7) % 50;                       // Cover the green/yellow/red temperature bands.
   const jt = {}; JOINT_NAMES.forEach((j, k) => { jt[j] = +(base + (k % 5) * 2.5).toFixed(1); });
   const status = i % 17 === 0 ? 3 : i % 7 === 0 ? 2 : i % 11 === 0 ? 0 : 1;
   return {
@@ -40,17 +40,17 @@ wss.on('connection', (ws) => {
     }
   }, 100);
   const alerts = [
-    { robot_id: 'humanoid-018', rule_id: 'motor_temp', severity: 3, message: '左肩俯仰关节温度 82.3°C 超过阈值 75°C', ts: Date.now() - 1000 },
-    { robot_id: 'humanoid-022', rule_id: 'battery', severity: 2, message: '电量 12.4% 低于阈值 15%', ts: Date.now() - 4000 },
-    { robot_id: 'humanoid-035', rule_id: 'joint_stuck', severity: 2, message: '左膝俯仰关节角度 3.2s 内变化 < 0.01rad，疑似卡死', ts: Date.now() - 9000 },
-    { robot_id: 'humanoid-051', rule_id: 'offline', severity: 3, message: '离线 12.6s 超过阈值 10s', ts: Date.now() - 15000 },
-    { robot_id: 'humanoid-067', rule_id: 'motor_temp', severity: 2, message: '右肘俯仰关节温度 71.8°C 超过阈值 70°C', ts: Date.now() - 22000 },
+    { robot_id: 'humanoid-018', rule_id: 'motor_temp', severity: 3, message: 'Left shoulder pitch joint temp 82.3°C exceeds threshold 75°C', ts: Date.now() - 1000 },
+    { robot_id: 'humanoid-022', rule_id: 'battery', severity: 2, message: 'Battery 12.4% below threshold 15%', ts: Date.now() - 4000 },
+    { robot_id: 'humanoid-035', rule_id: 'joint_stuck', severity: 2, message: 'Left knee pitch joint angle changed < 0.01rad within 3.2s, suspected stuck', ts: Date.now() - 9000 },
+    { robot_id: 'humanoid-051', rule_id: 'offline', severity: 3, message: 'Offline for 12.6s, exceeds threshold 10s', ts: Date.now() - 15000 },
+    { robot_id: 'humanoid-067', rule_id: 'motor_temp', severity: 2, message: 'Right elbow pitch joint temp 71.8°C exceeds threshold 70°C', ts: Date.now() - 22000 },
   ];
   alerts.forEach((a, i) => setTimeout(() => ws.send(JSON.stringify({ type: 'alert', data: a })), 600 + i * 350));
   ws.on('close', () => clearInterval(iv));
 });
 
-// --- 假后端 REST：/robots/{id}/history ---
+// --- Fake backend REST: /robots/{id}/history ---
 http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
@@ -77,7 +77,7 @@ await page.setViewport({ width: 1600, height: 900, deviceScaleFactor: 1 });
 page.on('console', (m) => { if (m.type() === 'error') console.log('[page error]', m.text()); });
 page.on('pageerror', (e) => console.log('[pageerror]', e.message));
 
-// 注入 WS/REST 指向假后端（覆盖 import.meta.env 的默认值）
+// Inject WS/REST to point at the fake backend (overriding import.meta.env defaults).
 await page.evaluateOnNewDocument((wsPort, apiPort) => {
   const OrigWS = window.WebSocket;
   class PatchedWS extends OrigWS {
@@ -97,24 +97,24 @@ await page.goto('http://127.0.0.1:4173/', { waitUntil: 'networkidle2' });
 await new Promise((r) => setTimeout(r, 3000));
 
 const kpi = await page.evaluate(() => document.body.innerText.slice(0, 400));
-console.log('=== 顶栏/首屏文本 ===\n' + kpi);
+console.log('=== Top bar / first-paint text ===\n' + kpi);
 
 const cardCount = await page.evaluate(() => {
-  // 卡片是 grid 内的 button，含 "H-0xx"
+  // A card is a button inside the grid, containing an "H-0xx" label
   return [...document.querySelectorAll('button')].filter((b) => /^H-\d{3}/.test(b.innerText.trim())).length;
 });
-console.log('卡片数:', cardCount);
+console.log('Card count:', cardCount);
 await page.screenshot({ path: '/tmp/shot-main.png' });
 
-// 打开 Drawer：点第一张卡片
+// Open the Drawer: click the first card.
 await page.evaluate(() => {
   const btn = [...document.querySelectorAll('button')].find((b) => /^H-\d{3}/.test(b.innerText.trim()));
   btn.click();
 });
 await new Promise((r) => setTimeout(r, 2500));
 const drawerText = await page.evaluate(() => document.body.innerText);
-console.log('=== Drawer 打开后含关键信息 ===');
-for (const k of ['基本信息', '关节温度阵列', '最近 5 分钟', '10s 分辨率', '温度(°C)', '扭矩(N·m)', '角度(rad)']) {
+console.log('=== Drawer open: contains key info ===');
+for (const k of ['Basic info', 'Joint temperature array (24 joints, telemetry schema)', 'Last 5 min', '10s resolution', 'Temp (°C)', 'Torque (N·m)', 'Angle (rad)']) {
   console.log(` ${drawerText.includes(k) ? '✅' : '❌'} ${k}`);
 }
 await page.screenshot({ path: '/tmp/shot-drawer.png' });

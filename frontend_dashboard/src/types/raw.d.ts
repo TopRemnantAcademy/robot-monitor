@@ -1,6 +1,6 @@
-// Vite `?raw` 导入的类型声明。
-// tsconfig 的 include 只有 ["src"]，覆盖不到仓库根的 docs/；
-// 这里声明通配模块，让 `import s from '...schema.json?raw'` 有 string 类型。
+// Vite `?raw` import type declaration.
+// tsconfig's include is only ["src"], which doesn't cover the repo-root docs/;
+// this declares a wildcard module so `import s from '...schema.json?raw'` gets a string type.
 declare module '*?raw' {
   const content: string;
   export default content;

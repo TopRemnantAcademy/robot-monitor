@@ -1,45 +1,46 @@
-// Zustand 全局状态树（spec/03 §1 / §5 / §6）
+// Zustand global state tree (spec/03 §1 / §5 / §6)
 //
-// 关键性能约束（AGENTS.md §3 性能护栏）：
-// 本 store 只暴露「批量入口」applyTelemetryBatch，由 useRobotWebSocket 的
-// 100ms setInterval 每帧调用一次。100 台 × 10Hz = 1000 msg/s，若每条消息都 set()
-// React 会收到 1000 次/秒的订阅通知，重渲染直接把主线程打满。
-// 因此 WS 消息先写入 useRef<Map> 缓冲，10Hz 统一刷入此处。
+// Key performance constraint (AGENTS.md §3 performance guardrail):
+// This store only exposes the batch entry point applyTelemetryBatch, called once per frame by the
+// 100ms setInterval in useRobotWebSocket. 100 robots × 10Hz = 1000 msg/s; if every message did set()
+// React would receive 1000 subscription notifications per second and re-render the main thread to death.
+// So WS messages are first buffered into a useRef<Map>, then flushed here uniformly at 10Hz.
 
 import { create } from 'zustand';
 import type { RobotAlert, RobotStatus, RobotTelemetry } from '../types/robot';
 import { JOINT_NAMES, isRobotOnline } from '../types/robot';
 
-/** 告警流滚动上限，防止长时间运行内存无限增长（200px 高度可见约 6 行） */
+/** Alert-stream rolling cap, to prevent unbounded memory growth during long runs (~6 rows visible at 200px height). */
 export const ALERT_BUFFER_LIMIT = 200;
 
 /**
- * 机群时序采样点（UI 趋势线用，见 FleetHealthAnalytics）。
+ * Fleet time-series sample point (for the UI trend line, see FleetHealthAnalytics).
  *
- * 为什么不从 WS 帧直接算趋势：robots Map 是**当前快照**，没有历史；而 /history 只按
- * 单机器人查。机群级趋势（在线率/活跃告警随时间的走向）需要一段滚动时间序列，故用
- * 低频采样（2s 一点）在客户端累积 —— 与 100ms 刷库热路径完全解耦，采样时才 O(n) 遍历一次。
+ * Why not compute the trend directly from WS frames: the robots Map is the **current snapshot**, with no history;
+ * and /history only queries a single robot. Fleet-level trends (online rate / active alerts over time) need a rolling
+ * time series, so we accumulate it on the client via low-frequency sampling (one point per 2s) —— fully decoupled
+ * from the 100ms flush hot path; it only does one O(n) pass at sample time.
  */
 export interface FleetSample {
   t: number;
-  /** 在线率 0–100（保留 1 位小数） */
+  /** Online rate 0–100 (kept to 1 decimal). */
   onlineRate: number;
-  /** severity ≥ 2 的活跃告警数 */
+  /** Number of active alerts with severity ≥ 2. */
   activeAlerts: number;
-  /** 在线机器人平均电量 % */
+  /** Average battery % of online robots. */
   avgBattery: number;
-  /** 在线机器人平均最高关节温度 °C */
+  /** Average max joint temperature °C of online robots. */
   avgTemp: number;
 }
 
-/** 趋势滚动窗口上限：2s × 90 ≈ 3 分钟。 */
+/** Trend rolling-window cap: 2s × 90 ≈ 3 minutes. */
 export const FLEET_SAMPLE_LIMIT = 90;
 
 /**
- * 从当前 store 快照算一个机群采样点。
+ * Compute one fleet sample point from the current store snapshot.
  *
- * 口径与 HealthSummaryHeader 顶栏严格一致（在线只认 is_online、活跃告警 = severity≥2），
- * 避免「顶栏一个数、趋势线另一个数」。
+ * The metric matches HealthSummaryHeader's top bar exactly (online only counts is_online; active alerts = severity≥2),
+ * to avoid "one number on the top bar, another on the trend line".
  */
 export function computeFleetSample(state: {
   robots: Map<string, RobotTelemetry>;
@@ -67,15 +68,15 @@ export function computeFleetSample(state: {
   };
 }
 
-/** 100 台标准 ID：humanoid-001 ~ humanoid-100（spec/00 §1） */
+/** 100 standard robot IDs: humanoid-001 ~ humanoid-100 (spec/00 §1). */
 export function buildRobotIds(count = 100): string[] {
   return Array.from({ length: count }, (_, i) => `humanoid-${String(i + 1).padStart(3, '0')}`);
 }
 
 /**
- * 无数据时的离线占位遥测（requirements 6：100 台不得空白）。
- * 关节字典按 spec/00 §5.5 的 24 个键名生成 0 值，
- * 否则 JointHeatmap 打开空机器人会渲染出空网格。
+ * Offline placeholder telemetry when there is no data (requirements 6: the 100 robots must not be blank).
+ * The joint dictionary is zero-filled using the 24 key names from spec/00 §5.5,
+ * otherwise JointHeatmap opening an empty robot would render an empty grid.
  */
 export function offlinePlaceholder(robotId: string): RobotTelemetry {
   const zeros: Record<string, number> = {};
@@ -90,47 +91,48 @@ export function offlinePlaceholder(robotId: string): RobotTelemetry {
     joint_positions: { ...zeros },
     error_code: 0,
     ts: 0,
-    // ISSUE #77：占位卡**必须**显式声明 is_online=false，而不是靠"status_code 是 0"
-    // 让下游去猜。占位与真实离线是两件事（前者=从未收到数据，后者=收到过但停了），
-    // 但两者的在线标志都是 false —— 只有这一个字段是全站唯一的在线权威。
+    // ISSUE #77: the placeholder card **must** explicitly declare is_online=false, rather than letting the
+    // downstream guess from "status_code is 0". Placeholder and real-offline are two different things
+    // (former = never received data, latter = received but stopped), but both have the online flag false ——
+    // only this one field is the single site-wide authority on online status.
     is_online: false,
     last_seen: null,
   };
 }
 
 interface RobotState {
-  /** robot_id -> 最新遥测（100 台常驻，未上报时为离线占位） */
+  /** robot_id -> latest telemetry (100 robots resident; offline placeholder when not reported). */
   robots: Map<string, RobotTelemetry>;
-  /** 告警流，新告警置顶（prepend） */
+  /** Alert stream, newest alert on top (prepend). */
   alerts: RobotAlert[];
-  /** WS 连接状态，用于顶栏状态点 */
+  /** WS connection status, for the top-bar status dot. */
   wsStatus: 'connecting' | 'open' | 'closed';
-  /** 当前打开的 Drawer 目标 */
+  /** Currently opened Drawer target. */
   selectedRobotId: string | null;
-  /** 机群时序采样滚动缓冲（UI 趋势线；2s 一个点，见 computeFleetSample） */
+  /** Fleet time-series rolling buffer (UI trend line; one point per 2s, see computeFleetSample). */
   fleetSamples: FleetSample[];
 
-  /** snapshot：全量填充（spec/00 §5.2 ①） */
+  /** snapshot: full fill (spec/00 §5.2 ①). */
   applySnapshot: (list: RobotTelemetry[]) => void;
-  /** telemetry：增量（spec/00 §5.2 ②）—— 由 100ms 节流后批量调用 */
+  /** telemetry: incremental (spec/00 §5.2 ②) —— called in batch after the 100ms throttle. */
   applyTelemetryBatch: (list: RobotTelemetry[]) => void;
-  /** alert：prepend 到告警流（spec/00 §5.2 ③） */
+  /** alert: prepend to the alert stream (spec/00 §5.2 ③). */
   pushAlert: (alert: RobotAlert) => void;
   /**
-   * 确认/撤回后被调（订单 17）：把某条告警的 ack 状态就地更新。
+   * Called after ack/withdraw (Order 17): update an alert's ack state in place.
    *
-   * 为什么按 alert_id 而非索引：告警流是 prepend 的，索引随时间漂移；
-   * alert_id 是稳定主键。找不到（WS 与 REST 视图不同步时）就静默跳过 ——
-   * UI 的权威来源是下一次 REST 拉取，这里只是让"刚点的那个按钮"立刻变灰。
+   * Why by alert_id rather than index: the alert stream is prepended, so the index drifts over time;
+   * alert_id is the stable primary key. If not found (WS and REST views out of sync) silently skip ——
+   * the UI's authority is the next REST fetch; this only makes "the button you just clicked" go gray immediately.
    */
   applyAlertAck: (alertId: number, patch: Partial<RobotAlert>) => void;
   setWsStatus: (status: 'connecting' | 'open' | 'closed') => void;
   selectRobot: (robotId: string | null) => void;
-  /** 追加一个机群采样点（环形缓冲，超 FLEET_SAMPLE_LIMIT 丢弃最旧）。 */
+  /** Append one fleet sample point (ring buffer; drop the oldest past FLEET_SAMPLE_LIMIT). */
   pushFleetSample: (sample: FleetSample) => void;
 }
 
-/** 离线占位初值，保证首屏（WS 未连上时）就有 100 张离线卡（orders/05 验收） */
+/** Offline-placeholder initial value, guaranteeing 100 offline cards on first paint (WS not yet connected; orders/05 acceptance). */
 function initialRobots(): Map<string, RobotTelemetry> {
   const map = new Map<string, RobotTelemetry>();
   for (const id of buildRobotIds(100)) map.set(id, offlinePlaceholder(id));
@@ -146,7 +148,7 @@ export const useRobotStore = create<RobotState>((set) => ({
 
   applySnapshot: (list) =>
     set((state) => {
-      // 全量填充：保留已有 100 个 ID 的骨架，用快照覆盖，缺失的回落为离线占位
+      // Full fill: keep the existing 100-ID skeleton, overwrite with the snapshot, missing ones fall back to offline placeholder.
       const next = new Map(state.robots);
       for (const id of next.keys()) next.set(id, offlinePlaceholder(id));
       for (const item of list) next.set(item.robot_id, item);
@@ -156,11 +158,11 @@ export const useRobotStore = create<RobotState>((set) => ({
   applyTelemetryBatch: (list) =>
     set((state) => {
       if (list.length === 0) return state;
-      // 结构性共享（ISSUE #75）：先做**引用级去重探测** —— 本帧里所有条目
-      // 若都与 state 中现有对象同引用（重复推送 / 空转帧），整张 Map 无需重建，
-      // 返回原 state 让 zustand 零通知、所有订阅者零重渲染。
-      // 引用有变的帧才做一次 Map 拷贝 + O(n) 覆盖（n ≤ 100）—— 拷贝本身廉价，
-      // 真正的花费在订阅通知，而通知的前提必须是"真有东西变了"。
+      // Structural sharing (ISSUE #75): first do a **reference-level dedupe probe** —— if every entry in this frame
+      // shares a reference with the existing object in state (duplicate push / idle frame), the whole Map need not be
+      // rebuilt: return the original state so zustand gives zero notifications and all subscribers zero re-renders.
+      // Only a frame with a changed reference gets one Map copy + O(n) overwrite (n ≤ 100) —— the copy itself is cheap;
+      // the real cost is in subscription notification, and notification's prerequisite must be "something actually changed".
       let touched = false;
       for (const item of list) {
         if (state.robots.get(item.robot_id) !== item) {
@@ -179,8 +181,8 @@ export const useRobotStore = create<RobotState>((set) => ({
 
   applyAlertAck: (alertId, patch) =>
     set((state) => {
-      // 只有内容真的变了才换数组引用：否则每次点击都会让整张告警表重渲染，
-      // 违背 R-01 §6「其余 UI 应静」的性能护栏。
+      // Only swap the array reference if content actually changed: otherwise every click would re-render the whole
+      // alert table, violating R-01 §6's "the rest of the UI should stay quiet" performance guardrail.
       let hit = false;
       const next = state.alerts.map((a) => {
         if (a.alert_id !== alertId) return a;
@@ -201,24 +203,26 @@ export const useRobotStore = create<RobotState>((set) => ({
 }));
 
 /**
- * 供组件按需派生的选择器（避免在组件内写 Map 遍历逻辑）。
+ * Selectors for components to derive on demand (avoids writing Map-traversal logic inside components).
  *
- * ISSUE #77：在线与否**只读后端下发的 `is_online`**（见 `isRobotOnline`），
- * 不再用 `r.status_code === 0` 反推。旧写法把「机器人自述的最后一帧状态」当成在线证据，
- * 于是停报的机器人每次都被算作在线 —— 大屏「在线 100 / 离线 0」正是这么来的。
+ * ISSUE #77: online or not reads **only the backend-issued `is_online`** (see `isRobotOnline`),
+ * no longer inferred from `r.status_code === 0`. The old writing treated "the robot's self-reported last frame state"
+ * as the online evidence, so every robot that stopped reporting was counted as online —— the dashboard's
+ * "online 100 / offline 0" illusion came from exactly this.
  *
- * 语义三分（不要合成一个 `offline` 数字）：
- *   - online  —— 后端在窗口内收到过遥测；
- *   - offline —— **收到过、但已经停了**（失联，需要运维去现场）；
- *   - never   —— 从未收到过任何遥测（init.sql 预置的 100 台，大部分开局即此态）。
- * 后两者在「在线率」里合并，但在卡片上必须区分：「离线」会被误读为"本来就是关着的"，
- * 而"失联"是"刚才还在干活、现在联系不上了"，处置动作完全不同。
+ * Three-way semantics (do not collapse into a single `offline` number):
+ *   - online  —— the backend received telemetry within the window;
+ *   - offline —— **received before, but already stopped** (lost contact, needs ops on-site);
+ *   - never   —— never received any telemetry (the 100 pre-seeded by init.sql, mostly start in this state).
+ * The latter two are merged in the "online rate", but must be distinguished on the cards: "offline" would be misread
+ * as "it was just off", while "lost contact" is "it was working a moment ago and now we can't reach it" —— completely
+ * different handling actions.
  */
 export function selectStatusCounts(state: { robots: Map<string, RobotTelemetry> }): {
   total: number;
   online: number;
   offline: number;
-  /** 收到过遥测、但已超出在线阈值（后端 is_online=false 且 last_seen 非空） */
+  /** Received telemetry before, but exceeded the online threshold (backend is_online=false and last_seen non-null). */
   stale: number;
 } {
   let online = 0;

@@ -1,5 +1,5 @@
-// spec/03 §5.1 —— 100 卡片墙
-// grid-cols-5 md:grid-cols-10 gap-2，每卡 aspect-[4/3]，颜色全部走 theme/tokens。
+// spec/03 §5.1 —— 100-card wall
+// grid-cols-5 md:grid-cols-10 gap-2, each card aspect-[4/3], all colors from theme/tokens.
 
 import { memo, useMemo, useRef } from 'react';
 import {
@@ -16,7 +16,7 @@ import { useRobotStore, buildRobotIds } from '../store/robotStore';
 import { countCardRender } from '../lib/observability';
 import { useI18n } from '../i18n/I18nProvider';
 
-/** 卡片只吃自己的 robotId，配合 memo + 自订阅让「本帧没变的卡」不重渲染 */
+/** Cards only consume their own robotId, combined with memo + self-subscription so "cards unchanged this frame" don't re-render */
 interface RobotCardProps {
   robotId: string;
   selected: boolean;
@@ -25,18 +25,18 @@ interface RobotCardProps {
 
 const RobotCard = memo(function RobotCard({ robotId, selected, onOpen }: RobotCardProps) {
   const { t } = useI18n();
-  // ISSUE #75 结构性共享：卡片**自己**订阅自己那一格（`s.robots.get(robotId)`）。
-  // 旧形态是网格订阅整张 Map → 每个刷库帧都重建 100 个卡片元素 + 100 次 memo
-  // 比较（哪怕本帧只有 3 台变了）；现在 zustand 按选择器输出（Object.is）逐卡
-  // 判定 —— 只有 robot 对象引用变化的卡才重渲染，网格本体零重渲染。
-  // Map 里 100 台常驻（离线占位兜底），但类型上 get 仍可返回 undefined，
-  // 防御性短路避免上游契约变化时白屏。
+  // ISSUE #75 structural sharing: the card **itself** subscribes to its own cell (`s.robots.get(robotId)`).
+  // The old form had the grid subscribe to the whole Map → every store-flush frame rebuilt 100 card elements + 100 memo
+  // comparisons (even when only 3 changed this frame); now zustand outputs per selector (Object.is) and judges per card —
+  // only cards whose robot object reference changed re-render, the grid body itself re-renders zero times.
+  // The Map holds 100 robots resident (offline placeholder fallback), but by type get can still return undefined,
+  // defensive short-circuit avoids white-screening when the upstream contract changes.
   const robot = useRobotStore((s) => s.robots.get(robotId));
   if (!robot) return null;
 
-  // ISSUE #77：着色与文案都走 robotDisplayState，**在线与否只认 is_online**。
-  // 旧实现用 `status_code === 0` 判断，于是停报的机器人保持最后一次的颜色与温度 ——
-  // 一台 1 小时前断电的"预警"机器人会一直亮着黄灯。现在它是灰色的「失联」。
+  // ISSUE #77: coloring and text both go through robotDisplayState, **online-ness only recognizes is_online**.
+  // The old implementation used `status_code === 0` to judge, so a robot that stopped reporting kept its last color and temperature ——
+  // a "warning" robot that lost power an hour ago would keep glowing yellow. Now it's the gray "lost contact".
   const state = robotDisplayState(robot.is_online === true, robot.status_code, hasEverReported(robot));
   const statusColor = DISPLAY_COLOR[state];
   const statusLabel = t(`display.${state}`);
@@ -57,11 +57,11 @@ const RobotCard = memo(function RobotCard({ robotId, selected, onOpen }: RobotCa
         aspectRatio: '4 / 3',
       }}
     >
-      {/* 1. 顶部状态条 */}
+      {/* 1. Top status bar */}
       <div className="h-1 w-full shrink-0" style={{ backgroundColor: statusColor }} />
 
       <div className="flex flex-col flex-1 min-h-0 px-2 py-1 gap-0.5">
-        {/* 2. Robot ID（H-042 短名，13px/600） */}
+        {/* 2. Robot ID (H-042 short name, 13px/600) */}
         <span
           className="truncate"
           style={{ ...FONT.cardId, color: statusColor === COLORS.statusOffline ? COLORS.textSecondary : COLORS.textPrimary }}
@@ -69,7 +69,7 @@ const RobotCard = memo(function RobotCard({ robotId, selected, onOpen }: RobotCa
           H-{robot.robot_id.replace(/^humanoid-/, '')}
         </span>
 
-        {/* 3. 电池条（宽=电量%） */}
+        {/* 3. Battery bar (width = battery %) */}
         <div className="flex items-center gap-1">
           <div className="flex-1 h-1.5 rounded-sm overflow-hidden" style={{ backgroundColor: COLORS.border }}>
             <div className="h-full" style={{ width: `${battWidth}%`, backgroundColor: battColor }} />
@@ -79,12 +79,12 @@ const RobotCard = memo(function RobotCard({ robotId, selected, onOpen }: RobotCa
           </span>
         </div>
 
-        {/* 4. 最高关节温度（16px/700，按温区着色） */}
+        {/* 4. Max joint temperature (16px/700, colored by temp zone) */}
         <span className="tabular-nums" style={{ fontSize: '16px', fontWeight: 700, color: tempClr }}>
           {offlineDisplay ? '--' : `${robot.max_joint_temp.toFixed(0)}°C`}
         </span>
 
-        {/* 5. 状态文字（ISSUE #77：掉线显示「失联」，不保留旧 status_code 的文案） */}
+        {/* 5. Status text (ISSUE #77: offline shows "lost contact", don't keep the old status_code text) */}
         <span className="mt-auto" style={{ ...FONT.metric, color: statusColor }}>
           {statusLabel}
         </span>
@@ -94,26 +94,26 @@ const RobotCard = memo(function RobotCard({ robotId, selected, onOpen }: RobotCa
 });
 
 /**
- * 100 卡网格本体。用 memo 包一层：父级 App 在绘制 Drawer（选中态变化）时，
- * 该子树 props 完全未变，memo 命中即可整块跳过 —— 不必为 100 张卡逐个 diff。
+ * 100-card grid body. Wrapped in one memo: when the parent App draws the Drawer (selected-state change),
+ * this subtree's props are completely unchanged, memo hit skips the whole block —— no need to diff 100 cards individually.
  *
- * ISSUE #75 结构性共享（消费侧）：网格**不再订阅整张 robots Map**。
- * 旧形态 `useRobotStore((s) => s.robots)` 让网格本体每个 100ms 刷库帧都重渲染
- * 并重建 100 个卡片元素；现在改为订阅常量 ID 列表（`buildRobotIds(100)`，
- * 内容永不变 → 本组件除 selectedRobotId 变化外**零重渲染**），每张卡通过
- * 自己的 `s.robots.get(robotId)` 自订阅取数 —— 只有引用变化的卡才重渲染。
+ * ISSUE #75 structural sharing (consumer side): the grid **no longer subscribes to the whole robots Map**.
+ * The old form `useRobotStore((s) => s.robots)` made the grid body re-render every 100ms store-flush frame
+ * and rebuild 100 card elements; now it subscribes to a constant ID list (`buildRobotIds(100)`,
+ * content never changes → this component re-renders zero times except on selectedRobotId change), each card
+ * fetches data via its own `s.robots.get(robotId)` self-subscription —— only cards with reference changes re-render.
  */
 const RobotGrid = memo(function RobotGrid() {
-  // 订单 16 T2：卡片墙渲染计数。
+  // Order 16 T2: card-wall render counter.
   //
-  // 用 useRef 而不是 state —— 这是本计数能存在的前提：放 state 会 setState →
-  // 触发本组件重渲染 → 计数又 +1 → 无限循环。useRef 是渲染期可安全写的可变盒子，
-  // 写它不产生任何 React 订阅通知（不触发额外渲染，满足订单 16 的硬约束）。
+  // Uses useRef instead of state —— this is the premise that this counter can exist: putting it in state would setState →
+  // trigger this component to re-render → counter +1 again → infinite loop. useRef is a mutable box safe to write during render,
+  // writing to it produces no React subscription notification (no extra render, satisfying Order 16's hard constraint).
   //
-  // 计数点选在 **RobotGrid 本体**而不是 100 个 RobotCard：#75 之后网格本体
-  // 只在选中态变化时渲染，逐卡重渲染不再抬升此数字 —— "wallRenders 不随刷库
-  // 帧增长" 本身就是 #75 结构性共享的验收信号。dev 模式下 StrictMode 双调用
-  // 仍使读数约为真实值 2 倍，对照以生产构建为准。
+  // The counting point is on the **RobotGrid body** rather than the 100 RobotCards: after #75 the grid body
+  // only renders on selected-state change, per-card re-renders no longer raise this number —— "wallRenders doesn't grow with store-flush
+  // frames" is itself the acceptance signal of #75 structural sharing. In dev mode StrictMode double-invoke
+  // still makes the reading ~2x the real value; compare against the production build.
   const renderCountRef = useRef(0);
   renderCountRef.current += 1;
   countCardRender(renderCountRef.current);
@@ -121,7 +121,7 @@ const RobotGrid = memo(function RobotGrid() {
   const selectedRobotId = useRobotStore((s) => s.selectedRobotId);
   const selectRobot = useRobotStore((s) => s.selectRobot);
 
-  // 常量列表：内容与引用都永不变，useMemo 只是契约性表达（期待编译器常量折叠）。
+  // Constant list: content and reference both never change, useMemo is merely a contractual expression (hoping for compiler constant folding).
   const ids = useMemo(() => buildRobotIds(100), []);
 
   return (

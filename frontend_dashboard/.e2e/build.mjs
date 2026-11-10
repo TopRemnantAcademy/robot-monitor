@@ -1,4 +1,4 @@
-// 统一的测试打包入口（把产品源码打成 Node 可跑的 CJS，便于用真实实现做集成验证）
+// Unified test bundling entry (bundle product source into Node-runnable CJS so real implementations can be used for integration verification)
 import esbuild from 'esbuild';
 
 const wsPort = process.env.E2E_WS_PORT ?? '8123';
@@ -14,15 +14,15 @@ const targets = [
   { entry: '.e2e/entry.tsx', out: '.e2e/bundle.cjs', external: [] },
   { entry: '.e2e/entry_alert.tsx', out: '.e2e/alert.cjs', external: [] },
   { entry: '.e2e/entry_drawer.tsx', out: '.e2e/drawer.cjs',
-    // 订单 09：产品改用 echarts-for-react 的 core 入口，需一并 external：
-    //   1) 避免 CJS default 互操作把 module object 当成组件传给 React；
-    //   2) 让产品与测试共用同一个 echarts 实例注册表
-    //      （否则产物内联一份 echarts/core，测试侧 getInstanceByDom 恒为 null）。
-    // echarts 全家桶统一 external：核心与 charts/components/renderers 必须来自
-    // 同一份模块实例，否则 use() 注册的表与 init() 读取的表不是同一张（xAxis not found）。
+    // Order 09: the product switched to echarts-for-react's core entry, which must also be externalized:
+    //   1) avoid CJS default-interop passing the module object as a component to React;
+    //   2) let product and tests share the same echarts instance registry
+    //      (otherwise the bundle inlines its own echarts/core and getInstanceByDom on the test side is always null).
+    // The whole echarts family is externalized uniformly: core, charts/components/renderers must come from
+    // the same module instance, otherwise the table registered via use() and the one read via init() won't match (xAxis not found).
     external: ['echarts', 'echarts/core', 'echarts/charts', 'echarts/components',
       'echarts/renderers', 'echarts-for-react', 'echarts-for-react/lib/core'] },
-  // 订单 26（I-20）：错误边界 + react-query 缓存/重试验证入口
+  // Order 26 (I-20): error boundary + react-query cache/retry verification entry
   { entry: '.e2e/entry_order26.tsx', out: '.e2e/order26.cjs', external: [] },
 ];
 

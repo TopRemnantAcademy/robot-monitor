@@ -1,5 +1,5 @@
-// 订单 26（I-20）验证：ErrorBoundary 兜底 + react-query 缓存/重试
-// 前置：E2E_API_BASE=http://localhost:8202 node .e2e/build.mjs
+// Order 26 (I-20) verification: ErrorBoundary fallback + react-query cache/retry.
+// Prerequisite: E2E_API_BASE=http://localhost:8202 node .e2e/build.mjs
 import { JSDOM } from 'jsdom';
 import http from 'node:http';
 
@@ -10,15 +10,15 @@ for (const k of ['DOMException','HTMLElement','Element','MessageEvent','Event','
   if (dom.window[k]) global[k] = dom.window[k];
 }
 global.IS_REACT_ACT_ENVIRONMENT = false;
-// React 对边界捕获必然 console.error；断言看的是 DOM，静音以保持输出干净
+// React will console.error on a caught boundary; assertions look at the DOM, so mute to keep output clean.
 const origErr = console.error.bind(console);
 console.error = (...a) => {
   const msg = String(a[0] ?? '');
-  if (msg.includes('模拟渲染异常') || msg.includes('The above error occurred') || msg.includes('Not implemented')) return;
+  if (msg.includes('simulated render exception') || msg.includes('The above error occurred') || msg.includes('Not implemented')) return;
   origErr(...a);
 };
 
-// 假后端：/history 前 2 次 500（触发重试），第 3 次 200
+// Fake backend: /history returns 500 for the first 2 calls (triggering retries), then 200 on the 3rd.
 let historyHits = 0;
 const server = http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -47,26 +47,26 @@ const __MOUNT_QUERY__ = window.__MOUNT_QUERY__;
 const __UNMOUNT_BOUNDARY__ = __MOUNT_BOUNDARY__();
 await sleep(300);
 const bHtml = document.body.innerHTML;
-check('子组件抛错时显示兜底 UI（不白屏）', bHtml.includes('看板渲染出错'), '');
-check('兜底 UI 含错误摘要', bHtml.includes('模拟渲染异常'), '');
-check('兜底 UI 提供「重试」按钮', bHtml.includes('重试') && bHtml.includes('刷新页面'), '');
-check('抛错组件内容已卸载', !bHtml.includes('data-testid="ok"'), '');
+check('Fallback UI shown when child throws (no white screen)', bHtml.includes('Dashboard render error'), '');
+check('Fallback UI contains the error summary', bHtml.includes('simulated render exception'), '');
+check('Fallback UI offers a "Retry" button', bHtml.includes('Retry') && bHtml.includes('Reload page'), '');
+check('Throwing component content unmounted', !bHtml.includes('data-testid="ok"'), '');
 __UNMOUNT_BOUNDARY__();
 
-// ===== B) react-query 缓存 + 重试 =====
+// ===== B) react-query cache + retry =====
 __MOUNT_QUERY__();
-await sleep(4000); // 2 次 500 → 退避重试 3 次，留足时间
-check('失败后自动重试并最终成功（ok:1）', document.querySelector('[data-testid="state"]')?.textContent === 'ok:1', document.querySelector('[data-testid="state"]')?.textContent);
-check('重试确实发生了（后端命中 >=3 次）', historyHits >= 3, 'hits=' + historyHits);
+await sleep(4000); // 2x 500 → 3 retries with backoff; leave enough time.
+check('Auto-retry after failure and eventual success (ok:1)', document.querySelector('[data-testid="state"]')?.textContent === 'ok:1', document.querySelector('[data-testid="state"]')?.textContent);
+check('Retry actually happened (backend hit >=3 times)', historyHits >= 3, 'hits=' + historyHits);
 
-// 缓存：同 key 再发起一次 fetchQuery，staleTime 内应命中缓存、不再打后端
+// Cache: re-issue a fetchQuery with the same key; within staleTime it should hit the cache and not hit the backend again.
 const qc = window.__QC__;
 const before = historyHits;
-await qc.fetchQuery({ queryKey: ['robot-history', 'humanoid-042'], queryFn: () => Promise.reject(new Error('不该被调用')) });
-check('staleTime 内命中缓存（不再打后端）', historyHits === before, `before=${before} after=${historyHits}`);
+await qc.fetchQuery({ queryKey: ['robot-history', 'humanoid-042'], queryFn: () => Promise.reject(new Error('should not be called')) });
+check('Cache hit within staleTime (no backend re-hit)', historyHits === before, `before=${before} after=${historyHits}`);
 
 server.close();
 let fail = 0;
 for (const [, ok] of checks) if (!ok) fail++;
-console.log(fail === 0 ? '\n订单 26 全部通过 ✅' : `\n订单 26 存在失败 ❌ (${fail})`);
+console.log(fail === 0 ? '\nOrder 26 all passed ✅' : `\nOrder 26 has failures ❌ (${fail})`);
 process.exit(fail ? 1 : 0);

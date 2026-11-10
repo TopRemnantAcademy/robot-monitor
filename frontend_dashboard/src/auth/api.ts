@@ -1,28 +1,28 @@
-// 认证相关的后端调用（订单 15 T4）
+// Auth-related backend calls (Order 15 T4)
 //
-// 只封装登录、登出、/users/me 三个动作 —— 业务请求（/robots/history）
-// 留在各自的调用点，用 `authHeaders()` 加头即可，不必为它再包一层。
+// Only wraps the three actions: login, logout, /users/me — business requests (/robots/history)
+// stay at their own call sites, just add headers via `authHeaders()`, no need to wrap another layer.
 
 import { authHeaders, clearToken, getToken, setToken } from './session';
 import type { CurrentUser, LoginResult } from './types';
 import type { SupportedRobotsResponse } from '../types/robot';
 
-/** REST 基址：Vite 只暴露 VITE_ 前缀（orders/05 禁止项）。 */
+/** REST base URL: Vite only exposes VITE_ prefix (orders/05 forbidden item). */
 export const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
 
-/** 401/403 的统一出口。注册回调让 Store 层去改 UI 状态（避免这里 import store 造成环）。 */
+/** Unified 401/403 exit. Register a callback to let the Store layer change UI state (avoid importing store here and creating a cycle). */
 type UnauthorizedHandler = () => void;
 let onUnauthorized: UnauthorizedHandler | null = null;
 
-/** 由 App 注入：收到 401 时该做什么（清 token + 回登录态）。 */
+/** Injected by App: what to do when 401 is received (clear token + return to login state). */
 export function setUnauthorizedHandler(handler: UnauthorizedHandler | null): void {
   onUnauthorized = handler;
 }
 
 /**
- * 触发"未授权"流程：清 token + 通知订阅方回登录态。
- * 供 api.ts 内部与业务调用点（如 Drawer 的 401 分支）共用，
- * **不要**用手写 `setUnauthorizedHandler(() => {})` 代替 —— 那是把全局处理器清掉。
+ * Trigger the "unauthorized" flow: clear token + notify subscribers to return to login state.
+ * Shared internally by api.ts and business call sites (e.g. the Drawer's 401 branch),
+ * **do not** replace it with a hand-written `setUnauthorizedHandler(() => {})` — that clears the global handler.
  */
 export function notifyUnauthorized(): void {
   clearToken();
@@ -30,11 +30,11 @@ export function notifyUnauthorized(): void {
 }
 
 /**
- * 登录。成功后 token 落 sessionStorage。
+ * Login. On success the token is stored in sessionStorage.
  *
- * ⚠️ 必须用 `application/x-www-form-urlencoded`：fastapi-users 的
- * `/auth/jwt/login` 走 OAuth2PasswordRequestForm（OpenAPI 标准），
- * 发 JSON 会得到 422。字段名是 `username`（值填 email），不是 `email`。
+ * ⚠️ Must use `application/x-www-form-urlencoded`: fastapi-users'
+ * `/auth/jwt/login` uses OAuth2PasswordRequestForm (OpenAPI standard),
+ * sending JSON yields 422. The field name is `username` (value is the email), not `email`.
  */
 export async function login(email: string, password: string): Promise<LoginResult> {
   const body = new URLSearchParams({ username: email, password });
@@ -45,11 +45,11 @@ export async function login(email: string, password: string): Promise<LoginResul
   });
 
   if (res.status === 400) {
-    // 后端对"口令错误/用户不存在"统一返回 400（不区分，避免账号枚举）。
-    throw new Error('邮箱或密码不正确');
+    // The backend returns 400 uniformly for "wrong password / user not found" (not distinguished, to avoid account enumeration).
+    throw new Error('Email or password is incorrect');
   }
   if (!res.ok) {
-    throw new Error(`登录失败（HTTP ${res.status}）`);
+    throw new Error(`Login failed (HTTP ${res.status})`);
   }
 
   const data = (await res.json()) as { access_token: string; token_type: string };
@@ -57,21 +57,21 @@ export async function login(email: string, password: string): Promise<LoginResul
   return { accessToken: data.access_token, tokenType: data.token_type };
 }
 
-/** 取当前用户（含 role）。前端据此隐藏管理员按钮。 */
+/** Fetch the current user (including role). The frontend uses this to hide admin buttons. */
 export async function fetchCurrentUser(): Promise<CurrentUser> {
   const res = await fetch(`${API_BASE}/users/me`, { headers: authHeaders() });
   if (res.status === 401) {
     notifyUnauthorized();
-    throw new Error('登录已过期，请重新登录');
+    throw new Error('Session expired, please log in again');
   }
-  if (!res.ok) throw new Error(`获取用户信息失败（HTTP ${res.status}）`);
+  if (!res.ok) throw new Error(`Failed to fetch user info (HTTP ${res.status})`);
   return (await res.json()) as CurrentUser;
 }
 
 /**
- * 登出。JWT 是无状态的，服务端丢弃没有意义 —— 真正生效的是本地清 token。
- * 仍调用该端点，是为了让"登出"在服务端日志里留下记录（审计需要）。
- * 端点失败也不该阻塞用户离开，故错误只吞掉。
+ * Logout. JWT is stateless, so discarding it server-side is meaningless — what actually takes effect is clearing the local token.
+ * We still call the endpoint so that "logout" leaves a record in the server logs (auditing needs it).
+ * If the endpoint fails it should not block the user from leaving, so errors are simply swallowed.
  */
 export async function logout(): Promise<void> {
   try {
@@ -80,26 +80,26 @@ export async function logout(): Promise<void> {
       headers: authHeaders(),
     });
   } catch {
-    /* 网络不通时仍然要清本地 token */
+    /* still clear local token when network is down */
   }
   notifyUnauthorized();
 }
 
-/** 供业务调用点判断"是否已登录"，避免每次直接摸 sessionStorage。 */
+/** Lets business call sites check "is logged in", avoiding touching sessionStorage directly each time. */
 export function hasToken(): boolean {
   return getToken() !== null;
 }
 
 /**
- * 取「平台支持的机型」目录 + 在册机群构成（GET /supported-robots）。
- * viewer 起可读；用于 UI 与 admin UI 的「支持的机型」展示。
+ * Fetch the "platform-supported robot models" catalog + registered fleet composition (GET /supported-robots).
+ * Readable from viewer role up; used for the "supported models" display in both the UI and admin UI.
  */
 export async function fetchSupportedRobots(): Promise<SupportedRobotsResponse> {
   const res = await fetch(`${API_BASE}/supported-robots`, { headers: authHeaders() });
   if (res.status === 401) {
     notifyUnauthorized();
-    throw new Error('登录已过期，请重新登录');
+    throw new Error('Session expired, please log in again');
   }
-  if (!res.ok) throw new Error(`获取支持的机型失败（HTTP ${res.status}）`);
+  if (!res.ok) throw new Error(`Failed to fetch supported models (HTTP ${res.status})`);
   return (await res.json()) as SupportedRobotsResponse;
 }

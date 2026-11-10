@@ -1,10 +1,10 @@
-// 订单 26（I-20）：全局错误边界的兜底 UI。
+// Order 26 (I-20): fallback UI for the global error boundary.
 //
-// 定位：**最后一道防线**。组件渲染抛错时，整棵子树被卸载，用户看到这块而不是白屏。
-// 大屏是"无人值守"场景 —— 残缺点亮好过全黑，所以给两个动作：
-//   1) 「重试」resetErrorBoundary()：先把边界内的子树重挂一遍（多数瞬时错误可恢复）；
-//   2) 「刷新页面」：边界外的状态（如 WS）也重置，兜底更彻底。
-// 样式沿用 design token（spec/03 §3），不引入新色值。
+// Positioning: **last line of defense**. When a component render throws, the entire subtree is unmounted and the user sees this instead of a white screen.
+// The dashboard is an "unattended" scenario —— a broken-but-lit screen is better than all black, so two actions are given:
+//   1) "Retry" resetErrorBoundary(): first re-mount the subtree inside the boundary (most transient errors are recoverable);
+//   2) "Reload page": also resets state outside the boundary (such as WS), more thorough fallback.
+// Styling reuses design tokens (spec/03 §3), no new color values introduced.
 
 import type { FallbackProps } from 'react-error-boundary';
 import { COLORS, FONT } from './theme/tokens';

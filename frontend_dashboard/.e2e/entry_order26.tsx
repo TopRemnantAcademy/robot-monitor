@@ -1,6 +1,6 @@
-// 订单 26（I-20）e2e 入口：
-//  A) ErrorBoundary 兜住子组件渲染抛错（不白屏，显示兜底 UI + 重试按钮）
-//  B) react-query 对 /history：失败自动重试 + 同 key 命中缓存（不再打后端）
+// Order 26 (I-20) e2e entry:
+//  A) ErrorBoundary catches a child component render throw (no blank screen; shows fallback UI + retry button)
+//  B) react-query against /history: auto-retry on failure + same-key cache hit (no further backend calls)
 import { createRoot } from 'react-dom/client';
 import { ErrorBoundary } from 'react-error-boundary';
 import { QueryClientProvider, useQuery } from '@tanstack/react-query';
@@ -15,9 +15,9 @@ declare global {
   }
 }
 
-// —— A) 错误边界：子组件无条件抛错 ——
+// —— A) Error boundary: the child component throws unconditionally ——
 function Boom(): JSX.Element {
-  throw new Error('模拟渲染异常(order26-e2e)');
+  throw new Error('simulated render exception(order26-e2e)');
 }
 
 window.__MOUNT_BOUNDARY__ = () => {
@@ -33,7 +33,7 @@ window.__MOUNT_BOUNDARY__ = () => {
   return () => root.unmount();
 };
 
-// —— B) react-query：暴露 queryClient 与请求计数，供断言重试与缓存 ——
+// —— B) react-query: expose queryClient and request count for asserting retry and cache behavior ——
 function HistoryProbe() {
   const q = useQuery({
     queryKey: robotHistoryKey('humanoid-042'),

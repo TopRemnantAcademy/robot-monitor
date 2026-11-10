@@ -1,21 +1,21 @@
-// 告警闭环的后端调用（订单 17 T4）。
+// Backend calls for the alert lifecycle (Order 17 T4).
 //
-// 与 auth/api.ts 的分工：那里是认证动作，这里是业务读写。
-// 复用 API_BASE 与 authHeaders()（都来自 auth 层），不重复定义基址。
+// Division of labor with auth/api.ts: that file is auth actions, this is business read/write.
+// Reuse API_BASE and authHeaders() (both from the auth layer), don't redefine the base URL.
 
 import { authHeaders } from './session';
 import { API_BASE, notifyUnauthorized } from './api';
 import type { AlertFilter, AlertPage, AckResult } from '../types/robot';
 
-/** 统一处理 401：清 token → 回登录态（复用 auth 层的既有出口，不另造一套）。 */
+/** Unified 401 handling: clear token → return to login state (reuse the existing auth-layer exit, no new one). */
 function handle401(res: Response): void {
   if (res.status === 401) {
     notifyUnauthorized();
-    throw new Error('登录已过期，请重新登录');
+    throw new Error('Session expired, please log in again');
   }
 }
 
-/** 筛选 → 查询串。`unacked`→ack=false，`escalated`→escalated=true。 */
+/** Filter → query string. `unacked`→ack=false, `escalated`→escalated=true. */
 function filterQuery(filter: AlertFilter): string {
   if (filter === 'unacked') return 'ack=false';
   if (filter === 'escalated') return 'escalated=true';
@@ -27,21 +27,21 @@ export interface FetchAlertsParams {
   limit?: number;
   offset?: number;
   /**
-   * 抑制维度过滤（订单 35）：
-   *   true  → 只拉被抑制的；false → 排除被抑制的；省略 → 不传该参数（后端返回全集）。
+   * Suppression-dimension filter (Order 35):
+   *   true  → only pull suppressed; false → exclude suppressed; omitted → don't send the param (backend returns the full set).
    *
-   * 与 `filter` 是两个正交维度（后者是"看哪一类"，前者是"要不要含被抑制的"），
-   * 故不合并进 `AlertFilter` 联合类型 —— 否则「未确认 + 已抑制」无法表达。
+   * This is orthogonal to `filter` (the latter is "which category to view", the former is "whether to include suppressed"),
+   * so it is not merged into the `AlertFilter` union type — otherwise "unacknowledged + suppressed" cannot be expressed.
    */
   suppressed?: boolean;
 }
 
 /**
- * 分页拉取告警历史。
+ * Paginated fetch of alert history.
  *
- * 为什么告警流同时有 WS 与这个 REST 两路数据源：
- * WS 是「新告警」的实时推送（只给增量），REST 是「已有告警」的权威分页视图
- * （含 ack/escalated 等**事后变化**的状态）。WS ≠ 完整历史，Pagination 必须走 REST。
+ * Why the alert stream has both WS and this REST data source:
+ * WS is the real-time push of "new alerts" (incremental only), REST is the authoritative paginated view of "existing alerts"
+ * (including post-hoc status changes like ack/escalated). WS ≠ full history, pagination must go through REST.
  */
 export async function fetchAlerts({
   filter = 'all',
@@ -55,8 +55,8 @@ export async function fetchAlerts({
     const [k, v] = q.split('=');
     params.set(k, v);
   }
-  // `suppressed=undefined` 时**不写这个 key**：URLSearchParams.set 会把 undefined
-  // 序列化成字面量 "undefined"，后端 `Query(default=None, ...)` 收到它 → 422。
+  // When `suppressed=undefined`, **don't write this key**: URLSearchParams.set would serialize undefined
+  // into the literal "undefined", and the backend `Query(default=None, ...)` receiving it → 422.
   if (suppressed !== undefined) params.set('suppressed', String(suppressed));
   params.set('limit', String(limit));
   params.set('offset', String(offset));
@@ -65,37 +65,37 @@ export async function fetchAlerts({
     headers: authHeaders(),
   });
   handle401(res);
-  if (!res.ok) throw new Error(`获取告警失败（HTTP ${res.status}）`);
+  if (!res.ok) throw new Error(`Failed to fetch alerts (HTTP ${res.status})`);
   return (await res.json()) as AlertPage;
 }
 
-/** ack / unack 的公共实现。`ack=true` 确认，`false` 撤回。 */
+/** Shared ack/unack implementation. `ack=true` acknowledges, `false` withdraws. */
 async function setAck(alertId: number, ack: boolean): Promise<AckResult> {
   const verb = ack ? 'ack' : 'unack';
   const res = await fetch(`${API_BASE}/alerts/${alertId}/${verb}`, {
     method: 'POST',
-    // 必须带 Content-Type + 空 body：后端 AckRequest 声明了 extra=forbid，
-    // 传任何字段（尤其 ack_by）都会 422 —— 这是刻意的防伪造。
+    // Must include Content-Type + empty body: the backend AckRequest declares extra=forbid,
+    // sending any field (especially ack_by) would 422 — this is a deliberate anti-forgery measure.
     headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: '{}',
   });
   handle401(res);
   if (res.status === 403) {
-    throw new Error('需要管理员权限才能确认告警');
+    throw new Error('Admin permission required to acknowledge alerts');
   }
   if (res.status === 404) {
-    throw new Error('该告警不存在（可能已过期清理）');
+    throw new Error('This alert does not exist (may have expired/been cleaned up)');
   }
-  if (!res.ok) throw new Error(`确认失败（HTTP ${res.status}）`);
+  if (!res.ok) throw new Error(`Acknowledge failed (HTTP ${res.status})`);
   return (await res.json()) as AckResult;
 }
 
-/** 确认告警（需 admin）。 */
+/** Acknowledge an alert (requires admin). */
 export function ackAlert(alertId: number): Promise<AckResult> {
   return setAck(alertId, true);
 }
 
-/** 撤回确认（需 admin）。 */
+/** Withdraw acknowledgement (requires admin). */
 export function unackAlert(alertId: number): Promise<AckResult> {
   return setAck(alertId, false);
 }

@@ -2,7 +2,7 @@
 @tailwind components;
 @tailwind utilities;
 
-/* spec/03 §3 暗色工业大屏主题：整页禁止滚动条（仅卡片/告警区内部滚动） */
+/* spec/03 §3 dark industrial big-screen theme: no page scrollbar (only card/alert area scrolls internally) */
 html,
 body,
 #root {
@@ -15,7 +15,7 @@ body,
   font-family: 'Inter', 'HarmonyOS Sans SC', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
 }
 
-/* 细滚动条，不抢视觉 */
+/* Thin scrollbar that doesn't steal attention */
 *::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -31,21 +31,21 @@ body,
   background: #2b3648;
 }
 
-/* 键盘可达性：大屏也会被键盘驱动（值班台无鼠标），必须有可见焦点环。
-   颜色取自 tokens.ts 的 accent #3B82F6，禁止自创色相。 */
+/* Keyboard accessibility: the big screen is also keyboard-driven (no mouse at the duty desk), so a visible focus ring is required.
+   Color comes from tokens.ts accent #3B82F6; no new hue may be introduced. */
 :focus-visible {
   outline: 2px solid #3b82f6;
   outline-offset: 1px;
 }
 
-/* 卡片/告警行是按钮，默认字体会被浏览器改成系统 UI 字体，强制继承 */
+/* Cards/alert rows are buttons; the browser would swap their font for the system UI font, so force inheritance */
 button {
   font: inherit;
   color: inherit;
   background: transparent;
 }
 
-/* 尊重系统「减少动态效果」偏好（spec/03 未强制动画，这里只做兜底） */
+/* Respect the OS "reduce motion" preference (spec/03 doesn't mandate animation; this is just a fallback) */
 @media (prefers-reduced-motion: reduce) {
   * {
     transition-duration: 0.01ms !important;

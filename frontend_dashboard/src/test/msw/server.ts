@@ -1,7 +1,7 @@
-// msw Node 侧服务器（在 jsdom 环境的测试进程里拦截 fetch）。
+// msw Node-side server (intercepts fetch inside the jsdom test process).
 //
-// 注意 msw 2.x 的包名是 `msw/node`（不再是 `msw/node` 的 setupServer 别名），
-// setupServer 从 'msw/node' 导出。
+// Note: msw 2.x's package is `msw/node` (no longer the `msw/node` setupServer alias);
+// setupServer is exported from 'msw/node'.
 import { setupServer } from 'msw/node';
 import { handlers } from './handlers';
 

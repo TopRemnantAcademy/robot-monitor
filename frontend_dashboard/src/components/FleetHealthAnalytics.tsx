@@ -1,21 +1,22 @@
-// 机群健康分析条（UI 强化）—— 顶栏 KPI 之下的「一眼看全厂」层。
+// Fleet health analytics strip (UI enhancement) — the "see the whole plant at a glance" layer below the top KPI bar.
 //
-// 为什么加：原大屏顶栏只有 3 个标量（在线率/告警数/平均电量），卡片墙是 100 张单卡，
-// 缺一层**机群级分布与趋势**：比如「同时有 30 台关节温度 >70°C」「电量集体掉到 30% 以下」
-// 这种跨机器人的共性问题，在标量和单卡上都看不出来，必须聚合成直方图/趋势才可见。
+// Why added: the original dashboard top bar only had 3 scalars (online rate / alert count / average battery),
+// and the card wall is 100 single cards, missing a layer of **fleet-level distribution and trends**: e.g.
+// "30 robots with joint temp >70°C at the same time" or "battery collectively dropping below 30%" —
+// such cross-robot common problems can't be seen in scalars or single cards; they must be aggregated into histograms/trends.
 //
-// 性能护栏（AGENTS.md §3 / ISSUE #75 / #77，本组件的硬约束）：
-//   - 分布图用 useShallow 包裹的**分桶计数选择器**：只在某个桶计数变化时才重渲染，
-//     绝不订阅整张 robots Map（否则每个 100ms 刷库帧都重渲染整条分析条）。
-//   - 趋势线用 store 的低频采样环（fleetSamples，2s 一点，见 robotStore.computeFleetSample），
-//     与 100ms 热路径解耦。
-//   - 分桶 O(n)（n=100）在 100ms 帧上跑一次也仅 ~1k 次/秒运算，可忽略。
+// Performance guardrails (AGENTS.md §3 / ISSUE #75 / #77, hard constraints for this component):
+//   - The distribution chart uses a **bucket-count selector** wrapped in useShallow: only re-renders when some bucket count changes,
+//     never subscribes to the entire robots Map (otherwise every 100ms store flush frame would re-render the whole analytics strip).
+//   - The trend line uses the store's low-frequency sampling ring (fleetSamples, one point per 2s, see robotStore.computeFleetSample),
+//     decoupled from the 100ms hot path.
+//   - Bucketing is O(n) (n=100) running once per 100ms frame = only ~1k ops/sec, negligible.
 //
-// 配色纪律（spec/03 §3「禁止自改色」）：全部色值取自 theme/tokens，不引入新色相；
-// 电量/温度柱的着色直接复用 batteryColor / tempColor，与卡片墙、Drawer 同一套色阶。
+// Color discipline (spec/03 §3 "no self-changing colors"): all colors come from theme/tokens, no new hues introduced;
+// battery/temp bar coloring directly reuses batteryColor / tempColor, same color scale as the card wall and Drawer.
 //
-// Bundle 纪律（Issue #62）：只用到 echarts 已注册的 BarChart / LineChart（echartsCore.ts），
-// 不新增注册项，不 import 全量 echarts。
+// Bundle discipline (Issue #62): only uses echarts' already-registered BarChart / LineChart (echartsCore.ts),
+// no new registrations, no importing the full echarts.
 
 import { useEffect, type ReactNode } from 'react';
 import { useShallow } from 'zustand/react/shallow';
@@ -34,13 +35,13 @@ import type { RobotDisplayState } from '../theme/tokens';
 import { computeFleetSample, useRobotStore } from '../store/robotStore';
 import { useI18n } from '../i18n/I18nProvider';
 
-/** 采样间隔（ms）。2s 与 100ms 刷库解耦，且 90 点 ≈ 3 分钟窗口，够看趋势。 */
+/** Sampling interval (ms). 2s decouples from the 100ms store flush, and 90 points ≈ a 3-minute window — enough to see trends. */
 const SAMPLE_INTERVAL_MS = 2000;
 
-/** 展示态固定顺序（与 DISPLAY_COLOR/DISPLAY_LABEL 对齐，索引即桶号）。 */
+/** Fixed display-state order (aligned with DISPLAY_COLOR/DISPLAY_LABEL; the index is the bucket number). */
 const STATUS_ORDER: RobotDisplayState[] = ['online', 'warning', 'fault', 'stale', 'offline'];
 
-/** 电量直方图桶边界与标签（右开区间，末桶含 100）。 */
+/** Battery histogram bucket boundaries and labels (right-open intervals; the last bucket includes 100). */
 const BATTERY_BUCKETS = [
   { max: 20, label: '0-20' },
   { max: 40, label: '20-40' },
@@ -49,7 +50,7 @@ const BATTERY_BUCKETS = [
   { max: Infinity, label: '80-100' },
 ] as const;
 
-/** 温度直方图桶边界与标签。 */
+/** Temperature histogram bucket boundaries and labels. */
 const TEMP_BUCKETS = [
   { max: 40, label: '<40' },
   { max: 50, label: '40-50' },
@@ -58,7 +59,7 @@ const TEMP_BUCKETS = [
   { max: Infinity, label: '≥70' },
 ] as const;
 
-/** 分桶：返回落入每个桶的计数（末桶兜底）。 */
+/** Bucketing: returns the count falling into each bucket (last bucket catches the remainder). */
 function bucketize(values: number[], bounds: readonly { max: number }[]): number[] {
   const counts = new Array(bounds.length).fill(0);
   for (const v of values) {
@@ -78,7 +79,7 @@ function timeLabel(ms: number): string {
   return `${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-/** 单个图表面板：标题 + 图表，统一样式与高度。 */
+/** Single chart panel: title + chart, with uniform style and height. */
 function Panel({ title, children }: { title: string; children: ReactNode }) {
   return (
     <div
@@ -97,7 +98,7 @@ const CHART_STYLE = { height: 92, width: '100%' } as const;
 
 export default function FleetHealthAnalytics() {
   const { t } = useI18n();
-  // —— 分布：分桶计数选择器，useShallow 逐元素比较，桶不变则不重渲染 ——
+  // —— Distribution: bucket-count selector, useShallow compares element-by-element, no re-render if buckets unchanged ——
   const statusDist = useRobotStore(
     useShallow((s) => {
       const counts = new Array(STATUS_ORDER.length).fill(0) as number[];
@@ -109,7 +110,7 @@ export default function FleetHealthAnalytics() {
     }),
   );
 
-  // 电量分布只统计**收到过遥测**的机器人（未上报的占位 0% 会把 0-20 桶污染成 100）。
+  // Battery distribution only counts robots that **have reported telemetry** (unreported placeholder 0% would pollute the 0-20 bucket up to 100).
   const batteryDist = useRobotStore(
     useShallow((s) => {
       const vals: number[] = [];
@@ -118,7 +119,7 @@ export default function FleetHealthAnalytics() {
     }),
   );
 
-  // 温度分布只统计在线机器人（离线/失联的温度是残影，不该进热力图）。
+  // Temperature distribution only counts online robots (offline/lost-contact temps are residual ghosts and shouldn't enter the heatmap).
   const tempDist = useRobotStore(
     useShallow((s) => {
       const vals: number[] = [];
@@ -127,11 +128,11 @@ export default function FleetHealthAnalytics() {
     }),
   );
 
-  // —— 趋势：订阅低频采样环（2s 一点）——
+  // —— Trend: subscribe to the low-frequency sampling ring (one point per 2s) ——
   const samples = useRobotStore((s) => s.fleetSamples);
   const pushFleetSample = useRobotStore((s) => s.pushFleetSample);
 
-  // 采样器：挂在本组件（Dashboard 常驻），卸载即停。用 getState() 取快照，不额外订阅。
+  // Sampler: mounted on this component (Dashboard resident), stops on unmount. Uses getState() for a snapshot, no extra subscription.
   useEffect(() => {
     const id = window.setInterval(() => {
       pushFleetSample(computeFleetSample(useRobotStore.getState()));
@@ -142,7 +143,7 @@ export default function FleetHealthAnalytics() {
   const axisLabel = { color: COLORS.textSecondary, fontSize: 9 };
   const splitLine = { lineStyle: { color: COLORS.border } };
 
-  // ① 状态分布：横向条形，每态一色 + 右侧计数标签。
+  // ① Status distribution: horizontal bars, one color per state + count label on the right.
   const statusOption = {
     backgroundColor: 'transparent',
     grid: { left: 4, right: 30, top: 4, bottom: 4, containLabel: true },
@@ -169,7 +170,7 @@ export default function FleetHealthAnalytics() {
     animation: false,
   };
 
-  // ② 电量直方图：竖柱，按电量色阶着色（与卡片电池条同色）。
+  // ② Battery histogram: vertical bars, colored by battery color scale (same as card battery bar).
   const batteryOption = {
     backgroundColor: 'transparent',
     grid: { left: 30, right: 8, top: 10, bottom: 16 },
@@ -194,7 +195,7 @@ export default function FleetHealthAnalytics() {
     animation: false,
   };
 
-  // ③ 温度直方图：竖柱，按温度色阶着色（与卡片温度数字同色）。
+  // ③ Temperature histogram: vertical bars, colored by temperature color scale (same as card temperature number).
   const tempOption = {
     backgroundColor: 'transparent',
     grid: { left: 30, right: 8, top: 10, bottom: 16 },
@@ -219,7 +220,7 @@ export default function FleetHealthAnalytics() {
     animation: false,
   };
 
-  // ④ 在线率 / 活跃告警趋势：双 Y 轴折线（0–100 左轴；告警计数右轴）。
+  // ④ Online rate / active alerts trend: dual Y-axis line chart (0–100 left axis; alert count right axis).
   const trendOption = {
     backgroundColor: 'transparent',
     grid: { left: 32, right: 32, top: 22, bottom: 16 },
@@ -243,7 +244,7 @@ export default function FleetHealthAnalytics() {
     ],
     series: [
       {
-        name: '在线率%',
+        name: 'Online rate %',
         type: 'line',
         smooth: true,
         showSymbol: false,
@@ -252,7 +253,7 @@ export default function FleetHealthAnalytics() {
         itemStyle: { color: COLORS.statusNormal },
       },
       {
-        name: '活跃告警',
+        name: 'Active alerts',
         type: 'line',
         yAxisIndex: 1,
         smooth: true,

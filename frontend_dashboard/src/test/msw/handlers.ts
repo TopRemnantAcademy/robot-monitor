@@ -1,15 +1,15 @@
-// msw 处理器：与后端 REST 契约一一对应（spec/00 §5.3）。
+// msw handlers: one-to-one with the backend REST contract (spec/00 §5.3).
 //
-// 只覆盖测试真正会打到的端点，且 URL 逐字对齐前端 `API_BASE + 路径`：
+// Only cover the endpoints the tests actually hit, and align the URL verbatim with the frontend `API_BASE + path`:
 //   GET {API_BASE}/robots/{id}/history?minutes=5&resolution=10s
-// 返回体的字段名必须与 `RobotHistoryResponse`（src/types/robot.ts）一致，
-// 否则组件解析出来是 undefined，测试会红 —— 这正是我们要的「契约即断言」。
+// The response field names must match `RobotHistoryResponse` (src/types/robot.ts),
+// otherwise the component parses undefined and the test goes red —— which is exactly the "contract is the assertion" we want.
 import { http, HttpResponse } from 'msw';
 
-/** 与 src/components/RobotDetailDrawer.tsx 的 API_BASE 默认值一致。 */
+/** Matches the API_BASE default in src/components/RobotDetailDrawer.tsx. */
 export const API_BASE = 'http://localhost:8000';
 
-/** 两个时间点的历史（10s 分辨率），含全部 24 关节的 temp/torque/positions。 */
+/** History at two time points (10s resolution), covering all 24 joints' temp/torque/positions. */
 export const SAMPLE_HISTORY = {
   robot_id: 'humanoid-042',
   points: [
@@ -32,16 +32,16 @@ export const SAMPLE_HISTORY = {
   ],
 };
 
-/** 平台支持的机型目录样例（与后端 GET /supported-robots 字段逐字对齐）。 */
+/** Sample catalog of platform-supported robot models (verbatim field alignment with backend GET /supported-robots). */
 export const SAMPLE_SUPPORTED_ROBOTS = {
   models: [
     {
       model_type: 'HUMANOID-24DOF',
       display_name: 'Humanoid 24-DOF',
-      form_factor: '双足人形',
+      form_factor: 'Bipedal humanoid',
       dof: 24,
       vendor: 'RobotMonitor Platform',
-      description: '平台主力机型：24 自由度高拟人双足机器人。',
+      description: 'Platform main model: 24-DOF high-fidelity bipedal humanoid robot.',
       generic: false,
       total: 100,
       online: 97,
@@ -52,7 +52,7 @@ export const SAMPLE_SUPPORTED_ROBOTS = {
   total_robots: 100,
 };
 
-/** 默认 handler 集：history 返回上面这份样例数据；supported-robots 返回机型目录。 */
+/** Default handler set: history returns the sample above; supported-robots returns the model catalog. */
 export const handlers = [
   http.get(`${API_BASE}/robots/:robotId/history`, () => HttpResponse.json(SAMPLE_HISTORY)),
   http.get(`${API_BASE}/supported-robots`, () => HttpResponse.json(SAMPLE_SUPPORTED_ROBOTS)),

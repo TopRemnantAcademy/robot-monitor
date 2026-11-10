@@ -1,34 +1,36 @@
-// ECharts 按需注册（bundle 瘦身）。全部 import 只走 `echarts/core` 与子路径，
-// 绝不 import 'echarts' 全量包。
+// ECharts on-demand registration (bundle slimming). Every import goes through `echarts/core` and sub-paths only,
+// never the full `echarts` package.
 //
-// 为什么需要这个文件：
-//   `echarts-for-react` 的默认入口（lib/index.js:4）内部 `require("echarts")`
-//   —— 即整个 echarts 包（含 20+ 图表类型、全部组件、两种渲染器），
-//   Rollup 无法 tree-shake，导致主 chunk 1209 kB。
-//   改为使用其 core 入口（`echarts-for-react/lib/core`），把「要注册哪些能力」
-//   交还给我们，只引入本仓库真正用到的模块。
+// Why this file is needed:
+//   `echarts-for-react`'s default entry (lib/index.js:4) internally does `require("echarts")`
+//   —— i.e. the entire echarts package (20+ chart types, all components, both renderers),
+//   which Rollup cannot tree-shake, pushing the main chunk to 1209 kB.
+//   Switching to its core entry (`echarts-for-react/lib/core`) hands "which capabilities to register"
+//   back to us, importing only the modules this repo actually uses.
 //
-// 注册清单与「大屏当前实际渲染的图表」逐项对照（读代码取证，非按名字想当然）：
-//   - LineChart   ：RobotDetailDrawer.tsx:148 `type: 'line'` —— 该组件在
-//                   src/components/ 下是全仓**唯一**挂载 ECharts 的地方
-//                   （`grep -rn echarts src/` 仅命中 RobotDetailDrawer.tsx:11-12,257
-//                    与 JointHeatmap.tsx:10 的一行注释）。
-//   - GridComponent   ：RobotDetailDrawer.tsx:134,140 `xAxis.type='category'` + `yAxis.type='value'`
-//   - TooltipComponent：RobotDetailDrawer.tsx:125 `tooltip.trigger='axis'`
-//   - LegendComponent ：RobotDetailDrawer.tsx:126-130 `legend.data`
-//   - BarChart / GaugeChart：大屏**当前无任何柱子/仪表盘挂在 ECharts 上**，
-//                   属**预留注册**（见下方说明），不是「实际使用的图表类型」。
-//   - CanvasRenderer  ：默认渲染器。
+// Registration list cross-checked item-by-item against "the charts the big screen actually renders"
+// (verified by reading code, not guessed by name):
+//   - LineChart   : RobotDetailDrawer.tsx:148 `type: 'line'` —— that component is the
+//                   **only** place under src/components/ that mounts ECharts
+//                   (`grep -rn echarts src/` only hits RobotDetailDrawer.tsx:11-12,257
+//                    and one comment line in JointHeatmap.tsx:10).
+//   - GridComponent   : RobotDetailDrawer.tsx:134,140 `xAxis.type='category'` + `yAxis.type='value'`
+//   - TooltipComponent: RobotDetailDrawer.tsx:125 `tooltip.trigger='axis'`
+//   - LegendComponent : RobotDetailDrawer.tsx:126-130 `legend.data`
+//   - BarChart / GaugeChart: the big screen currently has **no** bars/gauges mounted on ECharts,
+//                   so these are **reserved registrations** (see note below), not "actually used chart types".
+//   - CanvasRenderer  : default renderer.
 //
-// 为什么仍然注册 BarChart / GaugeChart：
-//   Issue #62 明确要求保留 line/bar/gauge 三件套，且「禁止因精简删掉大屏实际使用的
-//   图表类型」。二者代价经同环境实测仅 **+9.46 kB gzip**（226.16 → 235.62 kB），
-//   远低于 320 kB 预算；若不注册，后续任何柱状/仪表盘需求都会在运行时抛
-//   `Series bar is used but not imported`。属权衡后的有意保留。
+// Why BarChart / GaugeChart are still registered:
+//   Issue #62 explicitly requires keeping the line/bar/gauge trio, and forbids "deleting a chart type the
+//   big screen actually uses" in the name of slimming. The cost of both was measured in the same environment
+//   at only **+9.46 kB gzip** (226.16 → 235.62 kB), well under the 320 kB budget; if not registered, any
+//   future bar/gauge requirement would throw `Series bar is used but not imported` at runtime. This is a
+//   deliberate retention after trade-off.
 //
-// 为什么不注册 HeatmapChart：
-//   JointHeatmap.tsx 是纯 <button> + CSS grid 自绘（该文件无任何 echarts import），
-//   因此**不注册** HeatmapChart。
+// Why HeatmapChart is NOT registered:
+//   JointHeatmap.tsx is pure <button> + CSS grid self-drawing (that file has no echarts import at all),
+//   so HeatmapChart is **not registered**.
 
 import * as echarts from 'echarts/core';
 import { LineChart, BarChart, GaugeChart } from 'echarts/charts';
@@ -45,5 +47,5 @@ echarts.use([
   CanvasRenderer,
 ]);
 
-/** 注册完毕的 echarts core 实例，供 echarts-for-react 的 core 入口使用。 */
+/** The fully-registered echarts core instance, for echarts-for-react's core entry. */
 export default echarts;

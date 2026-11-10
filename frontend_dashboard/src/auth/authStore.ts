@@ -1,13 +1,13 @@
-// 认证状态（订单 15 T4）
+// Auth state (Order 15 T4)
 //
-// 只存"要不要显示登录页"和"角色是什么"两件事。token 不在这里（见 session.ts 的说明）。
+// Only stores two things: "whether to show the login page" and "what the role is". The token is not here (see session.ts notes).
 
 import { create } from 'zustand';
 import { fetchCurrentUser, logout as apiLogout } from './api';
 import { hasToken } from './api';
 import type { Role } from './types';
 
-/** `unknown` = 尚未探测（首屏在跑 /users/me），用于三态渲染避免登录页闪一下。 */
+/** `unknown` = not yet probed (first screen running /users/me), used for three-state rendering to avoid a login-page flash. */
 export type AuthStatus = 'unknown' | 'anonymous' | 'authenticated';
 
 interface AuthState {
@@ -15,12 +15,12 @@ interface AuthState {
   email: string | null;
   role: Role | null;
 
-  /** 首屏启动流程：有 token 就换用户信息，没有就直接匿名。
-   *  登录成功后也复用它（拿到 token 后走同一条 /users/me 路径取 role）。 */
+  /** First-screen bootstrap flow: if there's a token, exchange it for user info; if not, go anonymous directly.
+   *  Reused after successful login too (after getting the token, go down the same /users/me path to fetch role). */
   bootstrap: () => Promise<void>;
-  /** 登出：先通知后端，再清本地状态。 */
+  /** Logout: notify the backend first, then clear local state. */
   signOut: () => Promise<void>;
-  /** 401 拦截回调：无网络请求，纯状态回退。 */
+  /** 401 interception callback: no network request, pure state fallback. */
   markAnonymous: () => void;
 }
 
@@ -38,7 +38,7 @@ export const useAuthStore = create<AuthState>((set) => ({
       const user = await fetchCurrentUser();
       set({ status: 'authenticated', email: user.email, role: user.role });
     } catch {
-      // token 过期/被拒（fetchCurrentUser 内部已触发 clearToken）→ 回登录页。
+      // token expired/rejected (fetchCurrentUser already triggered clearToken internally) → return to login page.
       set({ status: 'anonymous', email: null, role: null });
     }
   },
@@ -52,10 +52,10 @@ export const useAuthStore = create<AuthState>((set) => ({
 }));
 
 /**
- * 管理员判定（订单 17 的按钮显隐会用它）。
+ * Admin check (Order 17's button show/hide uses it).
  *
- * ⚠️ 这**只是 UI 裁剪**，不是安全边界：绕过前端直接打接口依然会被后端
- * `require_role(Role.ADMIN)` 挡住（403）。前端的价值是"不让用户看见点不动的东西"。
+ * ⚠️ This is **only UI trimming**, not a security boundary: bypassing the frontend and hitting the API directly
+ * is still blocked by the backend's `require_role(Role.ADMIN)` (403). The frontend's value is "not letting users see things they can't click".
  */
 export function useIsAdmin(): boolean {
   return useAuthStore((s) => s.role === 'admin');
