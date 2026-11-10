@@ -87,6 +87,15 @@ class Settings(BaseSettings):
     tick_interval_s: float = 1.0        # 离线 ticker 间隔
     window_maxlen: int = 100            # 每台机器人滑动窗口容量（10Hz → 约 10s）
 
+    # ---- anomaly（统计异常检测，对标 Netdata 边缘 ML / ORO incident remediation）----
+    # 既有规则是静态阈值（>75°C、<15%、方差≈0）。本规则在窗口上算 rolling z-score，
+    # 捕捉「相对该机器人自身基线的突变」：电池骤降、关节温度阶跃、扭矩尖峰等
+    # 静态阈值漏掉的「慢漂移 + 突变」型异常。z=4 ≈ 4σ，误报率极低。
+    anomaly_zscore: float = 4.0         # 触发阈值（|z| >= 此值）
+    anomaly_min_std: float = 0.5        # 最小标准差门槛：波动小于此值视为正常噪声，不报
+    anomaly_min_samples: int = 20       # 窗口样本下限（<20 条不评，约 2s）
+    anomaly_dedup_s: int = 120         # 同机同指标去重窗口（秒）
+
     # ---- 告警通知（I-14）----
     # 工厂侧机器人 webhook：留空则整条通知链路静默跳过（默认关闭，避免误配刷屏）。
     # URL 含 token，**只从环境变量注入，禁止写进仓库**。

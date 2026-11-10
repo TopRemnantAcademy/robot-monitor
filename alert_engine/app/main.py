@@ -45,6 +45,7 @@ from app.rules.battery import BatteryLowRule
 from app.rules.joint_stuck import JointStuckRule
 from app.rules.motor_temp import MotorTempRule
 from app.rules.offline import OfflineRule
+from app.rules.anomaly import AnomalyRule
 from app.rules.base import Alert
 from app import metrics
 from app.notifiers import build_notifier
@@ -55,7 +56,7 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("alert_engine")
 
-RULES = [MotorTempRule(), BatteryLowRule(), JointStuckRule(), OfflineRule()]
+RULES = [MotorTempRule(), BatteryLowRule(), JointStuckRule(), OfflineRule(), AnomalyRule()]
 DEDUP_WINDOW = {r.rule_id: r.dedup_window_s for r in RULES}
 STREAM_RULES = [r for r in RULES if r.rule_id != "offline"]
 OFFLINE_RULE = next(r for r in RULES if r.rule_id == "offline")

@@ -161,6 +161,18 @@ class Settings(BaseSettings):
     chan_stream_one: str = "robot:stream:{robot_id}"
     chan_alerts: str = "robot:alerts"
 
+    # ---- 오프라인 버퍼 (경쟁 벤치마크 C: store-and-forward, Netdata/ORO 참조)----
+    # TimescaleDB 장애 시 batch_writer 가 행을 버리던(rejected) 것을 Redis 백업 큐에
+    # 직렬화 보관하고, DB 복구 시 재생(replay)한다. 중앙집중형이라 네트워크 단절 시
+    # blind spot 이 생기던 한계를 메운다.
+    # 기본 켜짐. Redis 불가 시 안전 폴백: 호출 측이 기존 rejected 로 계수.
+    offline_buffer_enabled: bool = True
+    offline_buffer_key: str = "robot:buffer:telemetry"
+    # 용량 상한: 1000 msg/s × 200s 분량. 초과 시 가장 오래된 항목 잘림(메모리 폭주 방지).
+    offline_buffer_maxlen: int = 200_000
+    # 재생 루프 주기(초). 버퍼가 비어 있으면 ping 조차 하지 않음(오버헤드 0).
+    offline_buffer_replay_interval_s: float = 5.0
+
     @property
     def robot_ids(self) -> list[str]:
         """100 台机器人 ID（与 init.sql 预置的 robot_metadata 一致）。"""

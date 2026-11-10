@@ -108,17 +108,24 @@ main:
             # 与 -v（挂死时日志至少留有「最后一个开跑的用例」），一次跑出可定位现场。
             python -m pytest backend_ingestion/tests/ -v --timeout=60
 
+            # ── 2026-11-10 新增：bridge 作业（ROS2 / ISO 21423，独立包无 app 冲突）──
+            # bridge 只硬依赖 websockets；aiomqtt 是 lazy 可选 import，不在此装。
+            echo "── pytest bridge/tests（ROS2 / ISO 21423 桥接，独立包）──"
+            python -m pip install --no-cache-dir -r bridge/requirements.txt
+            python -m pip install --no-cache-dir pytest pytest-timeout
+            python -m pytest bridge/tests/ -v --timeout=60
+
             # ── 2026-10-13 追加三道门禁（此前只在主代理本机手验，现已固化）──
             # ① 全量语法编译：抓「测试收集不到、因此从没人发现」的语法错。
             #    本机实测 rc=0（backend_ingestion/app + alert_engine/app + simulator + tests）。
             echo "── python 全量语法编译 ──"
-            python -m compileall -q backend_ingestion/app alert_engine/app simulator tests
+            python -m compileall -q backend_ingestion/app alert_engine/app simulator tests bridge
 
             # ② 测试文件健全性：STATUS.md §五曾手工扫过一次「假覆盖测试文件」，
             #    这里把它变成机器门禁 —— 任何 test_*.py 不含真实 def test_ 即红。
             echo "── 测试文件健全性（每个 test_*.py 至少一个真实 test 函数）──"
             missing=0
-            for f in $(find tests alert_engine/tests backend_ingestion/tests -name 'test_*.py'); do
+            for f in $(find tests alert_engine/tests backend_ingestion/tests bridge/tests -name 'test_*.py'); do
               if ! grep -qE '^[[:space:]]*def test_' "$f"; then
                 echo "无真实测试函数: $f"
                 missing=1
@@ -390,16 +397,23 @@ main:
             # 与 -v（挂死时日志至少留有「最后一个开跑的用例」），一次跑出可定位现场。
             python -m pytest backend_ingestion/tests/ -v --timeout=60
 
+            # ── 2026-11-10 新增：bridge 作业（ROS2 / ISO 21423，独立包无 app 冲突）──
+            # 与 push 分支口径必须一致。bridge 只硬依赖 websockets；aiomqtt 是 lazy 可选 import。
+            echo "── pytest bridge/tests（ROS2 / ISO 21423 桥接，独立包）──"
+            python -m pip install --no-cache-dir -r bridge/requirements.txt
+            python -m pip install --no-cache-dir pytest pytest-timeout
+            python -m pytest bridge/tests/ -v --timeout=60
+
             # 与 push 分支**逐字相同**的三道门禁 —— 两边口径必须一致，
             # 否则会出现「PR 绿了、合到 main 才变红」，直接污染回归信号：
             #   ① compileall 全量语法编译
             #   ② test_*.py 真实测试函数健全性
             #   ③ 后端 import 冒烟（LEDGER §8.3-5 历史上只能在本机跑不了的那一项）
             echo "── python 全量语法编译 ──"
-            python -m compileall -q backend_ingestion/app alert_engine/app simulator tests
+            python -m compileall -q backend_ingestion/app alert_engine/app simulator tests bridge
             echo "── 测试文件健全性 ──"
             missing=0
-            for f in $(find tests alert_engine/tests backend_ingestion/tests -name 'test_*.py'); do
+            for f in $(find tests alert_engine/tests backend_ingestion/tests bridge/tests -name 'test_*.py'); do
               if ! grep -qE '^[[:space:]]*def test_' "$f"; then
                 echo "无真实测试函数: $f"
                 missing=1

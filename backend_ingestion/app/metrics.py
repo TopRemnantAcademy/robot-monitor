@@ -262,3 +262,24 @@ ws_hub_coalesced_total = Counter(
     "被节拍合并掉的遥测帧数（本节拍收到数 - 实际扇出数；>0 = 每机器人只留最新一帧生效）",
     registry=registry,
 )
+
+# ---------------------------------------------------------------------------
+# Benchmark C: 오프라인 버퍼（store-and-forward）
+#
+# TimescaleDB 장애 시 버퍼링된 후 DB 복구 시 재생되는遥测 행 수.
+#   - telemetry_buffered_total       : 버퍼에 보관된 행 수（누적）
+#   - telemetry_buffered_replayed_total : 재생되어 실제 재투입된 행 수（누적）
+# 둘의 차이가 지속적으로 > 0 이면「버퍼는 쌓이는데 재생이 안 된다」= Redis↔DB
+# 불일치, 혹은 재생 루프가 죽은 것. 이 지표가 없으면「버퍼가 쌓여도 대시보드는
+# 여전히 초록」이라는 가짜 녹색을 막을 수 없음（G-4 동일한 맥락）.
+# ---------------------------------------------------------------------------
+telemetry_buffered = Counter(
+    "robot_backend_telemetry_buffered_total",
+    "DB 쓰기 실패로 오프라인 버퍼(Redis 리스트)에 보관된遥测 행数（재생 대기）",
+    registry=registry,
+)
+telemetry_buffered_replayed = Counter(
+    "robot_backend_telemetry_buffered_replayed_total",
+    "오프라인 버퍼에서 재생되어 writer 에 재투입된遥测 행数",
+    registry=registry,
+)

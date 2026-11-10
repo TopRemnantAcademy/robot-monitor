@@ -40,6 +40,7 @@ from app import metrics
 from app.config import settings
 from app.db.session import get_pool
 from app.schemas.telemetry import Telemetry
+from app.services.offline_buffer import DurableBuffer
 
 log = logging.getLogger("batch_writer")
 
@@ -86,6 +87,8 @@ class BatchWriter:
         self.flushes = 0
         self.retries = 0        # 观察项：重试次数持续增长说明 DB 不稳
         self.rejected = 0       # 坏行计数：被 L3 判定为不可写而丢弃
+        # 离线缓冲（Benchmark C）：DB 不可达时 버퍼링된 후 나중에 재생되는 행 수.
+        self.buffered = 0
         # 丢行三元组（ISSUE #19 G2）。此前只有 `written`，而 `written += len(rows)`
         # 计的是**提交行数**，ON CONFLICT DO NOTHING 静默丢弃的行完全不可见 ——
         # 行数偏少时只能猜。这里把"提交 / 入库 / 跳过"三者分开记。
@@ -191,10 +194,16 @@ class BatchWriter:
             try:
                 await self._write_with_retry(rows, reason=reason)
             except Exception:
-                # 走到这里说明重试也没救回来（如 DB 长时间不可达）。整批丢弃并计入 rejected，
-                # 但采集循环继续——宁可丢历史数据，也不能让 MQTT 消费停摆。
-                self.rejected += len(rows)
-                log.exception("batch flush gave up, %d rows dropped", len(rows))
+                # 走到这里说明重试也没救回来（如 DB 长时间不可达）。
+                # Benchmark C: 오프라인 버퍼가 켜져 있으면 행을 버리지 않고
+                # Redis 백업 큐에 직렬화 보관 → DB 복구 시 재생(replay).
+                if settings.offline_buffer_enabled:
+                    await self._buffer_on_failure(buf)
+                else:
+                    # 整批丢弃并计入 rejected，但采集循环继续——宁可丢历史数据，
+                    # 也不能让 MQTT 消费停摆。
+                    self.rejected += len(rows)
+                    log.exception("batch flush gave up, %d rows dropped", len(rows))
 
     def _count_written(
         self, submitted: list[tuple], written: int, reason: str = "timeout"
@@ -328,6 +337,39 @@ class BatchWriter:
             except Exception:
                 await self._isolate_and_write(half, _depth + 1, reason)
 
+    async def _buffer_on_failure(self, buf: list[Telemetry]) -> None:
+        """DB 쓰기 실패 시 행을 오프라인 버퍼에 보관（Benchmark C, store-and-forward）.
+
+        Redis 사용 불가 등으로 push 자체가 실패하면 기존 rejected 로 폴백 →
+        서비스 중단 없이 안전 degradation.
+        """
+        try:
+            from app.db.redis import get_redis
+
+            client = await get_redis()
+            buffer = DurableBuffer(
+                client, settings.offline_buffer_key, settings.offline_buffer_maxlen
+            )
+            pushed = 0
+            for t in buf:
+                try:
+                    await buffer.push(t.model_dump_json())
+                    pushed += 1
+                except Exception:
+                    break
+            self.buffered += pushed
+            metrics.telemetry_buffered.inc(pushed)
+            if pushed < len(buf):
+                self.rejected += len(buf) - pushed
+                log.warning(
+                    "offline buffer partial: buffered=%d dropped=%d", pushed, len(buf) - pushed
+                )
+            else:
+                log.warning("batch flush failed, buffered %d rows for later replay", pushed)
+        except Exception:
+            self.rejected += len(buf)
+            log.exception("offline buffer unavailable, %d rows dropped", len(buf))
+
     @staticmethod
     def _to_row(t: Telemetry) -> tuple:
         # 优先用客户端时间戳（10Hz → 同一机器人相邻两条相差 100ms）。
@@ -392,6 +434,7 @@ class BatchWriter:
             "flushes": self.flushes,
             "retries": self.retries,
             "rejected": self.rejected,
+            "buffered": self.buffered,
             "rows_submitted": self.rows_submitted,
             "rows_skipped": self.rows_skipped,
             "queue_depth": self.queue.qsize(),

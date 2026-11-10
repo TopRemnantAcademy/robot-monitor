@@ -1,0 +1,8 @@
+# RobotMonitor real-robot bridge dependencies.
+#
+# `websockets` is the only hard runtime dependency (rosbridge transport).
+# `aiomqtt` (MQTT ingest sink, used by `ros2_bridge.publish_telemetry` / the
+# relay CLI) is an OPTIONAL, lazy import -- it is already a backend_ingestion
+# dependency if you run the bridge -> MQTT relay in-repo, so it is not listed
+# here to keep the standalone bridge install minimal.
+websockets==17.4

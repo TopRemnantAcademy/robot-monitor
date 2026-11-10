@@ -49,6 +49,7 @@ from app.security_middleware import install_cors, install_rate_limit
 from app.services import liveness, mqtt_subscriber, state_cache
 from app.services.batch_writer import BatchWriter
 from app.services.metadata_writer import metadata_writer
+from app.services.offline_buffer import DurableBuffer, run_replay
 from app import ws_probe
 from app.ws_backpressure import WsOutbound
 from app.ws_hub import hub as ws_hub
@@ -83,6 +84,19 @@ async def lifespan(app: FastAPI):
     # WS 合成探针：客户端视角验活（缺口 G-3）。它只读指标，不碰数据流；
     # 关闭时 `run()` 立刻 return，任务自灭，无需在 shutdown 里特判。
     probe_task = asyncio.create_task(ws_probe.run())
+    # 오프라인 버퍼 재생 루프（Benchmark C: store-and-forward）. DB 장애로 버퍼링된
+    # 행을 DB 복구 시 재투입. Redis 연결은 lazy(실제 사용 시까지 연결 안 함),
+    # 버퍼/재생은 모두 실패에 안전(정상 데이터 손실 없음). 꺼져 있으면 태스크 미생성.
+    offline_task = None
+    if settings.offline_buffer_enabled:
+        from app.db.redis import get_redis
+
+        _buffer = DurableBuffer(
+            await get_redis(), settings.offline_buffer_key, settings.offline_buffer_maxlen
+        )
+        offline_task = asyncio.create_task(
+            run_replay(writer, _buffer, settings.offline_buffer_replay_interval_s)
+        )
     # WS 出站中枢（ISSUE #71）：全进程唯一的 Redis pubsub 订阅 + 100ms 合并节拍。
     # 必须先于第一个 WS 连接 start()，否则早期连接扇不到增量帧。
     await ws_hub.start()
@@ -90,6 +104,7 @@ async def lifespan(app: FastAPI):
     app.state.metadata_task = metadata_task
     app.state.mqtt_task = mqtt_task
     app.state.probe_task = probe_task
+    app.state.offline_task = offline_task
     # 订单 16 T3：endpoint 为空则 no-op，返回 False 也不影响启动（可降级）。
     # 放在 yield 之前：instrument 必须早于第一个请求到达。
     tracing_on = telemetry_tracing.configure_tracing(
@@ -122,6 +137,10 @@ async def lifespan(app: FastAPI):
     #   ④ 探针只是旁观者，没有存量要冲刷，直接取消（它 slept 在 interval 上）。
     probe_task.cancel()
     await asyncio.gather(probe_task, return_exceptions=True)
+    #   ④b 오프라인 버퍼 재생 루프 취소（버퍼/재생은 실패에 안전하므로 즉시 취소 ok）.
+    if offline_task is not None:
+        offline_task.cancel()
+        await asyncio.gather(offline_task, return_exceptions=True)
     #   ⑤ WS 中枢：先停扇出与共享订阅，再清注册表 —— 必须在 close_redis 之前，
     #      否则 _consume_loop 会对着已关的 Redis 退避重连、日志刷屏。
     await ws_hub.stop()
@@ -185,6 +204,7 @@ async def healthz() -> HealthResponse:
         "flushes": writer.flushes,
         "retries": writer.retries,
         "rejected": writer.rejected,
+        "buffered": writer.buffered,
         "queue_depth": writer.queue.qsize(),
         "mqtt_received": mqtt_subscriber.received,
         "mqtt_dropped": mqtt_subscriber.dropped,

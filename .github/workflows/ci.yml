@@ -94,6 +94,40 @@ jobs:
       - name: pytest metric-naming guard (docker-free)
         run: python -m pytest tests/e2e/test_metric_naming_probe.py -v
 
+  bridge:
+    name: Bridge tests (ROS2 / ISO 21423)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install bridge deps
+        run: |
+          set -eu
+          python -m pip install --upgrade pip
+          python -m pip install -r bridge/requirements.txt
+          python -m pip install pytest pytest-timeout
+      - name: pytest bridge/tests (standalone package, no app collision)
+        run: python -m pytest bridge/tests/ -v --timeout=60
+      - name: Compile all (syntax gate)
+        run: python -m compileall -q bridge simulator
+      - name: Test-file sanity (each test_*.py has a real test function)
+        run: |
+          set -eu
+          missing=0
+          for f in $(find bridge/tests -name 'test_*.py'); do
+            if ! grep -qE '^[[:space:]]*def test_' "$f"; then
+              echo "无真实测试函数: $f"
+              missing=1
+            fi
+          done
+          if [ "$missing" != "0" ]; then
+            echo "发现假覆盖测试文件 —— 门禁拒绝"
+            exit 1
+          fi
+
   frontend:
     name: Frontend tests (Node 20)
     runs-on: ubuntu-latest
