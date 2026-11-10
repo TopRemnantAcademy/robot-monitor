@@ -1,23 +1,25 @@
-"""订单 17 告警闭环的端到端验证（真实 PostgreSQL + 真实 Redis，非 mock）。
+"""Order 17 alert-closure end-to-end verification (real PostgreSQL + real Redis, not mock).
 
-跑法（需要可写的 PostgreSQL 已执行 infra/init.sql 的纯 PG 部分 + Redis）：
+Run (needs a writable PostgreSQL with the pure-PG part of infra/init.sql executed + Redis):
 
     export TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/robot_monitor
     export TEST_REDIS_URL=redis://127.0.0.1:6379/15
     cd backend_ingestion && python -m tests.verify_alert_closure
 
-⚠️ 本文件**不是** pytest 用例（沿用 verify_db_integration.py 的约定）：
-断言写在 v1..v7，由 main() 驱动，退出码 0 = 全部通过。名字不带 test_ 前缀
-是为了不让 pytest 产生「有测试在跑」的假覆盖。
+WARNING: this file is **not** a pytest case (following the verify_db_integration.py
+convention): assertions live in v1..v7, driven by main(), exit code 0 = all passed.
+The name does not carry the `test_` prefix so pytest does not produce the false
+impression of "tests running".
 
-覆盖（每条对应派工单 §2 的一条验收标准）：
-  V1  schema：robot_alert 含 escalated 列 + 两个部分索引（init.sql 真跑出来的库）
-  V2  ack 端点 SQL：置 ack=TRUE 且 ack_by/ack_at 有值（贴真实 SQL 查询结果）
-  V3  重复 ack 幂等（changed=False、不覆盖首次 ack_by、行数不变）
-  V4  unack 幂等 + 撤回清空 ack_by/ack_at
-  V5  GET /alerts 分页：offset 生效、total 为筛选后总数
-  V6  escalation：severity=3 超时未 ack → escalated 变 TRUE（真跑 SCAN/MARK SQL）
-  V7  silence：Redis TTL 生效期压制、到期自动恢复；且静默命中时不触达 dedup
+Coverage (each maps to one acceptance criterion in the work order section 2):
+  V1  schema: robot_alert has escalated column + two partial indexes (a DB where init.sql
+             actually ran)
+  V2  ack endpoint SQL: sets ack=TRUE and ack_by/ack_at have values (against real SQL query results)
+  V3  repeated ack is idempotent (changed=False, does not overwrite first ack_by, row count unchanged)
+  V4  unack idempotent + withdrawal clears ack_by/ack_at
+  V5  GET /alerts pagination: offset takes effect, total is the post-filter total
+  V6  escalation: severity=3 not acked past timeout -> escalated becomes TRUE (runs real SCAN/MARK SQL)
+  V7  silence: Redis TTL active suppresses, auto-recovers on expiry; a silence hit does not reach dedup
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ import asyncpg  # noqa: E402
 DSN = os.environ.get("TEST_DATABASE_URL", "")
 REDIS_URL = os.environ.get("TEST_REDIS_URL", "")
 if DSN:
-    # settings 是模块级单例，必须在 import app.config 之前注入
+    # settings is a module-level singleton, must be injected before importing app.config
     os.environ["DATABASE_URL"] = DSN
     os.environ["REDIS_URL"] = REDIS_URL
 
@@ -58,7 +60,8 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 async def _seed(conn: asyncpg.Connection, robot_id: str, severity: int, age_s: int,
                 n: int = 1) -> list[int]:
-    """插入 n 条告警，返回 alert_id 列表。rule_id 用 RUN_TAG 隔离本轮数据。"""
+    """Insert n alerts, return the list of alert_ids. rule_id uses RUN_TAG to isolate
+    this round's data."""
     ids: list[int] = []
     ts = datetime.now(timezone.utc) - timedelta(seconds=age_s)
     for _ in range(n):
@@ -81,16 +84,16 @@ async def _query(conn: asyncpg.Connection, alert_id: int) -> asyncpg.Record:
 # ---------------------------------------------------------------- V1
 
 async def v1_schema(conn: asyncpg.Connection) -> None:
-    print("\nV1 schema：escalated 列 + 部分索引存在（init.sql 实跑结果）")
+    print("\nV1 schema: escalated column + partial indexes exist (init.sql actually ran)")
     cols = await conn.fetch(
         """SELECT column_name, data_type, is_nullable, column_default
              FROM information_schema.columns
             WHERE table_name='robot_alert' ORDER BY ordinal_position"""
     )
     names = [c["column_name"] for c in cols]
-    check("含 escalated 列", "escalated" in names, str(names))
+    check("has escalated column", "escalated" in names, str(names))
     esc = next((c for c in cols if c["column_name"] == "escalated"), None)
-    check("escalated 为 boolean NOT NULL DEFAULT false",
+    check("escalated is boolean NOT NULL DEFAULT false",
           esc is not None and esc["data_type"] == "boolean"
           and esc["is_nullable"] == "NO" and "false" in (esc["column_default"] or ""),
           str(dict(esc)) if esc else "missing")
@@ -98,99 +101,101 @@ async def v1_schema(conn: asyncpg.Connection) -> None:
         "SELECT indexname FROM pg_indexes WHERE tablename='robot_alert'"
     )
     idxnames = [i["indexname"] for i in idx]
-    check("含 idx_alert_ack（订单 19 建的）", "idx_alert_ack" in idxnames, str(idxnames))
-    check("含 idx_alert_escalation（订单 17 建的）", "idx_alert_escalation" in idxnames)
+    check("has idx_alert_ack (built by Order 19)", "idx_alert_ack" in idxnames, str(idxnames))
+    check("has idx_alert_escalation (built by Order 17)", "idx_alert_escalation" in idxnames)
 
 
 # ---------------------------------------------------------------- V2~V4
 
 async def v2_ack(conn: asyncpg.Connection) -> None:
-    print("\nV2 ack：置 ack=TRUE 且 ack_by/ack_at 有值")
+    print("\nV2 ack: sets ack=TRUE and ack_by/ack_at have values")
     [aid] = await _seed(conn, "humanoid-001", 3, 0)
     row, changed = await repository.set_ack(aid, True, "ops@example.com")
-    check("set_ack 报告 changed=True", changed is True)
+    check("set_ack reports changed=True", changed is True)
     db = await _query(conn, aid)
     print(f"    SQL> SELECT alert_id, ack, ack_at, ack_by, escalated "
           f"FROM robot_alert WHERE alert_id={aid};")
     print(f"    -- {dict(db)}")
     check("ack=TRUE", db["ack"] is True)
-    check("ack_by 有值", db["ack_by"] == "ops@example.com", str(db["ack_by"]))
-    check("ack_at 有值", db["ack_at"] is not None, str(db["ack_at"]))
+    check("ack_by has a value", db["ack_by"] == "ops@example.com", str(db["ack_by"]))
+    check("ack_at has a value", db["ack_at"] is not None, str(db["ack_at"]))
 
 
 async def v3_ack_idempotent(conn: asyncpg.Connection) -> None:
-    print("\nV3 重复 ack 幂等（不报错、不覆盖首次确认人）")
+    print("\nV3 repeated ack idempotent (no error, does not overwrite first acked-by)")
     [aid] = await _seed(conn, "humanoid-002", 3, 0)
     await repository.set_ack(aid, True, "first@example.com")
     before = await _query(conn, aid)
-    # 再次 ack，换一个人：不得覆盖 ack_by
+    # ack again, with a different person: must not overwrite ack_by
     row, changed = await repository.set_ack(aid, True, "second@example.com")
     after = await _query(conn, aid)
-    check("第二次 ack 的 changed=False（幂等命中）", changed is False)
-    check("ack_by 仍是首次确认人", after["ack_by"] == "first@example.com",
+    check("second ack's changed=False (idempotent hit)", changed is False)
+    check("ack_by is still the first acked-by", after["ack_by"] == "first@example.com",
           str(after["ack_by"]))
-    check("ack_at 未被刷新", after["ack_at"] == before["ack_at"], str(after["ack_at"]))
+    check("ack_at not refreshed", after["ack_at"] == before["ack_at"], str(after["ack_at"]))
     n = await conn.fetchval("SELECT count(*) FROM robot_alert WHERE alert_id=$1", aid)
-    check("行数不变（未重复写）", n == 1)
+    check("row count unchanged (no duplicate write)", n == 1)
 
 
 async def v4_unack(conn: asyncpg.Connection) -> None:
-    print("\nV4 unack：撤回并清空 ack_by/ack_at；重复 unack 幂等")
+    print("\nV4 unack: withdraw and clear ack_by/ack_at; repeated unack idempotent")
     [aid] = await _seed(conn, "humanoid-003", 3, 0)
     await repository.set_ack(aid, True, "ops@example.com")
     _, changed = await repository.set_ack(aid, False, None)
     db = await _query(conn, aid)
-    check("unack 报告 changed=True", changed is True)
+    check("unack reports changed=True", changed is True)
     check("ack=FALSE", db["ack"] is False)
-    check("ack_by 已清空", db["ack_by"] is None, str(db["ack_by"]))
-    check("ack_at 已清空", db["ack_at"] is None, str(db["ack_at"]))
+    check("ack_by cleared", db["ack_by"] is None, str(db["ack_by"]))
+    check("ack_at cleared", db["ack_at"] is None, str(db["ack_at"]))
     _, changed2 = await repository.set_ack(aid, False, None)
-    check("重复 unack 幂等（changed=False）", changed2 is False)
+    check("repeated unack idempotent (changed=False)", changed2 is False)
 
 
 # ---------------------------------------------------------------- V5
 
 async def v5_pagination(conn: asyncpg.Connection) -> None:
-    print("\nV5 GET /alerts 分页：offset 生效、total 为筛选后总数")
+    print("\nV5 GET /alerts pagination: offset takes effect, total is post-filter total")
     await conn.execute("DELETE FROM robot_alert WHERE rule_id=$1", RUN_TAG)
     ids = await _seed(conn, "humanoid-010", 3, 0, n=5)
     for aid in ids[:3]:
         await repository.set_ack(aid, True, "ops@example.com")
 
-    # ack=false 应只剩 2 条
+    # ack=false should leave only 2 rows
     page1, total_unacked = await repository.list_alerts(
         ack=False, escalated=None, suppressed=None, robot_id="humanoid-010", limit=1, offset=0
     )
     page2, _ = await repository.list_alerts(
         ack=False, escalated=None, suppressed=None, robot_id="humanoid-010", limit=1, offset=1
     )
-    check("ack=false 的 total=2", total_unacked == 2, str(total_unacked))
-    check("limit=1 只返回 1 条", len(page1) == 1, str(len(page1)))
-    check("offset=1 返回不同的一条", page1[0]["alert_id"] != page2[0]["alert_id"],
+    check("total for ack=false is 2", total_unacked == 2, str(total_unacked))
+    check("limit=1 returns only 1 row", len(page1) == 1, str(len(page1)))
+    check("offset=1 returns a different row", page1[0]["alert_id"] != page2[0]["alert_id"],
           f"{page1[0]['alert_id']} vs {page2[0]['alert_id']}")
-    check("排序为 time DESC, alert_id DESC", page1[0]["alert_id"] > page2[0]["alert_id"])
+    check("ordered by time DESC, alert_id DESC", page1[0]["alert_id"] > page2[0]["alert_id"])
 
-    # ack 全量：total 应是 5
+    # ack all: total should be 5
     _, total_all = await repository.list_alerts(
         ack=None, escalated=None, suppressed=None, robot_id="humanoid-010", limit=50, offset=0
     )
-    check("不带 ack 过滤时 total=5", total_all == 5, str(total_all))
+    check("total is 5 when no ack filter", total_all == 5, str(total_all))
 
 
 def _load_alert_engine_silence():
-    """按文件路径加载 alert_engine/app/silence.py（规避同名 `app` 包冲突）。
+    """Load alert_engine/app/silence.py by file path (to avoid the same-named `app`
+    package conflict).
 
-    它 `from app.db import get_redis`，此处用 stub 顶掉 `app.db`，
-    使被测对象只剩纯 Python 的静默判定（与 alert_engine/tests/conftest.py 同法）。
-    被测的是**真源码**，不是复制品。
+    It does `from app.db import get_redis`; here we stub out `app.db`, so the object
+    under test is only the pure-Python silence decision (same method as
+    alert_engine/tests/conftest.py). The object under test is the **real source**, not a copy.
     """
     import importlib.util
     import types
 
-    # 构造一个干净的顶层 `app` 包，仅暴露 stub 的 app.db。
-    # 必须临时**替换** sys.modules 里的 `app` / `app.db`：本进程同时存在
-    # backend_ingestion/app（真实）与 alert_engine/app（被测），同名包只能有一个，
-    # 直接用 backend 的 app.db 会 ImportError（它没有 get_redis）。
+    # Build a clean top-level `app` package, exposing only the stubbed app.db.
+    # We must temporarily **replace** `app` / `app.db` in sys.modules: this process
+    # simultaneously has backend_ingestion/app (real) and alert_engine/app (under test);
+    # there can be only one same-named package, so directly using backend's app.db would
+    # raise ImportError (it has no get_redis).
     fake_db = types.ModuleType("app.db")
 
     async def _get_redis():
@@ -208,8 +213,9 @@ def _load_alert_engine_silence():
 
     fake_app = types.ModuleType("app")
     fake_app.db = fake_db
-    # 让 `app` 成为一个**包**（带 __path__ 指向 alert_engine/app），
-    # 这样 `from app.rules.base import Alert` 能被子解释器按真源码解析。
+    # Make `app` a **package** (with __path__ pointing at alert_engine/app), so
+    # `from app.rules.base import Alert` can be resolved to the real source by the
+    # sub-interpreter.
     fake_app.__path__ = [str(Path(__file__).resolve().parents[2] / "alert_engine" / "app")]
 
     saved_app = sys.modules.get("app")
@@ -222,7 +228,7 @@ def _load_alert_engine_silence():
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
     finally:
-        # 还原，避免污染其它导入
+        # Restore, to avoid polluting other imports
         if saved_app is not None:
             sys.modules["app"] = saved_app
         if saved_db is not None:
@@ -231,11 +237,13 @@ def _load_alert_engine_silence():
 
 
 def _load_escalation_sql() -> tuple[str, str]:
-    """从 alert_engine/app/escalation.py 真源码里取出 SCAN_SQL / MARK_SQL。
+    """Extract SCAN_SQL / MARK_SQL from alert_engine/app/escalation.py's real source.
 
-    不 import 那个模块：本仓有两个同名顶层包 `app`（backend_ingestion/app 与
-    alert_engine/app），同进程内只能有一个 `sys.modules["app"]`（pytest.ini 已说明）。
-    用正则从源码抽常量，测的仍是**真源码里的 SQL 字符串**，不是复制品。
+    We do not import that module: this repo has two same-named top-level packages `app`
+    (backend_ingestion/app and alert_engine/app), and only one `sys.modules["app"]` can
+    exist in the same process (as pytest.ini explains). We extract the constants from the
+    source via regex, but what we test is still the **real SQL string from the source**,
+    not a copy.
     """
     import re
     from pathlib import Path
@@ -244,49 +252,49 @@ def _load_escalation_sql() -> tuple[str, str]:
     src = root.read_text(encoding="utf-8")
     scan = re.search(r'SCAN_SQL = """(.*?)"""', src, re.S)
     mark = re.search(r'MARK_SQL = """(.*?)"""', src, re.S)
-    assert scan and mark, "escalation.py 里未找到 SCAN_SQL / MARK_SQL"
+    assert scan and mark, "SCAN_SQL / MARK_SQL not found in escalation.py"
     return scan.group(1), mark.group(1)
 
 
 # ---------------------------------------------------------------- V6
 
 async def v6_escalation(conn: asyncpg.Connection) -> None:
-    print("\nV6 escalation：severity=3 超时未 ack → escalated=TRUE 并被 SCAN 命中")
+    print("\nV6 escalation: severity=3 not acked past timeout -> escalated=TRUE and hit by SCAN")
     await conn.execute("DELETE FROM robot_alert WHERE rule_id=$1", RUN_TAG)
-    # 一条 6 分钟前（超 300s 阈值），一条刚插入（不超）
+    # one 6 minutes old (past the 300s threshold), one just inserted (not past)
     old_ids = await _seed(conn, "humanoid-020", 3, 360, n=1)
     fresh_ids = await _seed(conn, "humanoid-021", 3, 0, n=1)
-    # 再加一条超时但已确认的（不应被升级）
+    # plus one past timeout but already acked (should not be escalated)
     acked_ids = await _seed(conn, "humanoid-022", 3, 360, n=1)
     await repository.set_ack(acked_ids[0], True, "ops@example.com")
 
     SCAN_SQL, MARK_SQL = _load_escalation_sql()
     rows = await conn.fetch(SCAN_SQL, 300, 200)
     hit = {r["alert_id"] for r in rows}
-    check("超时未确认的 sev3 被命中", old_ids[0] in hit, str(hit))
-    check("未超时的未被命中", fresh_ids[0] not in hit)
-    check("已确认的未被命中", acked_ids[0] not in hit)
+    check("unacked sev3 past timeout is hit", old_ids[0] in hit, str(hit))
+    check("not-yet-expired is not hit", fresh_ids[0] not in hit)
+    check("already-acked is not hit", acked_ids[0] not in hit)
 
-    # 执行 MARK（与 escalation.py 同一 SQL）
+    # execute MARK (same SQL as escalation.py)
     marked = await conn.fetch(MARK_SQL, old_ids[0])
-    check("MARK 返回被更新的行", len(marked) == 1, str(len(marked)))
+    check("MARK returns the updated row", len(marked) == 1, str(len(marked)))
     db = await _query(conn, old_ids[0])
-    check("escalated 变为 TRUE", db["escalated"] is True)
+    check("escalated becomes TRUE", db["escalated"] is True)
 
-    # 再扫一次：已 upgraded 的不应重复命中（保证只重发一次）
+    # re-scan: already-escalated must not be hit again (guarantees single re-send)
     rows2 = await conn.fetch(SCAN_SQL, 300, 200)
-    check("已升级的不再被 SCAN 命中（避免重复升级）",
+    check("already-escalated not hit again by SCAN (avoid re-escalation)",
           old_ids[0] not in {r["alert_id"] for r in rows2})
 
-    # 并发保护：已升级的行再 MARK 应 rowcount=0
+    # concurrency guard: a re-MARK of an already-escalated row should yield rowcount=0
     again = await conn.fetch(MARK_SQL, old_ids[0])
-    check("重复 MARK 不生效（幂等）", len(again) == 0)
+    check("repeated MARK has no effect (idempotent)", len(again) == 0)
 
 
 # ---------------------------------------------------------------- V7
 
 async def v7_silence_real_redis() -> None:
-    print("\nV7 silence：Redis TTL 生效期压制、到期恢复；静默命中不触达 dedup")
+    print("\nV7 silence: Redis TTL active suppresses, recovers on expiry; silence hit does not reach dedup")
     import redis.asyncio as aioredis
 
     silence = _load_alert_engine_silence()
@@ -303,40 +311,40 @@ async def v7_silence_real_redis() -> None:
             self.detail = detail
 
     if not REDIS_URL:
-        check("TEST_REDIS_URL 已提供", False, "未设置，跳过")
+        check("TEST_REDIS_URL was provided", False, "not set, skipping")
         return
     r = aioredis.from_url(REDIS_URL, decode_responses=True)
     await r.flushdb()
 
-    # 把被测 silence 模块的 Redis 入口指向真 Redis（真 Key、真 TTL）。
+    # Point the silence module under test's Redis entry at the real Redis (real key, real TTL).
     async def _real_redis():
         return r
 
     silence.get_redis = _real_redis
 
     alert = Alert(robot_id="humanoid-030", rule_id=RUN_TAG, severity=3, message="x", detail={})
-    check("初始未静默", (await is_silenced(alert)) is False)
+    check("initially not silenced", (await is_silenced(alert)) is False)
 
-    # 用 1s TTL 验证到期恢复（真 TTL，不等 300s）
+    # verify recovery on expiry with a 1s TTL (real TTL, no waiting 300s)
     key = silence_key("humanoid-030")
     await r.set(key, "1", ex=1)
-    check("静默生效期内被判定为静默", (await is_silenced(alert)) is True)
-    check("Redis Key 带上 TTL", (await r.ttl(key)) > 0, f"ttl={await r.ttl(key)}")
+    check("judged silenced while TTL active", (await is_silenced(alert)) is True)
+    check("Redis key carries a TTL", (await r.ttl(key)) > 0, f"ttl={await r.ttl(key)}")
 
     await asyncio.sleep(1.2)
-    check("TTL 到期后自动恢复（Key 消失）", (await r.get(key)) is None)
-    check("到期后不再静默", (await is_silenced(alert)) is False)
+    check("auto-recovers after TTL expiry (key gone)", (await r.get(key)) is None)
+    check("no longer silenced after expiry", (await is_silenced(alert)) is False)
 
-    # 全局静默
+    # global silence
     await r.set(SILENCE_ALL_KEY, "1", ex=5)
-    check("全局 Key 静默任意机器人", (await is_silenced(alert)) is True)
+    check("global key silences any robot", (await is_silenced(alert)) is True)
 
-    # 静默命中时，emit 不触达 dedup（真 Redis：dedup Key 不应被写入）
+    # on a silence hit, emit does not reach dedup (real Redis: the dedup key must not be written)
     await r.flushdb()
     await r.set(key, "1", ex=60)
     assert await is_silenced(alert) is True
     dedup_key = f"alert:dedup:{alert.robot_id}:{alert.rule_id}"
-    check("静默期内 dedup Key 未被写入（silence 先于 dedup 返回）",
+    check("dedup key not written during silence (silence returns before dedup)",
           (await r.get(dedup_key)) is None)
 
     await r.flushdb()
@@ -347,7 +355,7 @@ async def v7_silence_real_redis() -> None:
 
 async def main() -> int:
     if not DSN:
-        print("需要 TEST_DATABASE_URL（且库已执行 infra/init.sql 的纯 PG 部分）")
+        print("TEST_DATABASE_URL required (and the DB must have run the pure-PG part of infra/init.sql)")
         return 2
     conn = await asyncpg.connect(DSN)
     try:
@@ -363,7 +371,7 @@ async def main() -> int:
         await conn.execute("DELETE FROM robot_alert WHERE rule_id=$1", RUN_TAG)
         await conn.close()
 
-    print(f"\n{'='*60}\n通过 {PASS} / 失败 {FAIL}")
+    print(f"\n{'='*60}\nPassed {PASS} / Failed {FAIL}")
     return 0 if FAIL == 0 else 1
 
 

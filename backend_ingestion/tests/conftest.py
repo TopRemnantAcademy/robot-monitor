@@ -1,22 +1,26 @@
-"""测试基座：让 backend_ingestion 的 `app` 包与 alert_engine 的同名包共存。
+"""Test harness: lets backend_ingestion's `app` package coexist with alert_engine's
+same-named package.
 
-问题（本仓结构性的，不是本单引入的）：
-两个模块都有顶层包 `app` —— `backend_ingestion/app` 与 `alert_engine/app`。
-从仓库根跑一次 `pytest` 时，先导入的会永久占住 `sys.modules["app"]`，
-另一个的 `import app.xxx` 全挂（实测 `ModuleNotFoundError: No module named 'app.rules'`
-与 `'app.db' is not a package`）。加本文件之前"从根跑能过"，
-只是因为当时**只有** alert_engine 有 `app` 包。
+The problem (structural to this repo, not introduced by this change):
+Both modules have a top-level package named `app` -- `backend_ingestion/app` and
+`alert_engine/app`. When running `pytest` once from the repo root, whichever is
+imported first permanently occupies `sys.modules["app"]`, and the other's
+`import app.xxx` all fail (observed `ModuleNotFoundError: No module named 'app.rules'`
+and `'app.db' is not a package`). The only reason "running from root used to pass"
+was that back then **only** alert_engine had an `app` package.
 
-解法：本目录的 `app` 包以**本目录为根**重新注册，覆盖 `sys.modules["app"]`；
-同时把 `backend_ingestion` 插到 `sys.path[0]`，让包内部的 `from app.xxx import yyy`
-也解析到这里。实测这样 `pytest backend_ingestion/tests/` 与 `pytest alert_engine/tests/`
-各自都能全绿。
+Solution: this directory's `app` package is re-registered rooted at this directory,
+overriding `sys.modules["app"]`; at the same time `backend_ingestion` is inserted at
+`sys.path[0]` so the package's internal `from app.xxx import yyy` also resolves here.
+In practice `pytest backend_ingestion/tests/` and `pytest alert_engine/tests/`
+each go fully green this way.
 
-⚠️ 已知限制：一次 `pytest` 进程里**同时**收集两个目录仍会互相踩
-（`sys.modules["app"]` 只有一个位置）。根目录 `pytest.ini` 的 `testpaths`
-已把两套用例分开：默认只跑仓库根 `tests/` 与 `alert_engine/tests/`，
-backend 的用例用 `pytest backend_ingestion/tests/` 单独跑（见 README）。
-把 top-level 包改名是根治办法，但那是跨模块重构，不在订单 15 范围内。
+Known limitation: collecting both directories in a **single** `pytest` process still
+clobbers each other (`sys.modules["app"]` has only one slot). The repo-root `pytest.ini`
+`testpaths` keep the two suites separate: by default only the repo-root `tests/` and
+`alert_engine/tests/` run; the backend suite is run separately with
+`pytest backend_ingestion/tests/` (see README). Renaming the top-level package is the
+real fix, but that is a cross-module refactor out of scope for Order 15.
 """
 
 from __future__ import annotations
@@ -25,13 +29,14 @@ import os
 import sys
 from pathlib import Path
 
-# settings.jwt_secret 是必填项（不设默认值），必须在 import app.* 之前注入，
-# 否则 Settings() 构造即抛 ValidationError。
+# settings.jwt_secret is required (no default), so it must be injected before
+# importing app.*, otherwise Settings() raises ValidationError at construction.
 os.environ.setdefault("JWT_SECRET", "test-only-secret-0123456789abcdef")
 
 BACKEND_ROOT = str(Path(__file__).resolve().parents[1])
 
-# 丢掉可能被 alert_engine 侧占用的顶层 `app`，让下一次 import 重新解析到本目录。
+# Drop any top-level `app` possibly occupied by the alert_engine side, so the next
+# import resolves to this directory instead.
 for _name in [m for m in sys.modules if m == "app" or m.startswith("app.")]:
     del sys.modules[_name]
 

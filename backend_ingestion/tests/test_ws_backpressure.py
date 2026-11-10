@@ -1,24 +1,26 @@
-"""WS 出站背压 + 心跳的契约测试（ISSUE #73）。
+"""WS outbound backpressure + heartbeat contract tests (ISSUE #73).
 
-锁定 ISSUE #73 的三条验收标准与三条「约束/禁止项」，**锁定语义而非实现**：
-改实现只要行为不变就不该红。
+Locks down ISSUE #73's three acceptance criteria and three "constraints/forbidden items"; **lock
+semantics, not implementation**: changing the implementation should not turn red as long as the
+behavior is unchanged.
 
-  验收 ①  发送前检查背压状态（队列深度），超出阈值时丢弃最旧帧 / 限流，
-          而非无界堆积；
-  验收 ②  ping/pong 保活，异常/超时连接主动 close，并正确走 finally
-          回收 `_ws_active`；
-  验收 ③  慢客户端不拖垮后端内存；断网后 `_ws_active` 在心跳超时内归位。
+  Acceptance 1: check backpressure state (queue depth) before sending; when over the threshold drop
+                the oldest frame / throttle, rather than unbounded accumulation;
+  Acceptance 2: ping/pong keepalive, abnormally-closed / timed-out connections actively close, and
+                correctly walk finally to reclaim `_ws_active`;
+  Acceptance 3: a slow client does not crush backend memory; after disconnect `_ws_active` returns
+                to baseline within the heartbeat timeout.
 
-  约束 ①  不破坏鉴权顺序（accept → 1008 → 不 send 业务帧）；
-  约束 ②  不去掉 `chan_alerts` 转发；
-  约束 ③  不为背压丢弃 **alert** 消息。
+  Constraint 1: do not break the auth order (accept -> 1008 -> no business frame sent);
+  Constraint 2: do not remove the `chan_alerts` forwarding;
+  Constraint 3: do not drop **alert** messages for backpressure.
 
-跑法（必须单独跑，理由见 pytest.ini 与 conftest.py 头注释）：
+Run (must be run separately; rationale in pytest.ini and the conftest.py header):
     pytest backend_ingestion/tests/test_ws_backpressure.py -v
 
-为什么不用真起 uvicorn + 真连 WS：那是 CI/Docker 的活；本文件用
-`TestClient` 的 in-process WS（覆盖握手/鉴权/首帧/断开四段语义）与直接
-驱动 `WsOutbound`。端到端真连的取证见 PR 描述。
+Why no real uvicorn + real WS connection: that is CI/Docker work; this file uses TestClient's
+in-process WS (covering handshake/auth/first-frame/disconnect four segments) and drives `WsOutbound`
+directly. For end-to-end real connections, see the PR description.
 """
 
 from __future__ import annotations
@@ -34,12 +36,12 @@ from app.main import app
 from app.ws_backpressure import ALERT, TELEMETRY, WsOutbound
 
 
-# ------------------------------------------------------------------ 基础设施
+# ------------------------------------------------------------------ infrastructure
 
 class BlockingWS:
-    """永不消费的客户端替身：第一次 send 就永久阻塞。
+    """A client stand-in that never consumes: the first send permanently blocks.
 
-    用它模拟"卡死的浏览器标签" —— 这是 ISSUE #73 描述的故障形态。
+    We use it to simulate a "frozen browser tab" -- this is the failure mode ISSUE #73 describes.
     """
 
     def __init__(self) -> None:
@@ -55,7 +57,7 @@ class BlockingWS:
 
 
 class DrainingWS:
-    """正常消费的客户端替身：send 立即可用。"""
+    """A client stand-in that consumes normally: send is immediately available."""
 
     def __init__(self) -> None:
         self.sent: list[dict] = []
@@ -65,26 +67,27 @@ class DrainingWS:
 
 
 async def _settle() -> None:
-    """让事件循环把已排队的工作跑完（不给固定时长，减少 flaky）。"""
+    """Let the event loop drain already-queued work (no fixed duration, to reduce flakiness)."""
     for _ in range(20):
         await asyncio.sleep(0)
 
 
 @pytest.fixture
 def client():
-    # 不触发 lifespan：本文件只测路由行为与出站通道，
-    # 真起 MQTT/Redis 需要外部依赖，属另一个测试层。
+    # Do not trigger lifespan: this file only tests route behavior and the outbound channel;
+    # really starting MQTT/Redis needs external deps, which is another test layer.
     with TestClient(app) as c:
         yield c
 
 
-# ------------------------------------------------------- 验收① 背压：内存有界
+# ------------------------------------------------------- acceptance 1: backpressure: memory is bounded
 
 class TestOutboundIsBounded:
-    """ISSUE #73 验收①：队列深度超阈值时丢最旧帧，**绝不无界堆积**。"""
+    """ISSUE #73 acceptance 1: when queue depth exceeds the threshold, drop the oldest frame,
+    **never accumulate unboundedly**."""
 
     def test_slow_client_queue_stays_bounded(self):
-        """1000 条灌进去，慢客户端队列必须顶在 maxsize，而不是涨到 1000。"""
+        """Push 1000 in; the slow client's queue must cap at maxsize, not grow to 1000."""
 
         async def drive() -> WsOutbound:
             ob = WsOutbound(BlockingWS(), maxsize=10, alert_slack=2)
@@ -95,13 +98,15 @@ class TestOutboundIsBounded:
             return ob
 
         ob = asyncio.run(drive())
-        # 内存有界 = 队列长度是**常量**（物理容量），与灌入条数无关。
-        # 物理容量 = 遥测软上限 + 告警预留，两者都在 config 里写死。
-        assert ob.qsize <= ob.capacity, f"队列越界：{ob.qsize} > {ob.capacity}"
-        assert ob.telemetry_dropped > 0, "慢客户端应触发丢帧"
+        # Memory bounded = queue length is a **constant** (physical capacity), independent of how
+        # many were pushed. Physical capacity = telemetry soft cap + alert reserve, both hardcoded
+        # in config.
+        assert ob.qsize <= ob.capacity, f"queue overflowed: {ob.qsize} > {ob.capacity}"
+        assert ob.telemetry_dropped > 0, "slow client should trigger frame drops"
 
     def test_drops_oldest_not_newest(self):
-        """丢的必须是**最旧**帧：遥测是"最新值优先"的时序数据。"""
+        """What gets dropped must be the **oldest** frame: telemetry is "latest-value-first"
+        time-series data."""
 
         async def drive() -> tuple[WsOutbound, list[dict]]:
             ob = WsOutbound(BlockingWS(), maxsize=3, alert_slack=0)
@@ -111,17 +116,19 @@ class TestOutboundIsBounded:
 
         _ob, kept = asyncio.run(drive())
         nums = [e["n"] for e in kept]
-        # 队里应留下**最后**几条（最旧的被丢掉），而不是最旧的几条。
-        assert nums == sorted(nums), f"顺序被破坏：{nums}"
-        assert nums[-1] == 9, f"最新帧必须在：{nums}"
-        assert nums[0] > 0, f"最旧的帧应已被丢弃：{nums}"
+        # The queue should keep the **last** few (oldest dropped), not the oldest few.
+        assert nums == sorted(nums), f"order corrupted: {nums}"
+        assert nums[-1] == 9, f"latest frame must be present: {nums}"
+        assert nums[0] > 0, f"oldest frame should have been dropped: {nums}"
 
     def test_misconfigured_maxsize_still_bounds(self):
-        """`maxsize` 配成 0/负数也**不得**退化成无界（asyncio.Queue 的 0 = 无限）。
+        """A `maxsize` of 0/negative must **not** degenerate into unbounded (asyncio.Queue's 0 =
+        infinite).
 
-        这是唯一一处"防御性"代码，理由具体：阈值来自 .env，写错一个 0 就等于
-        把本单修好的问题原样放回去 —— 而"配置写错"没有任何运行时信号。
-        反向验证：把 `max(1, maxsize)` 改回 `maxsize`，这条会红（实测 qsize=999）。
+        This is the only piece of "defensive" code, with a concrete reason: the threshold comes from
+        .env, and a miswritten 0 puts the fixed problem right back -- and "wrong config" gives no
+        runtime signal. Reverse check: reverting `max(1, maxsize)` back to `maxsize` turns this red
+        (observed qsize=999).
         """
 
         async def drive() -> WsOutbound:
@@ -133,11 +140,11 @@ class TestOutboundIsBounded:
             return ob
 
         ob = asyncio.run(drive())
-        assert ob.maxsize >= 1, "maxsize 退化成了无界（0 在 asyncio 里=无限）"
-        assert ob.qsize <= ob.capacity, f"无界堆积：qsize={ob.qsize}"
+        assert ob.maxsize >= 1, "maxsize degenerated into unbounded (0 = infinite in asyncio)"
+        assert ob.qsize <= ob.capacity, f"unbounded accumulation: qsize={ob.qsize}"
 
     def test_enqueue_never_blocks(self):
-        """`enqueue` 必须同步返回：它一旦 await，转发循环就被拖住了。"""
+        """`enqueue` must return synchronously: the moment it awaits, the forward loop is stalled."""
 
         async def drive() -> float:
             ob = WsOutbound(BlockingWS(), maxsize=2, alert_slack=0)
@@ -149,17 +156,18 @@ class TestOutboundIsBounded:
             return loop.time() - t0
 
         elapsed = asyncio.run(drive())
-        # 5000 次入队若有一次 await 到慢客户端，这里就是 3600s 级。
-        assert elapsed < 1.0, f"enqueue 疑似阻塞：{elapsed:.3f}s"
+        # If any of the 5000 enqueues awaits on the slow client, this would be on the 3600s scale.
+        assert elapsed < 1.0, f"enqueue appears to block: {elapsed:.3f}s"
 
 
-# ------------------------------------------------- 约束③ 告警不可丢（核心）
+# ------------------------------------------------- constraint 3: alerts must never be dropped (core)
 
 class TestAlertIsNeverDropped:
-    """ISSUE #73 约束③：告警优先级高于遥测节流，**最多合并/延迟，不可丢**。"""
+    """ISSUE #73 constraint 3: alert priority is higher than telemetry throttling, **at most
+    merge/delay, never drop**."""
 
     def test_alert_survives_telemetry_overflow(self):
-        """遥测把队列撑满后，告警仍然进得去且不被丢掉。"""
+        """After telemetry fills the queue, alerts still get in and are not dropped."""
 
         async def drive() -> tuple[WsOutbound, list[dict]]:
             ob = WsOutbound(BlockingWS(), maxsize=5, alert_slack=4)
@@ -171,12 +179,13 @@ class TestAlertIsNeverDropped:
 
         _ob, kept = asyncio.run(drive())
         alerts = [e for e in kept if e["type"] == "alert"]
-        # 预留的 alert_slack 空间正是为这一幕存在的：遥测把软上限占满后，
-        # 告警仍能进来，一条不丢。
-        assert len(alerts) == 3, f"告警被丢弃：只留下 {len(alerts)}/3"
+        # The reserved alert_slack space exists exactly for this scene: after telemetry fills the
+        # soft cap, alerts still get in, not a single one dropped.
+        assert len(alerts) == 3, f"alerts dropped: only {len(alerts)}/3 left"
 
     def test_alert_overflow_is_capped_not_unbounded(self):
-        """即便告警洪流，队列也不能无界增长 —— 容量封在 maxsize + slack。"""
+        """Even under an alert flood, the queue must not grow unbounded -- capacity is capped at
+        maxsize + slack."""
 
         async def drive() -> WsOutbound:
             ob = WsOutbound(BlockingWS(), maxsize=5, alert_slack=3)
@@ -188,15 +197,16 @@ class TestAlertIsNeverDropped:
             return ob
 
         ob = asyncio.run(drive())
-        assert ob.qsize <= ob.capacity, f"告警路径把队列撑爆：{ob.qsize}"
-        # 到顶之后记为 deferred（可观测），而不是静默消失或抛异常。
-        assert ob.alerts_deferred > 0, "溢出应被记账"
+        assert ob.qsize <= ob.capacity, f"alert path blew up the queue: {ob.qsize}"
+        # Once at the cap, count as deferred (observable), rather than silently vanishing or raising.
+        assert ob.alerts_deferred > 0, "overflow should be accounted"
 
     def test_alert_flood_does_not_raise(self):
-        """告警洪流不得抛异常 —— 抛出去会炸掉整个转发循环。
+        """An alert flood must not raise -- raising would blow up the entire forward loop.
 
-        回归护栏：本文件第一版草稿在"队列满 + 告警"路径上既抛 QueueFull
-        （漏 guard），改成重试后又是 100% CPU 活锁。两种都得被这条挡住。
+        Regression guardrail: the first draft of this file both raised QueueFull on the
+        "queue full + alert" path (missing guard), and after switching to retry became a 100% CPU
+        livelock. This must block both.
         """
 
         async def drive() -> WsOutbound:
@@ -207,16 +217,17 @@ class TestAlertIsNeverDropped:
             await _settle()
             return ob
 
-        ob = asyncio.run(drive())  # 抛出即测试失败
+        ob = asyncio.run(drive())  # raising fails the test
         assert ob.qsize <= ob.capacity
 
     def test_telemetry_cannot_eat_the_alert_reserve(self):
-        """遥测**不得**占用留给告警的那截容量。
+        """Telemetry must **not** occupy the capacity reserved for alerts.
 
-        回归护栏：本文件上一版按**物理容量**判断遥测是否该丢，于是遥测先把
-        预留区占满，随后的告警只能顺延 —— `maxsize=5 / slack=4` 时实测
-        遥测占 9 格、3 条告警全被 defer，"告警不可丢"名存实亡。
-        正确语义是：遥测只准用到 `maxsize`（软上限），预留区只归告警。
+        Regression guardrail: the previous version judged whether telemetry should drop by
+        **physical capacity**, so telemetry first filled the reserve, and subsequent alerts had to
+        defer -- with `maxsize=5 / slack=4` observed telemetry took 9 slots and all 3 alerts were
+        deferred, making "alerts must not be dropped" nominal only. The correct semantics: telemetry
+        may only use up to `maxsize` (soft cap); the reserve belongs to alerts alone.
         """
 
         async def drive() -> WsOutbound:
@@ -227,17 +238,19 @@ class TestAlertIsNeverDropped:
 
         ob = asyncio.run(drive())
         assert ob.qsize <= ob.maxsize, (
-            f"遥测越界占用了告警预留区：qsize={ob.qsize} > 软上限={ob.maxsize}"
+            f"telemetry overstepped into the alert reserve: qsize={ob.qsize} > soft cap={ob.maxsize}"
         )
-        assert ob.capacity > ob.maxsize, "预留区应当存在（slack > 0）"
+        assert ob.capacity > ob.maxsize, "reserve should exist (slack > 0)"
 
     def test_alert_accounting_is_conserved_in_mixed_stream(self):
-        """混流下告警必须**守恒**：排队 + 发送中 + 顺延 == 发出的总数。
+        """In a mixed stream, alerts must be **conserved**: queued + in-flight + deferred == total
+        emitted.
 
-        回归护栏：本文件上一版用"换队腾位"实现告警优先级，把 `self._queue`
-        换成新对象时与正在消费的发送协程竞争，静默丢了告警。
-        只数队列里的告警看不出问题（丢的那条不在任何地方），
-        必须把"发送中"（已被 sender 取出、正卡在 send_json 上）也算进来才守恒。
+        Regression guardrail: the previous version implemented alert priority by "swapping queues to
+        free space", replacing `self._queue` with a new object while racing the consuming send
+        coroutine, silently losing alerts. Counting only the alerts in the queue hides the problem
+        (the dropped one is nowhere), so we must also count "in-flight" (already taken by the sender,
+        stuck on send_json) for conservation.
         """
 
         class TrackingWS:
@@ -267,38 +280,39 @@ class TestAlertIsNeverDropped:
         inflight = sum(1 for e in ws.inflight if e.get("type") == "alert")
         total = queued + inflight + ob.alerts_deferred
         assert total == alerts, (
-            f"告警不守恒：排队 {queued} + 发送中 {inflight} + 顺延 {ob.alerts_deferred}"
-            f" = {total} != {alerts}（有告警被静默丢弃）"
+            f"alerts not conserved: queued {queued} + in-flight {inflight} + deferred {ob.alerts_deferred}"
+            f" = {total} != {alerts} (some alerts silently dropped)"
         )
 
     def test_alert_kind_uses_dedicated_path(self):
-        """`alert` 与 `telemetry` 走的必须是不同分支（分级处置的存在性问题）。"""
+        """`alert` and `telemetry` must take different branches (the existence of tiered handling)."""
 
         async def drive() -> tuple[WsOutbound, list[dict]]:
             ob = WsOutbound(BlockingWS(), maxsize=2, alert_slack=2)
             ob.enqueue(TELEMETRY, {"type": "telemetry", "n": 0})
             ob.enqueue(TELEMETRY, {"type": "telemetry", "n": 1})
-            ob.enqueue(TELEMETRY, {"type": "telemetry", "n": 2})  # 顶满软上限 → 丢最旧
-            ob.enqueue(ALERT, {"type": "alert", "n": 0})          # 走告警预留区
+            ob.enqueue(TELEMETRY, {"type": "telemetry", "n": 2})  # fill soft cap -> drop oldest
+            ob.enqueue(ALERT, {"type": "alert", "n": 0})          # go through alert reserve
             return ob, ob.drain_nowait()
 
         ob, kept = asyncio.run(drive())
-        # 遥测被丢（telemetry_dropped > 0），告警一个没丢（alerts_deferred == 0）。
-        assert ob.telemetry_dropped > 0, "遥测应被丢弃"
-        assert ob.alerts_deferred == 0, "有预留余量时告警不应顺延"
-        assert [e for e in kept if e["type"] == "alert"], "告警必须留下"
+        # Telemetry is dropped (telemetry_dropped > 0), alerts none dropped (alerts_deferred == 0).
+        assert ob.telemetry_dropped > 0, "telemetry should be dropped"
+        assert ob.alerts_deferred == 0, "alerts should not defer when reserve headroom remains"
+        assert [e for e in kept if e["type"] == "alert"], "alerts must remain"
 
 
-# ------------------------------------------------ 验收② 心跳与回收（_ws_active）
+# ------------------------------------------------ acceptance 2: heartbeat & reclaim (_ws_active)
 
-#: 回收等待上限。服务端的 finally 相对客户端 ctx 退出是**异步**的
-#: （客户端关掉本地 socket 与服务端跑完 teardown 之间隔着一次事件循环调度），
-#: 实测稳定在 10ms 量级；给 2s 是为了不因 CI 负载抖动而 flaky。
+#: Reclaim wait ceiling. The server's finally is **asynchronous** relative to the client ctx exit
+#: (between the client closing the local socket and the server finishing teardown there is one
+#: event-loop scheduling gap), observed stable on the 10ms scale; we give 2s so CI load jitter does
+#: not make it flaky.
 RECYCLE_WAIT_S = 2.0
 
 
 def _wait_recycled(expected: int, timeout: float = RECYCLE_WAIT_S) -> bool:
-    """轮询等待 `_ws_active` 降到 `expected`。返回是否等到。"""
+    """Poll until `_ws_active` drops to `expected`. Returns whether it was reached."""
     import time
 
     import app.main as main
@@ -312,37 +326,38 @@ def _wait_recycled(expected: int, timeout: float = RECYCLE_WAIT_S) -> bool:
 
 
 class TestConnectionAccounting:
-    """ISSUE #73 验收②：连接异常/超时后必须走 finally 回收 `_ws_active`。"""
+    """ISSUE #73 acceptance 2: after a connection exception/timeout, finally must reclaim
+    `_ws_active`."""
 
     def test_disconnect_recycles_counter(self, client):
-        """客户端断开后计数必须归零（改前挂死 —— 本单的核心修复）。
+        """After the client disconnects, the count must return to zero (the core fix of this issue).
 
-        注意断言的是「**最终**回收」而不是「同步回收」：客户端关闭本地 socket
-        与服务端跑完 finally 之间必然有一次调度延迟。把这一步写成同步断言，
-        测的就不是产品行为而是调度时序，CI 上会随机飘红。
+        Note we assert "**eventual** reclaim" not "synchronous reclaim": between the client closing
+        the local socket and the server finishing finally there is inevitably one scheduling delay.
+        Writing this as a synchronous assertion would test scheduling timing, not product behavior,
+        and flake randomly on CI.
         """
         import app.main as main
 
         from app import ws_probe
 
         token = ws_probe._mint_token()
-        assert token, "探针 token 自签失败，测试前提不成立"
+        assert token, "probe token self-sign failed, test precondition not met"
         before = main._ws_active
 
         with client.websocket_connect(f"/ws/robots?token={token}") as ws:
             assert ws.receive_json()["type"] == "snapshot"
-            assert main._ws_active == before + 1, "连上后计数未 +1"
+            assert main._ws_active == before + 1, "count not +1 after connect"
 
         assert _wait_recycled(before), (
-            f"断开后未回收：{main._ws_active}（应回到 {before}）—— "
-            "这正是 ISSUE #73 要修的「连接只增不减」"
+            f"not reclaimed after disconnect: {main._ws_active} (should return to {before}) -- "
+            "this is exactly the 'connections only increase, never decrease' that ISSUE #73 fixes"
         )
 
     def test_repeated_connections_do_not_leak(self, client):
-        """连续多轮连接/断开不得让计数漂移（防"漏一次 finally"）。
-
-        串行 6 轮、每轮都等回收 —— 若 finally 漏一次，计数会单调上涨，
-        等回收必然超时，因此这条能抓住"偶发漏回收"。
+        """6 rounds serially, each waiting for reclaim -- if finally misses once, the count rises
+        monotonically, waiting for reclaim will time out, so this catches "occasional missed
+        reclaim".
         """
         import app.main as main
 
@@ -354,15 +369,17 @@ class TestConnectionAccounting:
             with client.websocket_connect(f"/ws/robots?token={token}") as ws:
                 ws.receive_json()
             assert _wait_recycled(before), (
-                f"第 {i + 1} 轮后计数未回到 {before}：{main._ws_active}"
+                f"count did not return to {before} after round {i + 1}: {main._ws_active}"
             )
 
     def test_counter_returns_to_baseline_after_many_rounds(self, client):
-        """多轮快速重连（模拟前端退避重连风暴）后计数必须回到基线。
+        """After many fast reconnect rounds (simulating the frontend's backoff reconnect storm) the
+        count must return to baseline.
 
-        这条与 `test_repeated_connections_do_not_leak` 的区别是**不等回收就重连**：
-        它覆盖"上一条还没 teardown 完就来了下一条"的重叠窗口 —— 若 finally 与
-        +1 之间存在竞态（例如计数减错对象），重叠时会表现为计数偏移而单条不复现。
+        This differs from `test_repeated_connections_do_not_leak` in that it reconnects **without
+        waiting for reclaim**: it covers the overlapping window of "the next one arrives before the
+        previous teardown finished" -- if there is a race between finally and +1 (e.g. decrementing
+        the wrong object), overlap shows as a count offset that a single case does not reproduce.
         """
         import app.main as main
 
@@ -373,14 +390,15 @@ class TestConnectionAccounting:
         for _ in range(10):
             with client.websocket_connect(f"/ws/robots?token={token}") as ws:
                 ws.receive_json()
-        assert _wait_recycled(before), f"重连风暴后计数未归位：{main._ws_active}"
+        assert _wait_recycled(before), f"count did not return to baseline after reconnect storm: {main._ws_active}"
 
     def test_rejected_handshake_does_not_touch_counter(self, client):
-        """被 1008 拒掉的握手**不得**计入连接数（订单 16 T1b 的语义）。
+        """A handshake rejected with 1008 must **not** count toward the connection total.
 
-        先说清基线（等计数归位），再连打两次坏握手 —— 计数必须纹丝不动。
-        改前若把 +1 放在鉴权之前，"1008 风暴"（前端带过期 token 反复重连）
-        会让连接数虚高，掩盖"大屏到底开着几台"这个真实信号。
+        First establish the baseline (wait for the count to settle), then fire two bad handshakes --
+        the count must not budge. Before the fix, if +1 was placed before auth, a "1008 storm"
+        (frontend repeatedly reconnecting with an expired token) would inflate the connection count,
+        masking the real signal of "how many screens are actually open".
         """
         import app.main as main
 
@@ -389,7 +407,7 @@ class TestConnectionAccounting:
         token = ws_probe._mint_token()
         with client.websocket_connect(f"/ws/robots?token={token}") as ws:
             ws.receive_json()
-        assert _wait_recycled(0), f"基线未归位：{main._ws_active}"
+        assert _wait_recycled(0), f"baseline not settled: {main._ws_active}"
         baseline = main._ws_active
 
         for bad in ("/ws/robots", "/ws/robots?token=bogus"):
@@ -399,11 +417,11 @@ class TestConnectionAccounting:
             except Exception:
                 pass
             assert main._ws_active == baseline, (
-                f"{bad} 污染了连接计数：{main._ws_active} != {baseline}"
+                f"{bad} polluted the connection count: {main._ws_active} != {baseline}"
             )
 
     def test_aclose_is_idempotent(self):
-        """`aclose` 可重复调用：finally 与 watchdog 可能都来收一次。"""
+        """`aclose` can be called repeatedly: finally and the watchdog may each collect once."""
 
         async def drive() -> WsOutbound:
             ob = WsOutbound(DrainingWS(), maxsize=4)
@@ -411,17 +429,17 @@ class TestConnectionAccounting:
             ob.enqueue(TELEMETRY, {"type": "telemetry", "n": 0})
             await _settle()
             await ob.aclose()
-            await ob.aclose()  # 不得抛
+            await ob.aclose()  # must not raise
             return ob
 
         ob = asyncio.run(drive())
         assert ob._task is None
 
 
-# ------------------------------------------------------------ 约束① 鉴权顺序
+# ------------------------------------------------------------ constraint 1: auth order
 
 class TestAuthOrderPreserved:
-    """ISSUE #73 约束①：accept → 1008 → 不 send 业务帧，顺序不得破坏。"""
+    """ISSUE #73 constraint 1: accept -> 1008 -> no business frame sent; the order must not break."""
 
     def test_missing_token_closes_1008(self, client):
         from starlette.websockets import WebSocketDisconnect
@@ -440,7 +458,8 @@ class TestAuthOrderPreserved:
         assert ei.value.code == 1008
 
     def test_valid_token_gets_snapshot_first(self, client):
-        """合法连接的首帧必须是 snapshot（背压改造不得改变首帧语义）。"""
+        """A legitimate connection's first frame must be snapshot (the backpressure rewrite must not
+        change the first-frame semantics)."""
         from app import ws_probe
 
         token = ws_probe._mint_token()
@@ -450,17 +469,20 @@ class TestAuthOrderPreserved:
         assert "robots" in first["data"]
 
 
-# ------------------------------------------- 约束② 告警转发仍在（#71 RAW 通道）
+# ------------------------------------------- constraint 2: alert forwarding still present (#71 RAW channel)
 
 class TestRawFramesFromHub:
-    """ISSUE #71 融合：ws_hub 节拍扇出经 `enqueue_raw` 投递**预序列化**帧。
+    """ISSUE #71 merge: ws_hub's tempo fan-out delivers **pre-serialized** frames via
+    `enqueue_raw`.
 
-    RAW 通道必须完整继承 #73 的分级语义：遥测可丢（丢最旧）、告警永丢不得；
-    且发送协程对 RAW 帧走 `send_text` 直发（一份序列化 → N 连接复用的落点）。
+    The RAW channel must fully inherit #73's tiered semantics: telemetry may be dropped (oldest),
+    alerts must never be dropped; and the send coroutine sends RAW frames via `send_text` directly
+    (where one serialization -> N-connection reuse lands).
     """
 
     def test_raw_telemetry_sent_verbatim_via_send_text(self):
-        """RAW 帧必须原样 `send_text`，不得再过一遍 send_json（重复序列化）。"""
+        """RAW frames must be `send_text` verbatim, not passed through send_json again
+        (re-serialization)."""
 
         class RecordingWS:
             def __init__(self) -> None:
@@ -486,53 +508,57 @@ class TestRawFramesFromHub:
         ws, sent = asyncio.run(drive())
         assert sent == 1
         assert ws.texts == ['{"type":"telemetry","data":{"robot_id":"r1"}}'], (
-            "RAW 帧必须逐字节原样 send_text（字符串在连接间复用的前提）"
+            "RAW frames must be send_text byte-for-byte verbatim (the premise for string reuse across connections)"
         )
-        assert ws.json_sent == [], "RAW 帧不得走 send_json（那会每连接重复序列化）"
+        assert ws.json_sent == [], "RAW frames must not go through send_json (that would re-serialize per connection)"
 
     def test_raw_alert_survives_telemetry_overflow(self):
-        """队列被 RAW 遥测塞满后，RAW 告警仍必须送到（走预留区，永不丢）。"""
+        """After the queue is filled by RAW telemetry, RAW alerts must still be delivered (via the
+        reserve, never dropped)."""
 
         async def drive() -> tuple[WsOutbound, list[str]]:
             ob = WsOutbound(DrainingWS(), maxsize=2, alert_slack=4)
-            for i in range(5):  # 远超软上限 2 → 一路丢最旧
+            for i in range(5):  # far over soft cap 2 -> keep dropping oldest
                 ob.enqueue_raw("telemetry", f'{{"n":{i}}}')
             ob.enqueue_raw("alert", '{"type":"alert"}')
             return ob, ob.drain_nowait()
 
         ob, frames = asyncio.run(drive())
-        assert ob.telemetry_dropped > 0, "RAW 遥测超限必须触发丢最旧"
-        assert '{"type":"alert"}' in frames, "RAW 告警必须留下"
-        assert ob.alerts_deferred == 0, "有预留余量时 RAW 告警不应顺延"
+        assert ob.telemetry_dropped > 0, "RAW telemetry over limit must trigger oldest-drop"
+        assert '{"type":"alert"}' in frames, "RAW alert must remain"
+        assert ob.alerts_deferred == 0, "RAW alert should not defer when reserve headroom remains"
 
     def test_drop_oldest_never_eats_raw_alert(self):
-        """回归护栏：丢最旧的判据必须是白名单（是遥测才可丢）。
+        """Regression guardrail: the oldest-drop criterion must be a whitelist (only telemetry is
+        droppable).
 
-        第一版用 `item[0] is not ALERT` 判可丢 —— `_RAW_ALERT` 哨兵对象
-        `is not` 字符串恒真，队首若是预序列化告警就会被静默吃掉。
+        The first version used `item[0] is not ALERT` to decide droppable -- the `_RAW_ALERT`
+        sentinel object `is not` against a string is always true, so a pre-serialized alert at the
+        head would be silently eaten.
         """
         from app.ws_backpressure import _RAW_ALERT, _RAW_TELEMETRY  # noqa: F401
 
         async def drive() -> tuple[WsOutbound, list[str]]:
             ob = WsOutbound(DrainingWS(), maxsize=2, alert_slack=4)
-            ob.enqueue_raw("alert", '{"type":"alert","n":0}')  # 队首是告警
+            ob.enqueue_raw("alert", '{"type":"alert","n":0}')  # head is an alert
             ob.enqueue_raw("telemetry", '{"n":1}')
-            ob.enqueue_raw("telemetry", '{"n":2}')  # 顶满软上限
-            ob.enqueue_raw("telemetry", '{"n":3}')  # 触发丢最旧 → 必须丢 '{"n":1}'
+            ob.enqueue_raw("telemetry", '{"n":2}')  # fill soft cap
+            ob.enqueue_raw("telemetry", '{"n":3}')  # trigger oldest-drop -> must drop '{"n":1}'
             return ob, ob.drain_nowait()
 
         ob, frames = asyncio.run(drive())
-        assert '{"type":"alert","n":0}' in frames, "队首告警不得被丢最旧逻辑吃掉"
-        assert '{"n":1}' not in frames, "被丢的必须是**最旧的遥测**"
+        assert '{"type":"alert","n":0}' in frames, "head alert must not be eaten by the oldest-drop logic"
+        assert '{"n":1}' not in frames, "what got dropped must be the **oldest telemetry**"
 
     def test_metrics_include_hub_counters(self):
-        """中枢指标必须存在（改造是否生效的观测面，缺失即回退到逐条直发）。"""
+        """Hub counters must exist (the observation surface for whether the rewrite works; missing
+        means regressed to per-frame direct send)."""
         text = metrics.render()[0].decode()
         assert "robot_backend_ws_hub_frames_total" in text
         assert "robot_backend_ws_hub_coalesced_total" in text
 
 
-# -------------------------------------------------------------- 指标与配置
+# -------------------------------------------------------------- metrics & config
 
 class TestObservabilityAndConfig:
     def test_backpressure_metrics_exist(self):
@@ -543,12 +569,13 @@ class TestObservabilityAndConfig:
         assert "robot_backend_ws_slow_client_evicted_total" in text
 
     def test_thresholds_come_from_settings(self):
-        """阈值必须来自配置（AGENTS.md：禁止在业务代码里硬编码）。"""
+        """Thresholds must come from config (AGENTS.md: hardcoding in business code forbidden)."""
         assert settings.ws_outbound_queue_size > 0
         assert settings.ws_heartbeat_interval_s > 0
         assert settings.ws_outbound_close_timeout_s > 0
         assert settings.ws_alert_overflow_slack >= 0
 
     def test_alert_slack_is_a_real_margin(self):
-        """slack 默认值必须 > 0，否则"告警不可丢"会退化成"先到先得"。"""
+        """The slack default must be > 0, otherwise "alerts must not be dropped" degenerates into
+        "first-come-first-served"."""
         assert ws_backpressure.ALERT_OVERFLOW_SLACK > 0

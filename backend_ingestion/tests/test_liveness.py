@@ -1,18 +1,20 @@
-"""在线/失联判定（ISSUE #77）—— 后端必须是唯一事实源。
+"""Online/offline determination (ISSUE #77) -- the backend must be the single source of truth.
 
-被测对象是 `app/services/liveness.py` 的真实逻辑与 `state_cache.snapshot()` 的真实补齐路径，
-只把 Redis 换成一个**最小可用替身**（`_FakeRedis`），不替换被测逻辑本身。
+The object under test is the real logic of `app/services/liveness.py` and the real backfill path of
+`state_cache.snapshot()`, only swapping Redis for a **minimal usable stand-in** (`_FakeRedis`);
+the logic under test itself is not replaced.
 
-## 反向护栏（本文件的重点）
+## Reverse guardrail (the focus of this file)
 
-ISSUE #77 的根因不是"写错了某一行"，而是**判定依据选错了源**：
-前端拿机器人自述的 `status_code` 当在线证据。所以本文件的每条断言都要求
-"事实来自接收侧"。为避免它们变成"给一个永远不会失败的断言鼓掌"，
-底部 `test_guard_detects_status_code_based_verdict` 把判定逻辑改回
-`status_code != 0`，并断言它**必须**与真实逻辑给出不同结论 ——
-同时真实逻辑**恰好**是 ISSUE #77 要求的那种（停报者离线）。
+The root cause of ISSUE #77 was not "a wrong line was written", but the **wrong source was chosen
+for the verdict**: the frontend took the robot's self-reported `status_code` as the online evidence.
+So every assertion in this file demands that "the fact comes from the receiving side". To avoid them
+becoming "applause for an assertion that can never fail", the bottom
+`test_guard_detects_status_code_based_verdict` rewrites the verdict logic back to
+`status_code != 0`, and asserts it **must** differ from the real logic -- while the real logic
+happens to be exactly the kind ISSUE #77 requires (a stopper is offline).
 
-跑法（从仓库根）：
+Run (from repo root):
     pytest backend_ingestion/tests/test_liveness.py -v
 """
 
@@ -27,20 +29,21 @@ from app.config import settings
 from app.services import liveness, state_cache
 
 
-# ---------------------------------------------------------------- Redis 替身
+# ---------------------------------------------------------------- Redis stand-in
 
 class _FakeRedis:
-    """只实现 liveness/state_cache 用到的那几个命令。
+    """Implements only the commands liveness/state_cache actually use.
 
-    刻意**手写**而不是用 fakeredis：本文件要验的就是"哪几个往返、各自语义"，
-    用一个全能替身会把"EXISTS/HGETALL/ZSCORE/ZCOUNT 各自被调了几次"这件事藏掉。
+    Deliberately **hand-written** rather than using fakeredis: what this file must verify is
+    "which round-trips, with what semantics each", and an all-powerful stand-in would hide
+    "how many times EXISTS/HGETALL/ZSCORE/ZCOUNT were each called".
     """
 
     def __init__(self) -> None:
         self.hashes: dict[str, dict[str, str]] = {}
         self.zsets: dict[str, dict[str, float]] = {}
         self.expires: dict[str, int] = {}
-        # 记录调用次数：用于断言"批量补齐不按台数放大往返"
+        # record call counts: used to assert "batch backfill does not amplify round-trips by robot count"
         self.calls = {"hgetall": 0, "zscore": 0, "exists": 0}
 
     # ---- Hash ----
@@ -69,11 +72,11 @@ class _FakeRedis:
         lo = float("-inf") if mn == "-inf" else float(mn)
         return sum(1 for v in self.zsets.get(key, {}).values() if lo <= v <= hi)
 
-    # ---- 其它 ----
+    # ---- other ----
     async def expire(self, key, ttl):
         self.expires[key] = int(ttl)
 
-    def pipeline(self, transaction=True):  # noqa: ARG002 —— 替身忽略事务语义
+    def pipeline(self, transaction=True):  # noqa: ARG002 -- the stand-in ignores transaction semantics
         return _FakePipeline(self)
 
 
@@ -84,9 +87,9 @@ class _FakePipeline:
 
     def __getattr__(self, name):
         def _record(*args, **kwargs):
-            # 把关键字参数并进位置参数：`hset(key, mapping={...})` 与
-            # `hset(key, {...})` 在替身上必须等价，否则会把"生产代码传了 kwarg"
-            # 误报成"生产代码没写进去"。
+            # Fold keyword arguments into positional: `hset(key, mapping={...})` and
+            # `hset(key, {...})` must be equivalent on the stand-in, otherwise "production code
+            # passed a kwarg" would be misreported as "production code didn't write it".
             if kwargs and not args:
                 self._ops.append((name, tuple(kwargs.values())))
             else:
@@ -119,7 +122,7 @@ def run(coro):
     return asyncio.run(coro)
 
 
-# ---------------------------------------------------------------- 记录心跳
+# ---------------------------------------------------------------- record heartbeat
 
 class TestRecord:
     def test_record_writes_hash_and_zset(self, fake_redis):
@@ -130,10 +133,11 @@ class TestRecord:
         assert "humanoid-001" in fake_redis.zsets[liveness.KEY_ZSET]
 
     def test_gc_ttl_is_far_above_judgement_window(self, fake_redis):
-        """TTL 是**垃圾回收**水位，不是判定窗口。
+        """TTL is the **garbage-collection** water level, not the judgement window.
 
-        若照搬 `state_ttl_seconds`(10s)：10.1s 前上报过的机器人，其 Hash 已过期，
-        读回来就是「从未上报」—— 收到多少蒸发多少（这正是本单要消灭的那类假象）。
+        If we blindly copied `state_ttl_seconds` (10s): a robot that reported 10.1s ago would have
+        its Hash already expired, so reading it back yields "never reported" -- everything that
+        arrived evaporates (exactly the kind of false impression this issue set out to kill).
         """
         run(liveness.record("humanoid-002", 1))
         ttl = fake_redis.expires["liveness:robot:humanoid-002"]
@@ -141,16 +145,16 @@ class TestRecord:
         assert ttl > settings.robot_offline_threshold_s
 
     def test_record_failure_never_raises(self, monkeypatch):
-        """台账挂掉不能拖垮采集循环（与 state_cache 同一纪律）。"""
+        """A dead ledger must not take down the ingest loop (same discipline as state_cache)."""
 
         async def boom():
             raise ConnectionError("injected: redis down")
 
         monkeypatch.setattr(liveness, "get_redis", boom)
-        run(liveness.record("humanoid-003", 1))          # 不抛即通过
+        run(liveness.record("humanoid-003", 1))          # passes only if not raised
 
 
-# ---------------------------------------------------------------- 判定
+# ---------------------------------------------------------------- verdict
 
 class TestIsOnline:
     def test_fresh_last_seen_is_online(self, fake_redis):
@@ -160,39 +164,43 @@ class TestIsOnline:
         assert got["status_code"] == 1
 
     def test_stopped_robot_is_offline_even_if_status_code_is_healthy(self, fake_redis):
-        """ISSUE #77 的正题：**最后一帧是"正常"，但它已经停了**。
+        """The main point of ISSUE #77: **the last frame was "normal", but it has stopped**.
 
-        这正是旧实现翻车的场景：`status_code = 1 ≠ 0` → 永远算在线。
-        判定必须基于 last_seen，与 status_code 无关。
+        This is exactly the scenario where the old implementation crashed: `status_code = 1 != 0`
+        -> always counted online. The verdict must be based on last_seen, independent of status_code.
         """
         run(liveness.record("humanoid-001", 1))
-        # 把 last_seen 回拨到阈值之外（等价于"1 小时前上报过，之后再没来过"）。
-        # ⚠️ Hash 与 ZSET 都要回拨：`read()` 以 Hash 为准（ZSET 只服务于批量与计数），
-        # 只改一处得到的不是"停报"，而是两条台账互相矛盾的状态。
+        # Roll last_seen back beyond the threshold (equivalent to "reported an hour ago, never since").
+        # WARNING: both Hash and ZSET must be rolled back: `read()` takes the Hash as source of truth
+        # (the ZSET only serves batching and counting), so changing only one yields not "stopped
+        # reporting" but two ledgers in contradiction.
         stale = str(time.time() - 3600)
         fake_redis.hashes["liveness:robot:humanoid-001"]["last_seen"] = stale
         fake_redis.zsets[liveness.KEY_ZSET]["humanoid-001"] = float(stale)
         got = run(liveness.read("humanoid-001"))
         assert got["is_online"] is False
-        assert got["status_code"] == 1, "status_code 仍是最后一帧的值，但它不参与在线判定"
+        assert got["status_code"] == 1, "status_code is still the last frame's value, but it does not participate in the online verdict"
         assert got["last_seen"] is not None
 
     def test_never_reported_is_offline_and_cheap(self, fake_redis):
-        """从未上报：判离线，且**只花一次 EXISTS**（不给 100 台各打两次往返）。"""
+        """Never reported: judged offline, and **only one EXISTS** (no 2 round-trips per robot for
+        100 robots)."""
         got = run(liveness.read("humanoid-099"))
         assert got == {"is_online": False, "last_seen": None, "status_code": None}
         assert fake_redis.calls["exists"] == 1
         assert fake_redis.calls["hgetall"] == 0
 
     def test_threshold_is_configurable(self, fake_redis, monkeypatch):
-        """阈值可配（ISSUE #77 验收：默认 30s）。10Hz 正常抖动不得误判。"""
+        """Threshold is configurable (ISSUE #77 acceptance: default 30s). A 10Hz normal jitter must
+        not misjudge."""
         run(liveness.record("humanoid-001", 1))
-        # 一个 0.3s 的"抖动"：默认阈值下必须仍是在线
+        # A 0.3s "jitter": under the default threshold it must still be online
         fake_redis.zsets[liveness.KEY_ZSET]["humanoid-001"] = time.time() - 0.3
         assert run(liveness.read("humanoid-001"))["is_online"] is True
 
     def test_redis_down_falls_back_to_offline(self, monkeypatch):
-        """台账不可读时**保守判离线**：宁可漏报在线，也不要谎报在线。"""
+        """When the ledger is unreadable, **conservatively judge offline**: better to miss an online
+        report than to falsely report online."""
 
         async def boom():
             raise ConnectionError("injected")
@@ -211,14 +219,15 @@ class TestOnlineCount:
         assert run(liveness.online_count()) == 2
 
 
-# ---------------------------------------------------------------- 批量补齐
+# ---------------------------------------------------------------- batch backfill
 
 class TestEnrichIsBatched:
     def test_enrich_adds_flags_without_per_robot_roundtrips(self, fake_redis):
-        """100 台补齐必须是**常数次**往返，而不是 200 次 HGETALL。
+        """Backfilling 100 robots must be a **constant** number of round-trips, not 200 HGETALLs.
 
-        `/robots` 是大屏与 Drawer 的高频读端点；按台数线性放大会在
-        100 台上直接把 p99 拉爆（AGENTS.md §3 的性能护栏同样适用于读路径）。
+        `/robots` is a high-frequency read endpoint for the big screen and the Drawer; linear
+        scaling by robot count would directly blow up the p99 on 100 robots (AGENTS.md section 3's
+        performance guardrail applies to the read path as well).
         """
         ids = [f"humanoid-{i:03d}" for i in range(1, 101)]
         run(liveness.record("humanoid-001", 1))
@@ -226,25 +235,28 @@ class TestEnrichIsBatched:
         out = run(liveness.enrich(items))
         assert len(out) == 100
         assert sum(1 for x in out if x["is_online"]) == 1
-        # 一次 pipeline（zscore×100 + hgetall×100）→ 内部计数各 100，但网络往返 = 1 次 execute
-        assert fake_redis.calls["exists"] == 0, "批量路径不得逐台 EXISTS"
+        # one pipeline (zscore x100 + hgetall x100) -> internal counts each 100, but network
+        # round-trips = 1 execute
+        assert fake_redis.calls["exists"] == 0, "batch path must not do per-robot EXISTS"
 
     def test_enrich_overwrites_status_code_from_liveness_hash(self, fake_redis):
-        """缓存里的最后一帧状态以台账为准（Hash 10s 过期后快照本来就没法给）。"""
+        """The last-frame status in the cache comes from the ledger (after the Hash's 10s expiry the
+        snapshot simply can't provide it)."""
         run(liveness.record("humanoid-007", 2))
         out = run(liveness.enrich([{"robot_id": "humanoid-007", "status_code": 0}]))
         assert out[0]["status_code"] == 2
         assert out[0]["is_online"] is True
 
 
-# ---------------------------------------------------------------- snapshot 契约
+# ---------------------------------------------------------------- snapshot contract
 
 class TestSnapshotKeepsHundredRows:
     def test_snapshot_always_returns_all_100(self, fake_redis):
-        """ISSUE #77 的连带问题：停报机器人**不得从列表里消失**。
+        """A related problem of ISSUE #77: a stopped robot **must not disappear** from the list.
 
-        旧实现只回 Redis 里还有 Hash 的那些（Hash TTL 10s），
-        于是"掉线的机器人凭空不见"——比误报在线更难排查。
+        The old implementation only returned those still having a Hash in Redis (Hash TTL 10s),
+        so "a robot that dropped offline vanished out of thin air" -- harder to troubleshoot than
+        falsely reporting online.
         """
         ids = [f"humanoid-{i:03d}" for i in range(1, 101)]
         run(liveness.record("humanoid-042", 3))
@@ -252,7 +264,8 @@ class TestSnapshotKeepsHundredRows:
         assert len(snap) == 100
         online = [x for x in snap if x["is_online"]]
         assert [x["robot_id"] for x in online] == ["humanoid-042"]
-        # 未上报的必须是离线占位，且字段齐全（前端会 Object.entries 关节字典）
+        # never-reported ones must be offline placeholders, with complete fields (the frontend does
+        # Object.entries on the joint dict)
         empty = next(x for x in snap if x["robot_id"] == "humanoid-001")
         assert empty["status_code"] == 0
         assert empty["is_online"] is False
@@ -266,28 +279,30 @@ class TestSnapshotKeepsHundredRows:
         snap = run(state_cache.snapshot(ids))
         assert len(snap) == 1
         assert snap[0]["is_online"] is False
-        assert snap[0]["last_seen"] is not None, "仍要给出「最后一次见过它」的时刻"
+        assert snap[0]["last_seen"] is not None, "still must give the moment it was last seen"
 
 
-# ---------------------------------------------------------------- 反向护栏
+# ---------------------------------------------------------------- reverse guardrail
 
 def test_guard_detects_status_code_based_verdict():
-    """把判定依据换回 `status_code != 0`，结论必须与真实逻辑**不同**。
+    """Rewrite the verdict basis back to `status_code != 0`; the conclusion must **differ** from the
+    real logic.
 
-    这条是元测试：它不检查生产代码，而是证明上面 `TestIsOnline` 的断言
-    确实在盯着"依据是 last_seen 还是 status_code"这个问题。
-    若哪天有人把该文件改成按 status_code 判在线（ISSUE #77 的原始缺陷），
-    这里会立刻指出两种判定在这个场景下不可互换。
+    This is a meta-test: it does not check the production code, but proves that the assertions in
+    `TestIsOnline` above are really watching the question of "is the basis last_seen or
+    status_code". If one day someone changes this file to judge online by status_code (the original
+    defect of ISSUE #77), this would immediately point out that the two verdicts are not
+    interchangeable in this scenario.
     """
     now = time.time()
-    stale_last_seen = now - 3600          # 一小时前见过，之后再没来过
-    last_status_code = 1                  # 最后一帧是"正常"
+    stale_last_seen = now - 3600          # seen an hour ago, never since
+    last_status_code = 1                  # the last frame was "normal"
 
-    # 真实依据：接收侧事实（后端判定的那一条）
+    # Real basis: the receiving-side fact (the backend's verdict)
     real_verdict = (now - stale_last_seen) <= settings.robot_offline_threshold_s
-    # ISSUE #77 的原始依据：机器人自述的最后一帧
+    # ISSUE #77's original basis: the robot's self-reported last frame
     buggy_verdict = last_status_code != 0
 
-    assert real_verdict is False, "接收侧依据必须判离线（ISSUE #77 的验收）"
-    assert buggy_verdict is True, "自述依据必须判在线 —— 两种依据确实不等价"
+    assert real_verdict is False, "the receiving-side basis must judge offline (ISSUE #77 acceptance)"
+    assert buggy_verdict is True, "the self-reported basis must judge online -- the two bases are truly not equivalent"
     assert real_verdict != buggy_verdict

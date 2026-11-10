@@ -1,28 +1,33 @@
-"""ISSUE #96 验收 harness（真实 PostgreSQL，非 mock）。
+"""ISSUE #96 acceptance harness (real PostgreSQL, not mock).
 
-⚠️ 本文件**不是** pytest 用例（与同目录 `verify_batch_writer.py` /
-`verify_db_integration.py` 一致：脚本不是 `test_*.py`，pytest 不会收集它）。
-它是**按需运行**的独立脚本，退出码 0 = 全部通过。
+WARNING: this file is **not** a pytest case (consistent with the same-directory
+`verify_batch_writer.py` / `verify_db_integration.py`: the script is not `test_*.py`,
+so pytest will not collect it). It is a **run-on-demand** standalone script; exit code
+0 = all passed.
 
-判据与本单「验收」逐条对应：
-  A. 跑遥测后 robot_metadata.is_online / last_seen 有真实值（非全 NULL / 全 false）
-  B. 停发 > state_ttl_seconds 的机器人 is_online 翻 false，其余不连坐
-  C. 写放大：1000 条遥测（=1s 的 1000 msg/s 峰值）只产生 1 条 UPDATE / 100 个参数行
-  D. offline 规则在真实列上的行为（online / offline / 回落）
-  E. 值未变不写（IS DISTINCT FROM 幂等）
+The criteria map line-by-line to this issue's "acceptance":
+  A. After running telemetry, robot_metadata.is_online / last_seen have real values
+     (not all NULL / all false)
+  B. A robot that stopped sending for > state_ttl_seconds flips is_online to false;
+     the rest are not dragged along
+  C. Write amplification: 1000 telemetry records (= 1s of 1000 msg/s peak) yield only
+     1 UPDATE statement / 100 parameter rows
+  D. The offline rule's behavior on real columns (online / offline / fallback)
+  E. Unchanged values are not written (IS DISTINCT FROM idempotency)
 
-跑法：
-    # 需要一个可写的 PostgreSQL（hypertable/连续聚合不需要）
+Run:
+    # needs a writable PostgreSQL (hypertable / continuous aggregates not required)
     export TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:55432/robot_monitor
     export JWT_SECRET=test-only-secret
     cd backend_ingestion && python -m tests.verify_metadata_heartbeat
 
-未设 `TEST_DATABASE_URL` 时打印「跳过」并退出 0 —— 所以它**永远不该**被当成
-CI 门禁，只作为有 DB 时的人工复核手段。
+When TEST_DATABASE_URL is unset it prints "skipped" and exits 0 -- so it should
+**never** be treated as a CI gate; it is only a manual recheck when a DB is available.
 
-前置：目标库已执行 `infra/init.sql` 的 `robot_metadata` 部分（100 台播种）。
-`src` 类断言（列定义未被改动）由 `backend_ingestion/tests/test_metadata_writer.py`
-覆盖，本文件只做**行为**验证。
+Prerequisite: the target DB has run the `robot_metadata` portion of `infra/init.sql`
+(100 robots seeded). The `src`-class assertions (column definitions unchanged) are
+covered by `backend_ingestion/tests/test_metadata_writer.py`; this file only does
+**behavior** verification.
 """
 from __future__ import annotations
 
@@ -43,7 +48,7 @@ sys.path.insert(0, os.path.join(ROOT, "backend_ingestion"))
 
 DSN = os.environ.get("TEST_DATABASE_URL", "")
 if not DSN:
-    print("【SKIP】未设 TEST_DATABASE_URL —— 本脚本需要真实 PostgreSQL，跳过。")
+    print("[SKIP] TEST_DATABASE_URL not set -- this script needs a real PostgreSQL; skipping.")
     sys.exit(0)
 
 import asyncpg  # noqa: E402
@@ -58,13 +63,13 @@ PASS = FAIL = 0
 
 def chk(name, ok, detail=""):
     global PASS, FAIL
-    print(f"  [{'PASS' if ok else 'FAIL'}] {name}{(' — ' + detail) if detail else ''}")
+    print(f"  [{'PASS' if ok else 'FAIL'}] {name}{(' -- ' + detail) if detail else ''}")
     PASS += 1 if ok else 0
     FAIL += 0 if ok else 1
 
 
 class SpyPool:
-    """包一层真池，记录所有下发语句（用于证明写放大）。"""
+    """Wraps a real pool and records every issued statement (to prove write amplification)."""
 
     def __init__(self, pool):
         self._pool, self.stmts = pool, []
@@ -98,7 +103,8 @@ class _SpyConn:
 
 
 def _load_rule(path: str):
-    """按文件路径加载 alert_engine 的规则（两个模块都有顶层包 `app`，不能直接 import）。"""
+    """Load alert_engine's rule by file path (both modules have a top-level `app` package,
+    so a direct import is impossible)."""
     base = types.ModuleType("app.rules.base")
 
     class Rule:
@@ -134,10 +140,10 @@ async def main():
 
     from app.config import settings
 
-    # ================= A + C：1000 msg/s 峰值 =================
+    # ================= A + C: 1000 msg/s peak =================
     await pool.execute("UPDATE robot_metadata SET is_online=FALSE, last_seen=NULL")
     w = MetadataWriter()
-    for _ in range(10):                      # 100 台 × 10 条 = 1000 条 = 1 秒峰值
+    for _ in range(10):                      # 100 robots x 10 records = 1000 records = 1s peak
         for i in range(1, 101):
             w.put(f"humanoid-{i:03d}", int(time.time() * 1000))
     t0 = time.perf_counter()
@@ -145,72 +151,73 @@ async def main():
     dt = (time.perf_counter() - t0) * 1000
 
     ups = [s for s in spy.stmts if "unnest" in s[1]]
-    chk("C1 1000 条遥测 → 恰好 1 条 UPDATE 语句", len(ups) == 1, f"实际 {len(ups)} 条")
-    chk("C2 该语句只带 100 个 robot_id（按主键折叠）", len(ups[0][2][0]) == 100)
-    chk("C3 折叠掉 900 条重复（1000 → 100）", w.stats["deduped"] == 900,
+    chk("C1 1000 telemetry records -> exactly 1 UPDATE statement", len(ups) == 1, f"actual {len(ups)}")
+    chk("C2 that statement carries only 100 robot_ids (folded by primary key)", len(ups[0][2][0]) == 100)
+    chk("C3 900 duplicates folded away (1000 -> 100)", w.stats["deduped"] == 900,
         f"deduped={w.stats['deduped']}")
-    chk("C4 单词往返耗时 << 1s 刷新周期", dt < 500, f"{dt:.1f} ms")
+    chk("C4 single round-trip time << 1s flush period", dt < 500, f"{dt:.1f} ms")
     r = await pool.fetchrow(
         "SELECT count(*) c, sum(CASE WHEN is_online THEN 1 ELSE 0 END) onl, count(last_seen) ls"
         " FROM robot_metadata")
-    chk("A1 100 台全 is_online=true（非全 false）", r["onl"] == 100, f"online={r['onl']}")
-    chk("A2 last_seen 全非 NULL（非全 NULL）", r["ls"] == 100, f"last_seen 非空 {r['ls']}/100")
+    chk("A1 all 100 robots is_online=true (not all false)", r["onl"] == 100, f"online={r['onl']}")
+    chk("A2 last_seen all non-NULL (not all NULL)", r["ls"] == 100, f"last_seen non-null {r['ls']}/100")
 
-    # ================= B：停发一台 > state_ttl_seconds =================
+    # ================= B: one robot stopped sending > state_ttl_seconds =================
     await pool.execute("UPDATE robot_metadata SET is_online=FALSE, last_seen=NULL")
     w2 = MetadataWriter()
-    for i in range(2, 101):                  # 001 停发
+    for i in range(2, 101):                  # 001 stopped sending
         w2.put(f"humanoid-{i:03d}")
     await w2.flush()
-    # 把 001 的 last_seen 推到 11s 前，等价于「已停发 11s」（不必真等 10 秒）
+    # push 001's last_seen to 11s ago, equivalent to "stopped sending 11s" (no need to actually wait 10s)
     await pool.execute("UPDATE robot_metadata SET last_seen=NOW()-INTERVAL '11 seconds'"
                        " WHERE robot_id='humanoid-001'")
     await w2.flush()
     row = await pool.fetchrow("SELECT is_online FROM robot_metadata WHERE robot_id='humanoid-001'")
     onl = await pool.fetchval("SELECT count(*) FROM robot_metadata WHERE is_online")
-    chk("B1 停发 >10s 的机器人 is_online 翻 false", row["is_online"] is False,
+    chk("B1 robot stopped >10s flips is_online to false", row["is_online"] is False,
         f"001={row['is_online']}")
-    chk("B2 其余 99 台仍 true（无连坐误报）", onl == 99, f"online={onl}")
+    chk("B2 the other 99 stay true (no drag-along false positive)", onl == 99, f"online={onl}")
 
-    # ================= D：offline 规则读真实列 =================
+    # ================= D: offline rule reads real columns =================
     mod = _load_rule(os.path.join(ROOT, "alert_engine/app/rules/offline.py"))
     rule = mod.OfflineRule()
     real = {r["robot_id"]: r["is_online"] for r in
             await pool.fetch("SELECT robot_id, is_online FROM robot_metadata")}
     old = time.time() - 11
-    chk("D1 真实列为 false → offline 告警",
+    chk("D1 real column false -> offline alert",
         rule.evaluate({"robot_id": "humanoid-001", "is_online": real["humanoid-001"],
                        "last_seen": old}, []) is not None)
-    chk("D2 真实列为 true → 不报",
+    chk("D2 real column true -> no alert",
         rule.evaluate({"robot_id": "humanoid-002", "is_online": real["humanoid-002"],
                        "last_seen": time.time()}, []) is None)
-    chk("D3 列不可用（None）但 last_seen 很新 → 回落不误报",
+    chk("D3 column unavailable (None) but last_seen very fresh -> fallback, no false positive",
         rule.evaluate({"robot_id": "humanoid-003", "is_online": None,
                        "last_seen": time.time()}, []) is None)
-    chk("D4 判据单源（刚收到遥测但列判离线 → 仍报）",
+    chk("D4 single-source criterion (just received telemetry but column says offline -> still alerts)",
         rule.evaluate({"robot_id": "humanoid-001", "is_online": False,
                        "last_seen": time.time() - 3}, []) is not None)
-    chk("D5 列不可用 + last_seen 超时 → 回落报出（迁移期安全网）",
+    chk("D5 column unavailable + last_seen expired -> fallback alerts (migration-period safety net)",
         rule.evaluate({"robot_id": "humanoid-004", "is_online": None,
                        "last_seen": old}, []) is not None)
 
-    # ================= E：幂等 =================
+    # ================= E: idempotency =================
     before = await pool.fetchval("SELECT count(*) FROM robot_metadata WHERE is_online")
     w3 = MetadataWriter()
-    await w3.flush()                         # 空窗口（无新遥测、无新离线）
+    await w3.flush()                         # empty window (no new telemetry, no new offline)
     after = await pool.fetchval("SELECT count(*) FROM robot_metadata WHERE is_online")
-    chk("E1 空刷新不改变任何在线状态", before == after, f"{before} → {after}")
-    chk("E2 空刷新的离线扫描命中 0 行", w3.stats["offline_marks"] == 0)
+    chk("E1 empty flush changes no online state", before == after, f"{before} -> {after}")
+    chk("E2 empty flush's offline scan hits 0 rows", w3.stats["offline_marks"] == 0)
 
-    # ================= F：真实 MARK_OFFLINE_SQL 定点验证 =================
+    # ================= F: pinpoint verification of real MARK_OFFLINE_SQL =================
     await pool.execute("UPDATE robot_metadata SET is_online=TRUE, last_seen=NOW()")
     await pool.execute("UPDATE robot_metadata SET last_seen=NOW()-INTERVAL '11 seconds'"
                        " WHERE robot_id IN ('humanoid-001','humanoid-002')")
     rows = await pool.fetch(MARK_OFFLINE_SQL, float(settings.state_ttl_seconds))
     ids = sorted(x["robot_id"] for x in rows)
-    chk("F1 定向置 false 只命中真正超时的机器人", ids == ["humanoid-001", "humanoid-002"], f"{ids}")
+    chk("F1 targeted set-to-false only hits robots truly past timeout",
+        ids == ["humanoid-001", "humanoid-002"], f"{ids}")
     n = await pool.fetchval("SELECT count(*) FROM robot_metadata WHERE is_online")
-    chk("F2 未超时的 98 台保持 true（WHERE is_online=TRUE 守卫有效）", n == 98, f"online={n}")
+    chk("F2 the 98 not-yet-expired stay true (WHERE is_online=TRUE guard effective)", n == 98, f"online={n}")
 
     await pool.close()
     print(f"\nPASS={PASS} FAIL={FAIL}")

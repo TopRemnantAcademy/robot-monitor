@@ -1,25 +1,28 @@
-"""DB 对接的端到端验证（真实 PostgreSQL，非 mock）。
+"""End-to-end DB integration verification (real PostgreSQL, not mock).
 
-跑法（需要可写的 PostgreSQL + 已执行 infra/init.sql 的纯 PG 部分）：
+Run (needs a writable PostgreSQL with the pure-PG part of infra/init.sql executed):
 
     export TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:55432/robot_monitor
     cd backend_ingestion && python -m tests.verify_db_integration
 
-⚠️ 本文件**不是** pytest 用例，原名 `test_db_integration.py` 已被改掉：
-断言全部写在 `t1..t6` 里、由 `main()` 驱动，pytest 收集结果为 **0 tests** ——
-名字带 `test_` 会造成「有测试在跑」的假象（与 alert_engine 的 `test_notifier.py`
-同一类假覆盖缺陷）。它是**按需运行的独立脚本**，退出码 0 = 全部通过。
+WARNING: this file is **not** a pytest case; the original name `test_db_integration.py`
+has been dropped: all assertions live in `t1..t6`, driven by `main()`, so pytest
+collects **0 tests** -- a name with `test_` would create the false impression of
+"tests running" (the same false-coverage defect as alert_engine's `test_notifier.py`).
+It is a **standalone script run on demand**, exit code 0 = all passed.
 
-覆盖（每条都对应本轮修掉的一个真实缺陷，不是凑数的断言）：
-  T1 COPY 路径写入真实 JSONB 表，且 jsonb 列类型未被破坏
-  T2 COPY 路径幂等（重复批次不涨行、不报错）—— 这是 COPY 无 ON CONFLICT 的补丁
-  T3 降级链：强制 L1 失败 → L2 生效
-  T4 坏行隔离：一行脏数据不连坐整批
-  T5 写入吞吐相对 1000 行/s 峰值的冗余倍数
-  T6 ORM 模型 DDL 与 infra/init.sql 的列类型一致（JSONB 漂移回归）
+Coverage (each corresponds to a real defect fixed this round, not padding assertions):
+  T1 COPY path writes a real JSONB table, and the jsonb column type is not corrupted
+  T2 COPY path is idempotent (repeated batches don't add rows, don't error) -- this is
+     the patch for COPY having no ON CONFLICT
+  T3 Degradation chain: force L1 to fail -> L2 takes over
+  T4 Bad-row isolation: one dirty row doesn't drag down the whole batch
+  T5 Write throughput redundancy multiple vs the 1000 rows/s peak
+  T6 ORM model DDL column types match infra/init.sql (JSONB drift regression)
 
-需要 timescaledb 扩展的语句（create_hypertable / 连续聚合 / 保留策略）不在本文件覆盖范围，
-它们已标注「未验证」，验证条件写在该文件注释里。
+Statements needing the timescaledb extension (create_hypertable / continuous aggregate /
+retention policy) are out of scope here; they are marked "unverified" with the
+verification conditions written in that file's comments.
 """
 
 from __future__ import annotations
@@ -36,8 +39,8 @@ import asyncpg  # noqa: E402
 
 DSN = os.environ.get("TEST_DATABASE_URL", "")
 if DSN:
-    # 必须在 import app.config 之前注入：settings 是模块级单例，
-    # 后面再改 database_url 不会让已构造的 Settings 生效。
+    # Must be injected before importing app.config: settings is a module-level singleton,
+    # changing database_url afterward will not affect the already-constructed Settings.
     os.environ["DATABASE_URL"] = DSN
 
 from app.db.models import RobotTelemetry  # noqa: E402
@@ -73,51 +76,53 @@ def make_telemetry(i: int, robot_id: str | None = None) -> Telemetry:
             "joint_torques": {"left_shoulder_pitch": 3.2},
             "pos_x": 1.0, "pos_y": 2.0, "pos_z": 0.5,
             "orient_w": 1.0, "orient_x": 0.0, "orient_y": 0.0, "orient_z": 0.0,
-            # 关键：客户端毫秒时间戳必须不同，否则主键冲突会被静默丢行
+            # key: client millisecond timestamps must differ, otherwise primary-key
+            # conflicts would silently drop rows
             "ts": 1767225600000 + i,
         }
     )
 
 
 async def t1_copy_jsonb(conn: asyncpg.Connection) -> None:
-    print("\nT1 COPY 路径写入真实 JSONB 表")
+    print("\nT1 COPY path writes a real JSONB table")
     await conn.execute("TRUNCATE robot_telemetry")
     w = BatchWriter()
     rows = [w._to_row(make_telemetry(i)) for i in range(200)]
     await w._copy_upsert(rows)
     n = await conn.fetchval("SELECT count(*) FROM robot_telemetry")
-    check("落库行数正确", n == 200, f"{n}/200")
+    check("row count correct", n == 200, f"{n}/200")
     types = await conn.fetchrow(
         """SELECT jsonb_typeof(joint_temperatures) jt, jsonb_typeof(joint_positions) jp,
                   jsonb_typeof(joint_torques) jto FROM robot_telemetry LIMIT 1"""
     )
-    check("三个关节列仍是 jsonb（未被降级成 text/json）",
+    check("the three joint columns are still jsonb (not degraded to text/json)",
           tuple(types) == ("object", "object", "object"), str(dict(types)))
     v = await conn.fetchval(
         "SELECT joint_temperatures->>'left_shoulder_pitch' FROM robot_telemetry LIMIT 1")
-    check("jsonb 可用 ->> 取值（连续聚合/热力图前提）", v == "42.5", str(v))
+    check("jsonb is queryable via ->> (prerequisite for continuous aggregate / heatmap)",
+          v == "42.5", str(v))
 
 
 async def t2_idempotent(conn: asyncpg.Connection) -> None:
-    print("\nT2 COPY 路径幂等（COPY 本身不支持 ON CONFLICT）")
+    print("\nT2 COPY path idempotent (COPY itself does not support ON CONFLICT)")
     await conn.execute("TRUNCATE robot_telemetry")
     w = BatchWriter()
     rows = [w._to_row(make_telemetry(i)) for i in range(200)]
     await w._copy_upsert(rows)
     first = await conn.fetchval("SELECT count(*) FROM robot_telemetry")
-    # 重试场景：同一批再写一遍，必须不报错、不涨行
+    # Retry scenario: write the same batch again; must not error, must not add rows
     err = None
     try:
         await w._copy_upsert(rows)
-    except Exception as exc:            # noqa: BLE001 — 这里就是要抓任意异常
+    except Exception as exc:            # noqa: BLE001 -- we want to catch any exception here
         err = exc
     second = await conn.fetchval("SELECT count(*) FROM robot_telemetry")
-    check("重复批次不抛异常", err is None, repr(err))
-    check("重复批次行数不变（幂等）", first == second == 200, f"{first} -> {second}")
+    check("repeated batch raises no exception", err is None, repr(err))
+    check("repeated batch row count unchanged (idempotent)", first == second == 200, f"{first} -> {second}")
 
 
 async def t3_fallback(conn: asyncpg.Connection) -> None:
-    print("\nT3 降级链：L1 失败 → L2 接管")
+    print("\nT3 degradation chain: L1 fails -> L2 takes over")
     await conn.execute("TRUNCATE robot_telemetry")
     w = BatchWriter()
     rows = [w._to_row(make_telemetry(i)) for i in range(200)]
@@ -134,16 +139,16 @@ async def t3_fallback(conn: asyncpg.Connection) -> None:
         w._copy_upsert = original  # type: ignore[method-assign]
 
     n = await conn.fetchval("SELECT count(*) FROM robot_telemetry")
-    check("L1 全败后 L2 把数据写进去", n == 200, f"{n}/200")
-    check("重试被计数（可观测）", w.retries > 0, f"retries={w.retries}")
+    check("after L1 fully fails, L2 writes the data", n == 200, f"{n}/200")
+    check("retries are counted (observable)", w.retries > 0, f"retries={w.retries}")
 
 
 async def t4_isolation(conn: asyncpg.Connection) -> None:
-    print("\nT4 坏行隔离：一行脏数据不连坐整批")
+    print("\nT4 bad-row isolation: one dirty row doesn't drag down the whole batch")
     await conn.execute("TRUNCATE robot_telemetry")
     w = BatchWriter()
     rows = [w._to_row(make_telemetry(i)) for i in range(100)]
-    # 在中间塞一行不可写的（max_joint_temp 是 NOT NULL，置 None → NotNullViolation）
+    # insert one unwritable row in the middle (max_joint_temp is NOT NULL, set to None -> NotNullViolation)
     bad = list(rows[0])
     bad[1] = "humanoid-099"
     bad[6] = None                       # max_joint_temp = NULL
@@ -153,13 +158,13 @@ async def t4_isolation(conn: asyncpg.Connection) -> None:
     before = await conn.fetchval("SELECT count(*) FROM robot_telemetry")
     await w._isolate_and_write(rows)
     after = await conn.fetchval("SELECT count(*) FROM robot_telemetry")
-    check("好数据被保住（99 条）", after == 99, f"{after}/99（坏行 1 条）")
-    check("坏行计入 rejected", w.rejected == 1, f"rejected={w.rejected}")
-    check("坏行确实没落库", after == before + 99)
+    check("good data preserved (99 rows)", after == 99, f"{after}/99 (1 bad row)")
+    check("bad row counted as rejected", w.rejected == 1, f"rejected={w.rejected}")
+    check("bad row truly not persisted", after == before + 99)
 
 
 async def t5_throughput(conn: asyncpg.Connection) -> None:
-    print("\nT5 写入吞吐相对峰值的冗余")
+    print("\nT5 write throughput redundancy vs peak")
     await conn.execute("TRUNCATE robot_telemetry")
     w = BatchWriter()
     n = 5000
@@ -169,12 +174,12 @@ async def t5_throughput(conn: asyncpg.Connection) -> None:
     await w._copy_upsert(rows)
     dt = loop.time() - t0
     rps = n / dt
-    check("COPY 吞吐 > 1000 行/s 峰值 × 10", rps > 10000,
-          f"{rps:,.0f} 行/s（{rps/1000:.0f}x 冗余）")
+    check("COPY throughput > 1000 rows/s peak x 10", rps > 10000,
+          f"{rps:,.0f} rows/s ({rps/1000:.0f}x redundancy)")
 
 
 async def t6_schema_parity(conn: asyncpg.Connection) -> None:
-    print("\nT6 ORM DDL 与 infra/init.sql 列类型一致")
+    print("\nT6 ORM DDL column types match infra/init.sql")
     db_types = {
         r["column_name"]: r["data_type"]
         for r in await conn.fetch(
@@ -186,31 +191,31 @@ async def t6_schema_parity(conn: asyncpg.Connection) -> None:
     for col in RobotTelemetry.__table__.columns:
         actual = db_types.get(col.name)
         if actual is None:
-            mismatched.append(f"{col.name}: 库中不存在")
+            mismatched.append(f"{col.name}: absent in DB")
             continue
-        # JSONB 在 information_schema 里 data_type='jsonb'
+        # JSONB shows as data_type='jsonb' in information_schema
         expected = col.type.__class__.__name__.lower()
         if expected == "jsonb" and actual != "jsonb":
-            mismatched.append(f"{col.name}: ORM=jsonb 库={actual}")
+            mismatched.append(f"{col.name}: ORM=jsonb DB={actual}")
         if expected == "json" and actual != "json":
-            mismatched.append(f"{col.name}: ORM=json but 库={actual}")
-    check("关节列 ORM 类型 == 库内 jsonb（无漂移）", not mismatched, "; ".join(mismatched))
-    check("COLUMNS 数量 == 表列数", len(COLUMNS) == len(db_types),
+            mismatched.append(f"{col.name}: ORM=json but DB={actual}")
+    check("joint column ORM type == DB jsonb (no drift)", not mismatched, "; ".join(mismatched))
+    check("COLUMNS count == table column count", len(COLUMNS) == len(db_types),
           f"{len(COLUMNS)} vs {len(db_types)}")
 
 
 async def main() -> int:
     if not DSN:
-        print("跳过：未设置 TEST_DATABASE_URL（本测试需要真实 PostgreSQL）")
+        print("Skipped: TEST_DATABASE_URL not set (this test needs a real PostgreSQL)")
         return 0
     conn = await asyncpg.connect(DSN)
     try:
-        print(f"== DB 对接端到端验证 ==\n{DSN}")
+        print(f"== DB integration end-to-end verification ==\n{DSN}")
         for fn in (t1_copy_jsonb, t2_idempotent, t3_fallback, t4_isolation, t5_throughput, t6_schema_parity):
             await fn(conn)
     finally:
         await conn.close()
-    print(f"\n== 结果：{PASS} 通过 / {FAIL} 失败 ==")
+    print(f"\n== Result: {PASS} passed / {FAIL} failed ==")
     return 1 if FAIL else 0
 
 

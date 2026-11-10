@@ -1,20 +1,23 @@
-"""WS 合成探针的行为契约测试（ISSUE #58 / 缺口 G-3）。
+"""Behavior-contract tests for the WS synthetic probe (ISSUE #58 / gap G-3).
 
-锁定四件在 orders/16-dispatch.md §2 与 ISSUE #58 里被明确要求的事：
-  1. 探针指标**独立存在**，且与连接数指标 `robot_backend_ws_connections` **不会互相覆盖**
-     （ISSUE #72 之前误实现为「metrics.py 里不得定义连接数」；连接数本就该定义在 metrics.py，
-     真正要防的是**同名复用**——同一个名字既当服务端连接数又当客户端探针）；
-  2. 探针**免鉴权**：`/metrics` 与探针目标都不要求外部 token；
-  3. 探针**可降级**：`WS_PROBE_ENABLED=false` 时 `run()` 立刻返回（no-op），
-     且探针自身异常不会冒泡（失败只翻指标）；
-  4. 频率下限 30s（配错也快不起来）。
+Locks down four things explicitly required in orders/16-dispatch.md section 2 and ISSUE #58:
+  1. The probe metric **exists independently**, and does **not** overwrite the connection-count
+     metric `robot_backend_ws_connections` (before ISSUE #72 it was mistakenly implemented as
+     "metrics.py must not define a connection count"; the connection count *should* be defined in
+     metrics.py -- what must be prevented is **same-name reuse**: the same name serving both as
+     the server-side connection count and the client-side probe);
+  2. The probe is **unauthenticated**: both `/metrics` and the probe target require no external token;
+  3. The probe **can degrade**: when `WS_PROBE_ENABLED=false`, `run()` returns immediately (no-op),
+     and a probe's own exception does not bubble (failure only flips a metric);
+  4. The frequency floor is 30s (misconfiguration can't make it faster).
 
-跑法（从仓库根，需装 backend_ingestion/requirements.txt）：
+Run (from repo root, requires backend_ingestion/requirements.txt installed):
     pytest backend_ingestion/tests/test_ws_probe.py -v
 
-为什么不用真实端口：真起 uvicorn + 真连 WS 属 CI/Docker 的活；本文件只用
-`TestClient` 的 in-process WS（覆盖握手、鉴权、首帧快照三段语义）与直接调用
-`ws_probe._probe_once_async`。端到端真连的取证见 PR 描述。
+Why no real port: actually starting uvicorn + really connecting over WS is CI/Docker work; this
+file only uses TestClient's in-process WS (covering the three segments of handshake, auth, and first
+snapshot frame) plus a direct call to `ws_probe._probe_once_async`. For end-to-end real connections,
+see the PR description.
 """
 
 from __future__ import annotations
@@ -33,48 +36,56 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture
 def client():
-    # 不触发 lifespan：本文件只测路由行为与探针函数，
-    # 真起 MQTT/Redis 需要外部依赖，属另一个测试层。
+    # Do not trigger lifespan: this file only tests route behavior and the probe function;
+    # really starting MQTT/Redis needs external deps, which is another test layer.
     with TestClient(app) as c:
         yield c
 
 
-# ------------------------------------------------------------------ 指标契约
+# ------------------------------------------------------------------ metric contract
 
 class TestProbeMetricsAreDistinct:
-    """ISSUE #58 的核心约束：探针指标 ≠ 连接数指标，禁止互相覆盖。"""
+    """The core constraint of ISSUE #58: probe metric != connection-count metric; mutual
+    overwrite forbidden."""
 
     def test_probe_metrics_exist(self):
-        # 注意：`prometheus_client` 的 Counter 会把 `_total` 后缀收进 `_name`，
-        # 原文完整名在 `_name + "_total"`。断言用**渲染出的**文本，避免踩这个语义。
+        # Note: prometheus_client's Counter folds the `_total` suffix into `_name, so the
+        # full original name is `_name + "_total"`. We assert on the **rendered** text to
+        # avoid this pitfall.
         text = metrics.render()[0].decode()
         assert "robot_backend_ws_probe_alive" in text
         assert "robot_backend_ws_probe_failures_total" in text
 
     def test_probe_and_connections_metrics_do_not_collide(self):
-        """探针与连接数是**两个不同名字的指标**，禁止同名复用/互相覆盖。
+        """The probe and the connection count are **two differently named metrics**; same-name
+        reuse / mutual overwrite is forbidden.
 
-        ISSUE #58 的本意是"别把探针塞进连接数指标"（客户端视角 vs 服务端视角）。
-        ISSUE #72 把连接数指标统一为 `robot_backend_ws_connections` 并定义在 metrics.py ——
-        这与 ISSUE #58 并不冲突：两者名字不同、语义不同、可共存。真正要守住的是：
-          a) metrics.py 里 `robot_backend_ws_connections` 是 Gauge（连接数，可增可减）；
-          b) 它**不是**探针指标（既不叫 probe，也不被 ws_probe 写）。
+        The intent of ISSUE #58 is "don't cram the probe into the connection-count metric"
+        (client-side view vs server-side view). ISSUE #72 unified the connection-count metric
+        to `robot_backend_ws_connections` and defined it in metrics.py -- this does not conflict
+        with ISSUE #58: the two have different names, different semantics, and can coexist. What
+        must be held is:
+          a) in metrics.py, `robot_backend_ws_connections` is a Gauge (connection count, can go
+             up or down);
+          b) it is **not** a probe metric (not named probe, not written by ws_probe).
         """
         import inspect
 
-        # a) 连接数指标存在、类型正确、且名字与探针不同
+        # a) the connection-count metric exists, has the right type, and a different name than the probe
         assert type(metrics.ws_connections).__name__ == "Gauge"
         assert metrics.ws_connections._name == "robot_backend_ws_connections"
         assert metrics.ws_probe_alive._name != metrics.ws_connections._name
         assert metrics.ws_probe_failures._name != metrics.ws_connections._name
 
-        # b) 探针模块**不写**连接数指标：它只在文档字符串里提到对方（说明为何不同），
-        #    代码里不得出现 `metrics.ws_connections`（写=覆盖=两个视角混成一个数）。
+        # b) the probe module does **not** write the connection-count metric: it only mentions the
+        #    other in its docstring (explaining why they differ); the code must not reference
+        #    `metrics.ws_connections` (writing = overwrite = two viewpoints merged into one number).
         probe_src = inspect.getsource(ws_probe)
         assert "metrics.ws_connections" not in probe_src
 
     def test_probe_alive_is_gauge_failures_is_counter(self):
-        # 类型必须对：Gauge 反映「最近一次」，Counter 单调累加给 increase()/rate() 用。
+        # Types must be right: Gauge reflects "the most recent one", Counter monotonically
+        # accumulates for increase()/rate().
         assert type(metrics.ws_probe_alive).__name__ == "Gauge"
         assert type(metrics.ws_probe_failures).__name__ == "Counter"
 
@@ -86,17 +97,15 @@ class TestProbeMetricsAreDistinct:
         assert "text/plain" in ctype
 
 
-# ------------------------------------------------------------------ 免鉴权
+# ------------------------------------------------------------------ unauthenticated
 
 class TestProbeIsUnauthenticated:
     def test_probe_target_path_is_not_behind_rest_auth(self, client):
-        """`/ws/robots` 的准入只认 `?token=`，无 token 时以 1008 关闭而非 401。
-
-        这里断言的是「探针目标路径存在且无需 REST Bearer 头」——
-        REST 的 401 是 `/robots` 那条路径的事，不应牵连 WS。
+        """The probe target path exists and needs no REST Bearer header --
+        REST's 401 is the `/robots` path's concern and should not spill onto WS.
         """
         r = client.get("/robots")
-        assert r.status_code == 401  # REST 侧确实有鉴权（对照组）
+        assert r.status_code == 401  # REST side genuinely has auth (control group)
 
     def test_metrics_remains_unauthenticated(self, client):
         r = client.get("/metrics")
@@ -104,16 +113,16 @@ class TestProbeIsUnauthenticated:
         assert "robot_backend_ws_probe_alive" in r.text
 
 
-# ------------------------------------------------------------------ 可降级
+# ------------------------------------------------------------------ degrades
 
 class TestProbeDegrades:
     def test_disabled_is_noop(self, monkeypatch):
         monkeypatch.setattr(settings, "ws_probe_enabled", False)
-        # run() 应立即返回，不进入 while True。
+        # run() should return immediately, not enter while True.
         asyncio.run(asyncio.wait_for(ws_probe.run(), timeout=1.0))
 
     def test_mint_token_failure_returns_none(self, monkeypatch):
-        # 自签失败必须降级成 None，而不是把异常抛进 lifespan。
+        # Self-sign failure must degrade to None, not throw the exception into lifespan.
         import jwt as _jwt
 
         def boom(*a, **k):
@@ -123,23 +132,24 @@ class TestProbeDegrades:
         assert ws_probe._mint_token() is None
 
     def test_probe_failure_does_not_raise(self, monkeypatch):
-        """连不上的目标不能让 `_probe_once_async` 抛到调用方之外的语义。
+        """A target that can't be reached must not let `_probe_once_async` bubble past the caller.
 
-        `_probe_once_async` 本身是如实抛的（调用方决定降级）；这里验证
-        `run()` 的每一轮都吞掉异常并翻失败指标，而不是冒泡。
+        `_probe_once_async` itself raises truthfully (the caller decides on degradation); this
+        verifies that each round of `run()` swallows the exception and flips the failure metric,
+        rather than bubbling.
         """
         interval = settings.ws_probe_interval_s
         monkeypatch.setattr(settings, "ws_probe_startup_grace_s", 0.0)
         monkeypatch.setattr(settings, "ws_probe_interval_s", 30.0)
         monkeypatch.setattr(settings, "ws_probe_enabled", True)
-        # 指向一个必然没人监听的端口，避免依赖外部服务。
+        # Point at a port no one will ever listen on, to avoid depending on an external service.
         monkeypatch.setattr(settings, "ws_port", 1)
 
         before = metrics.ws_probe_failures._value.get()
 
         async def drive():
             task = asyncio.create_task(ws_probe.run())
-            # 第一轮探活（超时上限 5s）足够跑完，然后取消。
+            # The first probe round (5s timeout cap) is enough to finish, then cancel.
             await asyncio.sleep(0.3)
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -150,7 +160,7 @@ class TestProbeDegrades:
         assert metrics.ws_probe_failures._value.get() > before
 
 
-# ------------------------------------------------------------------ 频率下限
+# ------------------------------------------------------------------ frequency floor
 
 class TestIntervalFloor:
     def test_floor_is_30s(self):
