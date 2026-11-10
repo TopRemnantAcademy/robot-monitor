@@ -1,24 +1,29 @@
-"""订单 24 T1 — `emit()` 短路层的**执行顺序**契约测试。
+"""Order 24 T1 — contract test for the **execution order** of `emit()`'s short-circuit layers.
 
-背景：`emit()` 是一条短路链，任何一层先命中就 return，后面的层根本不会跑。
-顺序写错不会报错，只会**静默吞掉真实告警**（或反过来把该压的压不住），
-是典型「测试不写就永远不知道」的缺陷。本文件用 spy 把顺序钉成断言。
+Background: `emit()` is a short-circuit chain — whichever layer hits first returns, and the
+layers after it never run. Getting the order wrong doesn't error; it silently swallows real
+alerts (or conversely fails to suppress what should be suppressed) — a classic "you'd never know
+without a test" defect. This file pins the order down with spies as assertions.
 
-权威顺序（订单 17 §T3 / issue #39）：
+Authoritative order (Order 17 §T3 / issue #39):
     silence → inhibition → dedup → save/publish
 
-  - silence 最外：人明确「闭嘴」时不希望系统再因为这事算抑制量、动去重 key。
-    若把 silence 放在 inhibition 之后，静默期内仍会污染 `alerts_suppressed` 计数，
-    且静默到期后 dedup key 可能已被错误占用。
-  - inhibition 次之：根因（offline）活跃时，下游派生的 battery/temp 告警无处置价值，
-    必须挡在 dedup **之前** —— 否则抑制期一结束，dedup 窗口里那条「假的」key
-    会继续把恢复后的第一条真告警吃掉 60s。
-  - dedup 最内：只有真的要发的告警才值得占用 Redis 去重窗口。
+  - silence outermost: when a human explicitly says "shut up", they don't want the system to
+    compute an inhibition amount or touch a dedup key over this matter. If silence were placed
+    after inhibition, the silence window would still pollute the `alerts_suppressed` counter,
+    and after the silence expires the dedup key might already be wrongly occupied.
+  - inhibition next: when the root cause (offline) is active, the downstream derived battery/temp
+    alerts have no disposition value and must be blocked **before** dedup — otherwise after the
+    inhibition window ends, the "fake" key in the dedup window would keep eating the first real
+    alert after recovery for 60s.
+  - dedup innermost: only alerts that truly need to be sent are worth occupying the Redis dedup
+    window.
 
-⚠️ 与订单 17（issue #39）的协同关系：
-  silence 层由订单 17 实现，本单（24）只负责把它**钉进顺序契约**。
-  在 silence 层落地前，`silence` 相关用例会 **skip** 并注明依赖，
-  而不是假装通过 —— 见 `_silence_gate()`。订单 17 合并后自动激活。
+⚠️ Coordination with Order 17 (issue #39):
+  The silence layer is implemented by Order 17; this order (24) only pins it into the order
+  contract. Before the silence layer lands, the `silence`-related cases will **skip** and note
+  the dependency, rather than pretend to pass — see `_silence_gate()`. They auto-activate once
+  Order 17 is merged.
 """
 
 from __future__ import annotations
@@ -39,19 +44,19 @@ def _alert(rid: str = "humanoid-001", rule_id: str = "battery_low",
 
 
 # ---------------------------------------------------------------- silence seam
-# 订单 17 会把 silence 前置检查接进 emit()。其实现命名有多种合理选择，
-# 这里按「最可能的名字」逐一探测；探不到就 skip（依赖未落地），
-# 绝不把「跳过」伪装成「通过」。
+# Order 17 will wire the silence pre-check into emit(). Its implementation name has several
+# reasonable choices; here we probe by "most likely name" one by one; if none found, skip
+# (dependency not landed), never disguise "skip" as "pass".
 
 _SILENCE_CANDIDATE_NAMES = ("is_silenced", "is_silent", "should_silence")
 
 
 def _silence_gate(mod):
-    """返回 `emit()` 里 silence 判定入口的可调用对象，找不到返回 None。
+    """Return the callable for the silence judgement entry in `emit()`, or None if not found.
 
-    两种探测策略，任一命中即认为 silence 层已接线：
-      1) app.main 暴露模块级判定函数（is_silenced / is_silent / should_silence）
-      2) app.silence 子模块存在且提供上述函数（emit 从它 import）
+    Two probing strategies; a hit on either means the silence layer is wired:
+      1) app.main exposes a module-level judgement function (is_silenced / is_silent / should_silence)
+      2) app.silence submodule exists and provides the above function (emit imports from it)
     """
     for name in _SILENCE_CANDIDATE_NAMES:
         fn = getattr(mod, name, None)
@@ -73,12 +78,12 @@ def _silence_gate(mod):
     return None
 
 
-# ================================================================ 1. 现状顺序
-# 这两条今天就必须绿：inhibition **先于** dedup。
+# ================================================================ 1. current order
+# These two must be green today: inhibition **before** dedup.
 
 
 def test_inhibition_short_circuits_dedup(engine, monkeypatch):
-    """被抑制时，deduplicator 一次都不能被调用。"""
+    """When inhibited, the deduplicator must not be called even once."""
     calls: list = []
 
     async def spy(alert, window_s):
@@ -86,15 +91,15 @@ def test_inhibition_short_circuits_dedup(engine, monkeypatch):
         return True
 
     monkeypatch.setattr(engine, "should_emit", spy)
-    engine.online_state["humanoid-001"] = False           # 已被 ticker 判离线
+    engine.online_state["humanoid-001"] = False           # already judged offline by ticker
 
     run(engine.emit(_alert()))
 
-    assert calls == [], "抑制命中时不应触碰去重层（顺序：inhibition → dedup）"
+    assert calls == [], "on an inhibition hit, the dedup layer must not be touched (order: inhibition → dedup)"
 
 
 def test_dedup_runs_when_not_inhibited(engine, monkeypatch):
-    """未被抑制时，deduplicator **恰好**被调用一次，并放行落库。"""
+    """When not inhibited, the deduplicator is called **exactly once** and lets the write through."""
     calls: list = []
 
     async def spy(alert, window_s):
@@ -107,12 +112,12 @@ def test_dedup_runs_when_not_inhibited(engine, monkeypatch):
     run(engine.emit(_alert()))
 
     assert calls == [("battery_low", 120)], \
-        "未抑制时应按规则窗口调用一次去重（battery_low 窗口 120s）"
+        "when not inhibited, dedup must be called once with the rule window (battery_low window 120s)"
     assert [a.rule_id for a in engine.emitted] == ["battery_low"]
 
 
 def test_dedup_denied_means_no_save(engine, monkeypatch):
-    """去重拒绝（返回 False）时不得落库 —— dedup 在 save 之前。"""
+    """When dedup denies (returns False), nothing persists — dedup is before save."""
     async def deny(alert, window_s):
         return False
 
@@ -121,27 +126,26 @@ def test_dedup_denied_means_no_save(engine, monkeypatch):
 
     run(engine.emit(_alert()))
 
-    assert engine.emitted == [], "去重拒绝后不应落库"
+    assert engine.emitted == [], "after dedup denial, nothing should persist"
 
 
-# ================================================================ 2. silence 顺序
-# 以下用例依赖订单 17（issue #39）的 silence 层。未落地时 skip。
+# ================================================================ 2. silence order
+# The following cases depend on the silence layer from Order 17 (issue #39). Skip until landed.
 
 
 def test_silence_short_circuits_inhibition_and_dedup(engine, monkeypatch):
-    """静默命中时：inhibition 与 dedup **都不得被触碰**。
+    """On a silence hit: **neither** inhibition **nor** dedup may be touched.
 
-    这是订单 17「silence → inhibition → dedup」顺序的核心断言。
-    把 silence 放到 inhibition 之后（或 dedup 之后）都会让本用例失败。
-    """
+    This is the core assertion of Order 17's "silence → inhibition → dedup" order.
+    Putting silence after inhibition (or after dedup) would fail this case."""
     gate = _silence_gate(engine)
     if gate is None:
-        pytest.skip("silence 层未落地，依赖 issue #39（订单 17 T3）")
+        pytest.skip("silence layer not landed, depends on issue #39 (Order 17 T3)")
 
     inhibit_calls: list = []
     dedup_calls: list = []
 
-    # inhibition 探针：直接包住 is_inhibited
+    # inhibition probe: wrap is_inhibited directly
     real_is_inhibited = engine.is_inhibited
 
     def spy_is_inhibited(alert):
@@ -155,7 +159,7 @@ def test_silence_short_circuits_inhibition_and_dedup(engine, monkeypatch):
     monkeypatch.setattr(engine, "is_inhibited", spy_is_inhibited)
     monkeypatch.setattr(engine, "should_emit", spy_should_emit)
 
-    # 让 silence 判定返回 True（命中静默）
+    # Make the silence judgement return True (silence hit)
     if inspect.iscoroutinefunction(gate):
         async def fake_gate(alert):
             return True
@@ -163,19 +167,20 @@ def test_silence_short_circuits_inhibition_and_dedup(engine, monkeypatch):
     else:
         monkeypatch.setattr(engine, gate.__name__, lambda alert: True)
 
-    engine.online_state["humanoid-001"] = False           # 即使离线也不该走到抑制
+    engine.online_state["humanoid-001"] = False           # even offline shouldn't reach inhibition
     run(engine.emit(_alert()))
 
-    assert engine.emitted == [], "静默期内不得落库"
-    assert inhibit_calls == [], "silence 必须先于 inhibition（否则抑制计数被污染）"
-    assert dedup_calls == [], "silence 必须先于 dedup（否则静默期占用去重 key）"
+    assert engine.emitted == [], "nothing must persist during the silence window"
+    assert inhibit_calls == [], "silence must come before inhibition (otherwise the suppression counter is polluted)"
+    assert dedup_calls == [], "silence must come before dedup (otherwise the silence window occupies a dedup key)"
 
 
 def test_silence_lifted_allows_normal_chain(engine, monkeypatch):
-    """静默未命中时，链路照常走到 inhibition/dedup（silence 不应误伤）。"""
+    """When silence misses, the chain still runs through inhibition/dedup (silence must not
+    cause collateral damage)."""
     gate = _silence_gate(engine)
     if gate is None:
-        pytest.skip("silence 层未落地，依赖 issue #39（订单 17 T3）")
+        pytest.skip("silence layer not landed, depends on issue #39 (Order 17 T3)")
 
     dedup_calls: list = []
 
@@ -195,18 +200,17 @@ def test_silence_lifted_allows_normal_chain(engine, monkeypatch):
     engine.online_state["humanoid-001"] = True
     run(engine.emit(_alert()))
 
-    assert dedup_calls == ["battery_low"], "未静默时应正常走完 inhibition → dedup"
+    assert dedup_calls == ["battery_low"], "when not silenced, the chain should run inhibition → dedup normally"
     assert [a.rule_id for a in engine.emitted] == ["battery_low"]
 
 
-# ================================================================ 3. 顺序不变量（无论 silence 是否落地都成立）
+# ================================================================ 3. order invariants (hold whether or not silence lands)
 
 
 def test_save_is_last_before_notify(engine, monkeypatch):
-    """落库必须发生在去重放行**之后**：dedup 拒绝则 save 不被调用。
+    """Persistence must happen **after** dedup passes: dedup denial means save is not called.
 
-    与 `test_dedup_denied_means_no_save` 互补 —— 这里显式记录调用次序。
-    """
+    Complements `test_dedup_denied_means_no_save` — here the call order is explicitly recorded."""
     order: list = []
 
     async def spy_should_emit(alert, window_s):
@@ -223,11 +227,11 @@ def test_save_is_last_before_notify(engine, monkeypatch):
 
     run(engine.emit(_alert()))
 
-    assert order == ["dedup", "save"], f"调用次序应为 dedup→save，实际 {order}"
+    assert order == ["dedup", "save"], f"call order should be dedup→save, actual {order}"
 
 
 def test_inhibited_alert_never_saved_nor_notified(engine, monkeypatch):
-    """被抑制的告警：既不落库，也不进通知器（通知器挂在 save 之后）。"""
+    """An inhibited alert: neither persisted nor passed to the notifier (notifier hangs off save)."""
     notified: list = []
 
     class _Notifier:
@@ -240,4 +244,4 @@ def test_inhibited_alert_never_saved_nor_notified(engine, monkeypatch):
     run(engine.emit(_alert()))
 
     assert engine.emitted == []
-    assert notified == [], "被抑制的告警不应触发通知"
+    assert notified == [], "an inhibited alert must not trigger a notification"

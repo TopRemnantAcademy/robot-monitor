@@ -1,20 +1,20 @@
-"""G-4：告警落库失败**必须可观测**（`robot_alert_store_errors_total`）。
+"""G-4: alert persistence failures **must be observable** (`robot_alert_store_errors_total`).
 
-被测对象是 `app/store.py` 的真实异常分支，不是替身逻辑：
-用真 `Alert` 喂进真 `save()`，只把连接入口换成会抛异常的假池，
-再读**真 registry** 里 Counter 的当前值。
+The object under test is the real exception branch of `app/store.py`, not fake logic: feed a real
+`Alert` into the real `save()`, only swapping the connection entry point for a pool that throws,
+then read the current value of the Counter from the **real registry**.
 
-为什么不用 `metrics.store_errors._value.get()` 直接读：
-那是私有 API（0.21 与 0.26 的取值路径不一样），测试会变成"钉 py 库内部实现"。
-`generate_latest(metrics.registry)` 是公开契约，且顺带验证了「指标真的能被
-Prometheus 抓到」—— 只断言内部变量、不断言暴露面的话，registry 挂错
-（比如漏传 `registry=`）照样全绿，而线上抓不到任何东西。
-（`alert_engine/app/metrics.py` 没有 `render()`：它不像后端那样挂在 FastAPI
-路由上，而是在 `_Handler.do_GET` 里直接调 `generate_latest(registry)`。）
+Why not read `metrics.store_errors._value.get()` directly: that's a private API (0.21 and 0.26
+take different paths to the value), and the test would become "pinning the py-library internals".
+`generate_latest(metrics.registry)` is the public contract and also incidentally verifies "the
+metric really can be scraped by Prometheus" — if you only assert internal variables and not the
+exposure side, a wrong `registry=` would still go all green while scraping nothing online.
+(`alert_engine/app/metrics.py` has no `render()`: unlike the backend it's not mounted on a
+FastAPI route but calls `generate_latest(registry)` directly inside `_Handler.do_GET`.)
 
-反向护栏见本文件底部 `test_guard_detects_a_store_that_forgets_to_count`：
-把 store.py 还原成「只 log 不计数」的旧版，上面几条必须变红。
-否则这组用例只是在给一个永远不会失败的断言鼓掌。
+The reverse guard at the bottom of this file, `test_guard_detects_a_store_that_forgets_to_count`:
+revert store.py to the old "log only, no count" version and the cases above must go red.
+Otherwise this set of cases is just applauding an assertion that can never fail.
 """
 
 from __future__ import annotations
@@ -35,7 +35,8 @@ METRIC = "robot_alert_store_errors_total"
 
 
 def _value(text: str, name: str) -> float:
-    """从 Prometheus 文本暴露格式里取出无标签指标的当前值（没有则视为 0）。"""
+    """Pull the current value of a label-less metric from the Prometheus text-exposure format
+    (treat absent as 0)."""
     m = re.search(rf"^{name} ([0-9.eE+-]+)$", text, re.M)
     return float(m.group(1)) if m else 0.0
 
@@ -46,22 +47,21 @@ def _stored() -> float:
 
 def _alert() -> Alert:
     return Alert(robot_id="humanoid-001", rule_id="motor_temp", severity=3,
-                 message="关节 3 温度 82.1°C 超过 75°C", detail={"joint": 3})
+                 message="Joint 3 temperature 82.1°C exceeds 75°C", detail={"joint": 3})
 
 
 class _BrokenPool:
-    """`pool.acquire()` 抛异常，模拟连接池耗尽 / 网络中断。
+    """`pool.acquire()` throws, simulating connection-pool exhaustion / network interruption.
 
-    刻意用**连接获取阶段**的异常而不是 `conn.execute` 阶段的：
-    `save()` 里 acquire 在 try 内部，两条路径都必须被计数。
-    """
+    Deliberately uses an exception at the **connection-acquisition stage** rather than the
+    `conn.execute` stage: inside `save()` the acquire is within try, and both paths must be counted."""
 
     def acquire(self):
         raise ConnectionError("injected: pool exhausted")
 
 
 class _GhostRedis:
-    """发布成功但不真的连 Redis（本用例只关心落库这一支）。"""
+    """Publish succeeds but doesn't really connect to Redis (this case only cares about the persistence branch)."""
 
     def __init__(self, sent: list):
         self._sent = sent
@@ -72,7 +72,7 @@ class _GhostRedis:
 
 @pytest.fixture()
 def broken_store(monkeypatch):
-    """把 `app.db` 的两个入口换成假件（conftest 已 stub 掉整个 app.db 模块）。"""
+    """Swap the two entry points of `app.db` for fakes (conftest has already stubbed the whole app.db module)."""
     import app.store as store
 
     sent: list = []
@@ -88,17 +88,18 @@ def broken_store(monkeypatch):
     return store, sent
 
 
-# ------------------------------------------------- 1. 失败要计数
+# ------------------------------------------------- 1. failures must be counted
 
 def test_insert_failure_increments_counter(broken_store):
-    """核心断言：一次写库失败 → 计数 +1，且指标名可从 /metrics 文本中看到。"""
+    """Core assertion: one persistence failure → counter +1, and the metric name is visible in
+    the /metrics text."""
     before = _stored()
     run(save(_alert()))
-    assert _stored() == before + 1, f"{METRIC} 未随落库失败递增"
+    assert _stored() == before + 1, f"{METRIC} did not increase with a persistence failure"
 
 
 def test_counter_is_monotonic_across_failures(broken_store):
-    """连续失败必须累加（Counter 而非"有没有失败过"的布尔）。"""
+    """Repeated failures must accumulate (a Counter, not a "did a failure ever happen" boolean)."""
     before = _stored()
     for _ in range(3):
         run(save(_alert()))
@@ -106,11 +107,11 @@ def test_counter_is_monotonic_across_failures(broken_store):
 
 
 def test_failure_still_publishes_to_frontend(broken_store):
-    """落库失败**不该**掐掉前端告警流：两段 try 独立。
+    """A persistence failure must **not** choke the frontend alert stream: the two try blocks are
+    independent.
 
-    这条钉住的是"不要为了修 G-4 而把发布也一起吞掉"——
-    值班在界面上仍须看到告警，哪怕它此刻进不了库。
-    """
+    What this nails is "don't swallow the publish too while fixing G-4" — the on-call must still
+    see the alert on the dashboard even if it can't enter the DB this instant."""
     _store, sent = broken_store
     run(save(_alert()))
     assert len(sent) == 1
@@ -119,10 +120,11 @@ def test_failure_still_publishes_to_frontend(broken_store):
     assert '"rule_id":"motor_temp"' in payload
 
 
-# ------------------------------------------------- 2. 成功不该计数
+# ------------------------------------------------- 2. success must not count
 
 def test_success_does_not_increment_counter(monkeypatch):
-    """反向断言：写库成功时计数必须纹丝不动（否则规则天天误报）。"""
+    """Reverse assertion: on a successful write the counter must stay untouched (otherwise rules
+    would false-alarm every day)."""
     import app.store as store
 
     class OkConn:
@@ -130,8 +132,9 @@ def test_success_does_not_increment_counter(monkeypatch):
             return "INSERT 0 1"
 
         async def fetchval(self, *a, **kw):
-            # store.py:42 用 RETURNING alert_id 取回自增主键，成功路径必须支持，
-            # 否则 AttributeError 被 except 吞成"落库失败" → 本用例的反向护栏红。
+            # store.py:42 uses RETURNING alert_id to fetch the auto-increment PK; the success path
+            # must support it, otherwise AttributeError gets swallowed by except as "persistence
+            # failed" → this case's reverse guard goes red.
             return 1
 
     class OkPool:
@@ -149,7 +152,7 @@ def test_success_does_not_increment_counter(monkeypatch):
 
     before = _stored()
     run(save(_alert()))
-    assert _stored() == before, "成功路径不应递增落库失败计数"
+    assert _stored() == before, "success path must not increment the persistence-failure counter"
 
 
 class _AsyncCtx:
@@ -163,10 +166,11 @@ class _AsyncCtx:
         return False
 
 
-# ------------------------------------------------- 3. 规则仍在（防被后续改动误删）
+# ------------------------------------------------- 3. the rule file still references the metric (guard against later deletion)
 
 def test_rule_file_references_the_metric_with_increase():
-    """规则文件必须用 increase(...[5m]) 而不是 `> 0`（Counter 单调，后者永不复位）。"""
+    """The rule file must use increase(...[5m]) rather than `> 0` (a Counter is monotonic; the
+    latter never resets)."""
     from pathlib import Path
 
     rules = (Path(__file__).resolve().parents[2]
@@ -174,17 +178,15 @@ def test_rule_file_references_the_metric_with_increase():
     assert f"increase({METRIC}[5m]) > 0" in rules
 
 
-# ------------------------------------------------- 4. 反向护栏
+# ------------------------------------------------- 4. reverse guard
 
 def test_guard_detects_a_store_that_forgets_to_count(monkeypatch):
-    """把 store.py 打回"只 log 不计数"的旧版，计数用例必须变红。
+    """Revert store.py to the old "log only, no count" version and the counting cases must go red.
 
-    做法：monkeypatch 掉 `metrics.store_errors.inc`，令其成为空操作 ——
-    等价于旧代码里漏埋点时指标永远停在原值。
-    若本文件的用例真有约束力，`save()` 失败后数值应当**不变**（即旧行为）。
-    这一条同时是元测试：它证明上面那几条断言确实在盯着"有没有 inc()"，
-    而不是碰巧被别的东西改动了数值。
-    """
+    Method: monkeypatch `metrics.store_errors.inc` into a no-op — equivalent to the old code
+    missing the counter entirely. If this file's cases actually have teeth, `save()`'s failure
+    should leave the value **unchanged** (i.e. the old behavior). This is also a meta-test: it
+    proves the cases above really watch "is there an inc()", not some incidental change."""
     import app.store as store
 
     async def fake_get_pool():
@@ -199,4 +201,4 @@ def test_guard_detects_a_store_that_forgets_to_count(monkeypatch):
 
     before = _stored()
     run(save(_alert()))
-    assert _stored() == before, "埋点被摘掉后仍计数 —— 说明断言没落在埋点上"
+    assert _stored() == before, "counting still happens after the counter was removed — assertion isn't on the counter"

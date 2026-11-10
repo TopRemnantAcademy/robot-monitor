@@ -1,10 +1,12 @@
-"""订单 17 T3 — 静默（silence）与 emit() 三层过滤顺序 的验收测试。
+"""Order 17 T3 — acceptance tests for silence and the three-layer filter order in emit().
 
-核心断言：**顺序必须是 silence → inhibition → dedup**（派工单 T3 / 冲突提示）。
-验证方式：用探针替换三层，记录**实际调用顺序**，并验证
-「静默生效时 inhibition 与 dedup 都不会被触发」（验收标准原文）。
+Core assertion: **the order must be silence → inhibition → dedup** (work order T3 / conflict note).
+Verification method: replace the three layers with probes, record the **actual call order**, and
+verify "when silence is active, neither inhibition nor dedup is triggered" (verbatim acceptance
+criterion).
 
-不 mock 被测逻辑本身 —— 断言的是 `app.main.emit()` 的真实控制流。
+We do not mock the logic under test itself — the assertion is the real control flow of
+`app.main.emit()`.
 """
 
 from __future__ import annotations
@@ -24,12 +26,12 @@ def _alert(rid: str = "humanoid-001", rule_id: str = "battery_low",
 
 @pytest.fixture()
 def calls(engine, monkeypatch):
-    """替换三层为记录器，返回调用顺序列表。
+    """Replace the three layers with recorders and return the call-order list.
 
-    - is_silenced  → 由测试控制返回值（默认 False）
-    - is_inhibited → 由测试控制返回值（默认 False）
-    - should_emit  → 由测试控制返回值（默认 True）
-    - save         → 记录最终落库的事件（conftest 已替换）
+    - is_silenced  → return value controlled by test (default False)
+    - is_inhibited → return value controlled by test (default False)
+    - should_emit  → return value controlled by test (default True)
+    - save         → records the final persisted event (already replaced by conftest)
     """
     order: list[str] = []
     state = {"silenced": False, "inhibited": False, "dedup_pass": True}
@@ -55,25 +57,25 @@ def calls(engine, monkeypatch):
 
 
 def test_order_is_silence_inhibition_dedup(calls):
-    """三层都放行时，调用顺序严格是 silence → inhibition → dedup。"""
+    """When all three layers pass, the call order is strictly silence → inhibition → dedup."""
     run(calls.emit(_alert()))
     assert calls._order == ["silence", "inhibition", "dedup"]
     assert len(calls.emitted) == 1
 
 
 def test_silenced_skips_inhibition_and_dedup(calls):
-    """验收原文：静默生效时，inhibition 与 dedup 都不会被触发。"""
+    """Acceptance criterion: when silence is active, neither inhibition nor dedup is triggered."""
     calls._state["silenced"] = True
     run(calls.emit(_alert()))
 
-    assert calls._order == ["silence"], "静默命中后不得再触达 inhibition/dedup"
+    assert calls._order == ["silence"], "after a silence hit, inhibition/dedup must not be reached"
     assert "inhibition" not in calls._order
     assert "dedup" not in calls._order
-    assert calls.emitted == [], "静默期内不得落库"
+    assert calls.emitted == [], "nothing must be persisted during the silence window"
 
 
 def test_silenced_alert_logged_at_debug(calls, caplog):
-    """静默丢弃必须留 DEBUG 痕迹（排查「为什么没告警」需要）。"""
+    """Silently dropped alerts must leave a DEBUG trace (needed to investigate "why no alert")."""
     calls._state["silenced"] = True
     with caplog.at_level("DEBUG", logger="alert_engine"):
         run(calls.emit(_alert()))
@@ -81,7 +83,7 @@ def test_silenced_alert_logged_at_debug(calls, caplog):
 
 
 def test_inhibited_still_runs_after_silence_pass(calls):
-    """静默未命中、抑制命中时：只走到 inhibition，不触达 dedup。"""
+    """When silence misses but inhibition hits: only reach inhibition, not dedup."""
     calls._state["inhibited"] = True
     run(calls.emit(_alert()))
     assert calls._order == ["silence", "inhibition"]
@@ -89,17 +91,17 @@ def test_inhibited_still_runs_after_silence_pass(calls):
 
 
 def test_dedup_runs_last(calls):
-    """前两层都放行、dedup 拦截时：三层都被调用，但不落库。"""
+    """When the first two layers pass but dedup blocks: all three are called, but nothing persists."""
     calls._state["dedup_pass"] = False
     run(calls.emit(_alert()))
     assert calls._order == ["silence", "inhibition", "dedup"]
     assert calls.emitted == []
 
 
-# ------------------------------------------------ is_silenced 自身的语义（真 Redis Key）
+# ------------------------------------------------ is_silenced semantics (real Redis key)
 
 def test_is_silenced_hits_robot_key(monkeypatch):
-    """命中 `alert:silence:{robot_id}` 即静默。"""
+    """A hit on `alert:silence:{robot_id}` means silenced."""
     import app.silence as silence
 
     class FakeRedis:
@@ -115,7 +117,7 @@ def test_is_silenced_hits_robot_key(monkeypatch):
     monkeypatch.setattr(silence, "get_redis", lambda: _await(fake))
     assert run(silence.is_silenced(_alert("humanoid-007"))) is True
     assert run(silence.is_silenced(_alert("humanoid-008"))) is False
-    # 必须 MGET 同时查全局与单机 Key（一次往返）
+    # Must MGET both the global and per-robot keys in a single round-trip
     assert fake.calls[0] == ("alert:silence:all", "alert:silence:humanoid-007")
 
 
@@ -131,7 +133,8 @@ def test_is_silenced_global_key(monkeypatch):
 
 
 def test_is_silenced_fail_open(monkeypatch, caplog):
-    """Redis 不可达 → fail-open（放行告警），绝不因静默层故障压制故障告警。"""
+    """Redis unreachable → fail-open (let the alert through); never suppress fault alerts
+    because the silence layer itself is down."""
     import app.silence as silence
 
     class Boom:

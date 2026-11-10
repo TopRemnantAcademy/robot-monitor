@@ -1,23 +1,27 @@
-"""R-14 — `consume()` Redis 断连监督的验收。
+"""R-14 — acceptance for `consume()`'s Redis disconnect supervision.
 
-R-14 之前的故障模式（真，非推测）：`pubsub.listen()` 在 Redis 闪断时抛
-`redis.exceptions.ConnectionError`，该异常**逃出 `consume()`** → 经 `amain()`
-的 `asyncio.gather` 向上传播 → 整条协程树失败、进程退出；且 `ticker()` /
-`escalation_loop()` 这两个本身没坏的兄弟协程被**连带取消**。
+The failure mode before R-14 (real, not speculative): when `pubsub.listen()` throws
+`redis.exceptions.ConnectionError` on a Redis blip, that exception **escapes `consume()`** →
+propagates up through `amain()`'s `asyncio.gather` → the whole coroutine tree fails and the
+process exits; and the two sibling coroutines `ticker()` / `escalation_loop()` that weren't
+broken themselves get **cancelled along**.
 
-本文件钉住四条语义（对应需求 §5 的 V1/V2/V3/V4）：
-1. 断连自愈：`listen()` 抛断连异常后 `consume()` **不退出**，退避后重建 pubsub
-   并**重新 subscribe**（订阅状态不跨连接保留）。
-2. 不拖垮兄弟：该异常**不传播**出 `consume()`。
-3. 现有行为不变：正常消息仍被消费、`JSONDecodeError` 仍跳过、规则异常仍兜底。
-4. 可观测：重连有 warning 日志 + `robot_alert_redis_reconnect_total` 计数。
+This file pins down four semantics (corresponding to requirements §5 V1/V2/V3/V4):
+1. Self-heal on disconnect: after `listen()` throws a disconnect exception, `consume()` **does
+   not exit**, rebuilds the pubsub after backoff and **re-subscribes** (subscription state does
+   not survive across connections).
+2. Doesn't take down siblings: the exception **does not propagate** out of `consume()`.
+3. Existing behavior unchanged: normal messages still get consumed, `JSONDecodeError` still
+   skipped, rule exceptions still contained.
+4. Observable: reconnect has a warning log + `robot_alert_redis_reconnect_total` counter.
 
-⚠️ 关键事实（本机实测 redis 5.0.3，决定了被测代码必须同时捕两组异常）：
-    issubclass(redis.exceptions.ConnectionError, ConnectionError)  # 内建 → False
-    issubclass(redis.exceptions.TimeoutError, TimeoutError)        # 内建 → False
-redis-py 的这两个异常只继承 `RedisError`，与内建同名类**无继承关系**。
-故断连用例**三组都测**（RedisError / 内建 OSError / redis 的 TimeoutError），
-只测一组会漏掉另一组。
+⚠️ Key fact (measured on this machine, redis 5.0.3, which dictates the tested code must catch both
+   exception groups):
+    issubclass(redis.exceptions.ConnectionError, ConnectionError)  # built-in → False
+    issubclass(redis.exceptions.TimeoutError, TimeoutError)        # built-in → False
+redis-py's two exceptions only inherit `RedisError`, with no inheritance relation to the
+built-in same-named classes. So the disconnect case tests **all three groups** (RedisError /
+built-in OSError / redis's TimeoutError); testing only one would miss another.
 """
 
 from __future__ import annotations
@@ -32,12 +36,14 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 from app import metrics
 from app.config import settings
 
-# 测试期把退避压到毫秒级，否则默认 1s 起步的重连会让单测白等。
+# In tests, compress backoff to millisecond level, otherwise the default 1s-starting reconnect
+# makes the unit test wait in vain.
 TINY_BACKOFF = 0.001
 
-#: 假 pubsub 累计调用 `listen()` 的次数，供用例等消费循环推进到目标轮次。
-#: ⚠️ 必须**全局累加**、不可每轮清零 —— 清零后计数永远到不了 2，
-#: `_run()` 会一直等到超时，"重连后是否重新 subscribe"就测不出来。
+#: Fake pubsub's cumulative count of `listen()` calls, for cases to wait for the consumer loop to
+#: reach a target round.
+#: ⚠️ Must be **globally cumulative**, never reset per round — once reset the count can never reach
+#: 2, `_run()` would wait until timeout, and "does it re-subscribe after reconnect" can't be tested.
 _listen_total = 0
 
 
@@ -46,18 +52,21 @@ def _listens() -> int:
 
 
 class FakePubSub:
-    """假 pubsub：按脚本吐行为，记录 subscribe/listen 调用次数。
+    """Fake pubsub: emits behavior per script, records subscribe/listen call counts.
 
-    `listen()` 由 `script` 逐轮驱动（一轮 = `listen()` 的一次调用），每项可为：
-      - `Exception` 实例            → 立即抛出（模拟断连）
-      - `list`                       → 逐个 yield 这些消息，然后**永久挂起**（等被 cancel）
-      - `(list, Exception)` 二元组   → 先 yield 消息，再抛出该异常
-        （真实驱动里"投递过消息之后断连"就是这个形态；用它才能测"退避复位"）
+    `listen()` is driven round by round by `script` (one round = one call to `listen()`), each item may be:
+      - `Exception` instance            → throw immediately (simulate disconnect)
+      - `list`                          → yield these messages one by one, then **hang forever**
+                                          (wait to be cancelled)
+      - `(list, Exception)` tuple       → yield messages first, then throw that exception
+        (in the real driver "deliver messages then disconnect" is exactly this shape; only it can
+         test "backoff reset")
 
-    ⚠️ 为什么"正常轮"要挂起，而不是吐完消息就返回：被测的 `async for` 一旦拿到
-    `StopAsyncIteration` 就会**正常退出** `consume()` —— 那样测出来的"不退出"是
-    假的（是迭代器耗尽，不是断连自愈）。真实 Redis 的 `listen()` 永不自然结束，
-    只在连接断开时抛异常。故这里必须忠于真实驱动的这条性质。
+    ⚠️ Why a "normal round" must hang instead of returning after yielding messages: the tested
+    `async for` would **exit `consume()` normally** the instant it gets `StopAsyncIteration` —
+    then the "does not exit" tested would be fake (it's the iterator being exhausted, not a
+    disconnect self-heal). Real Redis's `listen()` never ends naturally, throwing only on
+    disconnect. So here we must honor this property of the real driver.
     """
 
     def __init__(self, script):
@@ -82,10 +91,11 @@ class FakePubSub:
             yield msg
         if tail is not None:
             raise tail
-        # 消息吐完 → 挂起（模拟"连接仍在，只是暂时没消息"）。
-        # 真实 Redis 的 listen() 只有两条出路：继续 yield，或抛异常 ——
-        # 它**不会**自然返回。故"一轮结束"在本替身里只能靠断连表达
-        # （脚本里显式写一个断连异常作下一轮，见 test_backoff_resets_*）。
+        # After yielding messages → hang (simulate "connection still up, just no message yet").
+        # Real Redis's listen() has only two exits: keep yielding, or throw an exception —
+        # it **never** returns naturally. So "a round ends" in this stand-in can only be expressed
+        # via a disconnect (the script explicitly writes a disconnect exception as the next round,
+        # see test_backoff_resets_*).
         await asyncio.Event().wait()
 
 
@@ -97,28 +107,29 @@ class FakeRedis:
     def pubsub(self):
         self.created += 1
         if not self._pubsubs:
-            # 脚本用尽后仍要能继续建 pubsub（消费循环不会自己停），否则后续轮次
-            # 会 IndexError —— 那会把"脚本没写够"伪装成"被测代码崩了"。
+            # After the script is exhausted it must still be able to keep building pubsubs (the
+            # consumer loop won't stop itself), otherwise later rounds would IndexError — which
+            # would disguise "script not written long enough" as "tested code crashed".
             return FakePubSub([])
         return self._pubsubs.pop(0)
 
 
 def _wire(monkeypatch, m, pubsubs):
-    """把 `app.main.get_redis` 换成假实现，并记录 consume() 的退避时长。
+    """Swap `app.main.get_redis` for a fake and record `consume()`'s backoff durations.
 
-    注意 `main.py` 是 `from app.db import ... get_redis`（**名字已在 import 期绑定**），
-    所以必须 patch `app.main.get_redis`；patch `app.db.get_redis` 对 main 无效。
-    """
+    Note `main.py` does `from app.db import ... get_redis` (**the name is bound at import time**),
+    so you must patch `app.main.get_redis`; patching `app.db.get_redis` has no effect on main."""
     fake = FakeRedis(pubsubs)
     sleeps: list[float] = []
 
     async def fake_get_redis():
         return fake
 
-    # ⚠️ 不能写成 `monkeypatch.setattr(m.asyncio, "sleep", ...)`：`m.asyncio` **就是**
-    # stdlib 模块对象本身，patch 它等于全局替换 `asyncio.sleep`，替身内部的
-    # `await asyncio.sleep(0)` 会递归调自己（本机实测 RecursionError，949 层）。
-    # 故替换的是 `app.main` 命名空间里的 `asyncio` **引用**，用只改写 `sleep` 的薄代理。
+    # ⚠️ Can't write `monkeypatch.setattr(m.asyncio, "sleep", ...)`: `m.asyncio` **is** the
+    # stdlib module object itself; patching it is globally replacing `asyncio.sleep`, and the
+    # stand-in's internal `await asyncio.sleep(0)` would recurse into itself (measured
+    # RecursionError, 949 deep). So we replace the `asyncio` **reference** in the `app.main`
+    # namespace with a thin proxy that only rewrites `sleep`.
     class _AsyncioProxy:
         def __getattr__(self, name):
             return getattr(asyncio, name)
@@ -126,7 +137,7 @@ def _wire(monkeypatch, m, pubsubs):
         @staticmethod
         async def sleep(s):
             sleeps.append(s)
-            await asyncio.sleep(0)        # 让出事件循环，但不等真实时间
+            await asyncio.sleep(0)        # yield to the event loop, but don't wait real time
 
     monkeypatch.setattr(m, "get_redis", fake_get_redis)
     monkeypatch.setattr(m, "asyncio", _AsyncioProxy)
@@ -134,12 +145,12 @@ def _wire(monkeypatch, m, pubsubs):
 
 
 async def _run(m, target_listens: int, timeout: float = 3.0):
-    """跑 `consume()`，等假 pubsub 累计进到 N 轮 listen() 后取消。
+    """Run `consume()`, cancel after the fake pubsub reaches N listen() rounds.
 
-    返回**逃出的异常**（None = 没逃出，即修复生效）。
-    用"实际 listen 次数"而非"空转 yield 次数"作推进判据：后者依赖事件循环
-    调度细节，脆；前者是被测代码自己驱动的确定性事件。
-    """
+    Return **the escaping exception** (None = nothing escaped, i.e. the fix worked).
+    Use "actual listen count" rather than "idle yield count" as the progress criterion: the latter
+    depends on event-loop scheduling details (fragile); the former is a deterministic event driven
+    by the tested code itself."""
     global _listen_total
     _listen_total = 0
     task = asyncio.ensure_future(m.consume())
@@ -156,12 +167,12 @@ async def _run(m, target_listens: int, timeout: float = 3.0):
         return None
     except asyncio.CancelledError:
         return None
-    except BaseException as exc:          # noqa: BLE001 —— 这就是被测断言本身
+    except BaseException as exc:          # noqa: BLE001 —— this IS the assertion under test
         return exc
 
 
 def _msg(rid="humanoid-001", temp=80.0):
-    """造一条报文。默认温度 80°C > 阈值 75°C，能被 motor_temp 规则命中。"""
+    """Build a message. Default 80°C > 75°C threshold, hits the motor_temp rule."""
     return {
         "type": "message",
         "data": json.dumps({
@@ -173,35 +184,35 @@ def _msg(rid="humanoid-001", temp=80.0):
     }
 
 
-# ---------------------------------------------------------------- V1 断连自愈
+# ---------------------------------------------------------------- V1 self-heal on disconnect
 
 def test_reconnects_after_redis_connection_error(engine, monkeypatch):
-    """`listen()` 抛 `redis.exceptions.ConnectionError` → 不退出 + 重新 subscribe。
+    """`listen()` throws `redis.exceptions.ConnectionError` → no exit + re-subscribe.
 
-    这是 R-14 的核心用例：修复前异常逃出协程，本用例会拿到它；
-    修复后应观察到**第二次 subscribe**（订阅不跨连接保留，必须重订）。
-    """
+    This is the core case of R-14: before the fix the exception escaped the coroutine and this
+    case would get it; after the fix you should observe the **second subscribe** (subscription
+    doesn't survive across connections, must re-subscribe)."""
     m = engine
     ps1 = FakePubSub([RedisConnectionError("Connection reset by peer")])
-    ps2 = FakePubSub([[]])                     # 重连后这一轮正常（无消息）
+    ps2 = FakePubSub([[]])                     # after reconnect, this round is normal (no message)
     fake, sleeps = _wire(monkeypatch, m, [ps1, ps2])
     monkeypatch.setattr(m, "RECONNECT_BACKOFF_INITIAL_S", TINY_BACKOFF)
 
     exc = asyncio.run(_run(m, target_listens=2))
 
-    assert exc is None, f"异常逃出了 consume(): {exc!r}"
+    assert exc is None, f"exception escaped consume(): {exc!r}"
     assert ps1.subscribe_calls == [settings.chan_stream_all]
-    assert ps2.subscribe_calls == [settings.chan_stream_all], "重连后未重新 subscribe"
-    assert fake.created == 2, "未重建 pubsub"
-    assert sleeps and sleeps[0] == TINY_BACKOFF, f"退避未生效: {sleeps}"
+    assert ps2.subscribe_calls == [settings.chan_stream_all], "did not re-subscribe after reconnect"
+    assert fake.created == 2, "did not rebuild pubsub"
+    assert sleeps and sleeps[0] == TINY_BACKOFF, f"backoff not applied: {sleeps}"
 
 
 def test_reconnects_on_redis_timeout_error(engine, monkeypatch):
-    """`redis.exceptions.TimeoutError` 同样必须被兜住。
+    """`redis.exceptions.TimeoutError` must also be caught.
 
-    为什么单列：该异常**不是**内建 `TimeoutError` 的子类（本机实测 False），
-    只捕内建的那个会漏，故必须有一例专门钉它。
-    """
+    Why a separate case: this exception is **not** a subclass of built-in `TimeoutError`
+    (measured False on this machine); catching only the built-in would miss it, so there must be
+    one example dedicated to it."""
     m = engine
     ps1 = FakePubSub([RedisTimeoutError("Timeout reading from socket")])
     ps2 = FakePubSub([[]])
@@ -210,16 +221,16 @@ def test_reconnects_on_redis_timeout_error(engine, monkeypatch):
 
     exc = asyncio.run(_run(m, target_listens=2))
 
-    assert exc is None, f"异常逃出了 consume(): {exc!r}"
+    assert exc is None, f"exception escaped consume(): {exc!r}"
     assert ps2.subscribe_calls == [settings.chan_stream_all]
     assert fake.created == 2
 
 
 def test_reconnects_on_builtin_oserror(engine, monkeypatch):
-    """内建 `OSError`（hiredis / 底层 socket 直抛）也算断连。
+    """Built-in `OSError` (hiredis / raw socket thrown directly) also counts as disconnect.
 
-    只捕 `RedisError` 会漏掉这条路径 —— 故三组异常各一例分别钉住。
-    """
+    Catching only `RedisError` would miss this path — so all three exception groups get one case
+    each."""
     m = engine
     ps1 = FakePubSub([OSError("Connection refused")])
     ps2 = FakePubSub([[]])
@@ -228,16 +239,15 @@ def test_reconnects_on_builtin_oserror(engine, monkeypatch):
 
     exc = asyncio.run(_run(m, target_listens=2))
 
-    assert exc is None, f"异常逃出了 consume(): {exc!r}"
+    assert exc is None, f"exception escaped consume(): {exc!r}"
     assert fake.created == 2
 
 
 def test_backoff_grows_exponentially_and_is_capped(engine, monkeypatch):
-    """连续断连 → 退避 1x,2x,4x,...，且不超过 RECONNECT_BACKOFF_MAX_S。
+    """Consecutive disconnects → backoff 1x,2x,4x,... and never exceeds RECONNECT_BACKOFF_MAX_S.
 
-    封顶是硬要求：无限翻倍则 Redis 恢复后要等几小时才自愈，等于把
-    "永久停订阅"推迟发生（与不修无差别）。
-    """
+    Capping is a hard requirement: unbounded doubling means after Redis recovers it takes hours to
+    self-heal, equivalent to postponing "permanent unsubscribe" (no different from not fixing)."""
     m = engine
     n = 6
     pubsubs = [FakePubSub([RedisConnectionError("down")]) for _ in range(n)]
@@ -249,31 +259,32 @@ def test_backoff_grows_exponentially_and_is_capped(engine, monkeypatch):
     exc = asyncio.run(_run(m, target_listens=n + 1))
 
     assert exc is None
-    assert len(sleeps) >= 4, f"重连次数不足: {sleeps}"
+    assert len(sleeps) >= 4, f"too few reconnects: {sleeps}"
     assert sleeps[0] == TINY_BACKOFF
     assert sleeps[1] == TINY_BACKOFF * 2
     assert sleeps[2] == TINY_BACKOFF * 4
-    assert all(s <= TINY_BACKOFF * 4 for s in sleeps), f"退避未被封顶: {sleeps}"
+    assert all(s <= TINY_BACKOFF * 4 for s in sleeps), f"backoff not capped: {sleeps}"
 
 
 def test_backoff_resets_after_messages_delivered(engine, monkeypatch):
-    """一次短暂抖动、且**确实恢复收报**后，退避必须复位。
+    """After a brief blip, and messages **actually delivered**, backoff must reset.
 
-    为什么判据是"投递过消息"而不是"subscribe 返回了"：Redis 重启时最常见的形态
-    恰恰是 subscribe 能成功、随后立刻断。若在那时复位退避，退避会永远停在 1s ——
-    "指数退避"名存实亡，变成每秒一次的忙重试。本机实测过这个 bug
-    （连续 6 次断连、退避序列全是初始值），故这里必须用"收到过消息"当复位证据。
-    """
+    Why the criterion is "messages delivered" rather than "subscribe returned": the most common
+    shape when Redis restarts is a successful subscribe immediately followed by a disconnect. If
+    you reset backoff there, it stays pinned at 1s — "exponential backoff" becomes nominal, turning
+    into a once-per-second busy retry. This bug was measured on this machine (6 consecutive
+    disconnects, backoff sequence all initial values), so here "received a message" must be the
+    reset evidence."""
     m = engine
-    # 第 2 轮"先投递消息、再以一次断连收场"——这正是真实形态：只要链路真的
-    # 通过报（delivered=True），随后的断连就该从 1s 重新起步。
-    # 若把复位挂错在"subscribe 返回"上，第 2 轮这个断连会被认为"没复位"，
-    # 于是第 3 轮退避变成翻倍值，本用例即红。
+    # Round 2 "deliver messages first, then end with a disconnect" — exactly the real shape: as
+    # long as the link really delivers (delivered=True), the subsequent disconnect should restart
+    # from 1s. If you hang the reset on "subscribe returned", round 2's disconnect would be judged
+    # "not reset", so round 3's backoff becomes the doubled value and this case goes red.
     pubsubs = [
-        FakePubSub([RedisConnectionError("blip")]),        # 1: 断
-        FakePubSub([([_msg("humanoid-003")],                 # 2: 投递消息…
-                     RedisConnectionError("blip2"))]),       #    …再断（收尾）
-        FakePubSub([[]]),                                   # 3: 恢复
+        FakePubSub([RedisConnectionError("blip")]),        # 1: disconnect
+        FakePubSub([([_msg("humanoid-003")],                 # 2: deliver messages…
+                     RedisConnectionError("blip2"))]),       #    …then disconnect (ending)
+        FakePubSub([[]]),                                   # 3: recover
     ]
     fake, sleeps = _wire(monkeypatch, m, pubsubs)
     monkeypatch.setattr(m, "RECONNECT_BACKOFF_INITIAL_S", TINY_BACKOFF)
@@ -281,20 +292,21 @@ def test_backoff_resets_after_messages_delivered(engine, monkeypatch):
     exc = asyncio.run(_run(m, target_listens=3))
 
     assert exc is None
-    assert len(sleeps) == 2, f"应有两次重连退避, 实际 {sleeps}"
+    assert len(sleeps) == 2, f"should have two reconnect backoffs, actual {sleeps}"
     assert sleeps[0] == sleeps[1] == TINY_BACKOFF, (
-        f"退避未在收到消息后退避复位: {sleeps}"
+        f"backoff didn't reset after message delivery: {sleeps}"
     )
 
 
-# ---------------------------------------------------------------- V2 不传播
+# ---------------------------------------------------------------- V2 no propagation
 
 def test_disconnect_does_not_propagate_to_gather(engine, monkeypatch):
-    """断连异常不逃出 `consume()` → 同 gather 的兄弟协程不被连带取消。
+    """A disconnect exception doesn't escape `consume()` → sibling coroutines in the same gather
+    aren't cancelled along.
 
-    直接复刻 `amain()` 的编排语义：把 consume() 与一个"长跑兄弟"放同一 gather，
-    断言兄弟**跑完了**（若 consume 上抛，gather 会立刻取消兄弟 → 断言失败）。
-    """
+    Directly replicate `amain()`'s orchestration semantics: put consume() and a "long-running
+    sibling" in the same gather, and assert the sibling **ran to completion** (if consume had thrown
+    up, gather would cancel the sibling immediately → assertion fails)."""
     m = engine
     ps1 = FakePubSub([RedisConnectionError("down")])
     ps2 = FakePubSub([[]])
@@ -302,10 +314,11 @@ def test_disconnect_does_not_propagate_to_gather(engine, monkeypatch):
     monkeypatch.setattr(m, "RECONNECT_BACKOFF_INITIAL_S", TINY_BACKOFF)
     monkeypatch.setattr(m, "RECONNECT_BACKOFF_MAX_S", TINY_BACKOFF)
 
-    # 用 Event 做**确定性**同步，而不是"空转 N 次 sleep(0)"：
-    # 后者的 N 依赖事件循环调度细节（不同 Python 版本 yield 次数不同），
-    # 会让"兄弟是否跑完"变成一个脆的竞态断言。这里让兄弟显式等一个事件，
-    # 由断连发生后的代码去 set 它 —— 只有在兄弟**没被取消**时才会跑到 set。
+    # Use an Event for **deterministic** sync, not "idle N sleeps(0)": the latter's N depends on
+    # event-loop scheduling details (different Python versions yield different counts), turning
+    # "did the sibling finish" into a fragile race assertion. Here let the sibling explicitly wait
+    # on an event, set by the code after the disconnect happens — only when the sibling **wasn't
+    # cancelled** does it reach the set.
     sibling_ran = asyncio.Event()
 
     async def sibling():
@@ -315,14 +328,14 @@ def test_disconnect_does_not_propagate_to_gather(engine, monkeypatch):
     async def scenario():
         consume_task = asyncio.ensure_future(m.consume())
         sib = asyncio.ensure_future(sibling())
-        # 等 consume() 真的经历一次断连并进入重连等待
+        # Wait until consume() really experiences one disconnect and enters the reconnect wait
         while _listens() < 1:
             await asyncio.sleep(0)
         for _ in range(20):
             await asyncio.sleep(0)
-        # 到此处若 consume() 曾把异常抛给 gather，sib 早被取消（done 且 cancelled）
+        # At this point, if consume() had thrown to gather, sib would already be cancelled (done and cancelled)
         sib_cancelled = sib.cancelled()
-        sibling_ran.set()               # 放兄弟跑完
+        sibling_ran.set()               # release the sibling to finish
         result = await sib
         consume_task.cancel()
         try:
@@ -333,17 +346,18 @@ def test_disconnect_does_not_propagate_to_gather(engine, monkeypatch):
 
     sib_cancelled, sib_result = asyncio.run(scenario())
 
-    assert not sib_cancelled, "兄弟协程被取消 —— consume() 的异常传染给了 gather"
+    assert not sib_cancelled, "sibling coroutine was cancelled — consume()'s exception leaked to gather"
     assert sib_result == "sibling-finished"
 
 
 def test_non_disconnect_exception_still_propagates(engine, monkeypatch):
-    """**反向**用例：非断连异常仍必须逃出 consume()，不被吞成"假活"。
+    """**Reverse** case: a non-disconnect exception must still escape consume(), not be swallowed
+    into "fake alive".
 
-    若把 except 放宽到 `Exception`，任何真 bug（如改坏的消息处理）都会被静默
-    吞掉、进程假活、看板照常绿 —— 比原故障更难查。故必须钉住：容错只对
-    **断连类**生效。
-    """
+    If the except were widened to `Exception`, any real bug (e.g. a broken message handler) would
+    be silently swallowed, the process would fake-alive, and the dashboard would stay green —
+    harder to trace than the original fault. So it must be nailed: fault-tolerance applies only to
+    **disconnect-class** exceptions."""
     m = engine
     ps1 = FakePubSub([ZeroDivisionError("real bug, not a disconnect")])
     _wire(monkeypatch, m, [ps1, FakePubSub([[]])])
@@ -351,14 +365,14 @@ def test_non_disconnect_exception_still_propagates(engine, monkeypatch):
     exc = asyncio.run(_run(m, target_listens=1))
 
     assert isinstance(exc, ZeroDivisionError), (
-        f"非断连异常被吞了（应逃出 consume()），实际: {exc!r}"
+        f"non-disconnect exception was swallowed (should escape consume()), actual: {exc!r}"
     )
 
 
-# ---------------------------------------------------------------- V4 可观测
+# ---------------------------------------------------------------- V4 observable
 
 def test_reconnect_increments_metric(engine, monkeypatch):
-    """重连必须让 `robot_alert_redis_reconnect_total` 增长（"假活"可被 PromQL 发现）。"""
+    """Reconnect must increment `robot_alert_redis_reconnect_total` ("fake alive" findable via PromQL)."""
     m = engine
     before = metrics.redis_reconnect._value.get()
     ps1 = FakePubSub([RedisConnectionError("down")])
@@ -374,17 +388,18 @@ def test_reconnect_increments_metric(engine, monkeypatch):
 
 
 def test_reconnect_metric_is_registered_on_metrics_endpoint(engine):
-    """指标须在 `/metrics` 可见（registry 内有同名的 `_total` 家族）。
+    """The metric must be visible on `/metrics` (a `_total` family with the same name in the registry).
 
-    只 import 不注册（例如忘了传 `registry=`）会让它挂在**默认** registry 上，
-    而本服务用独立 registry 输出 —— 那样指标永远抓不到，等于没有。
-    """
+    Only import without registering (e.g. forgot to pass `registry=`) would hang it on the
+    **default** registry, while this service outputs via an independent registry — then the metric
+    is never scraped, equivalent to nonexistent."""
     text = metrics.generate_latest(metrics.registry).decode()
     assert "robot_alert_redis_reconnect_total" in text
 
 
 def test_backoff_value_present_in_warning_log(engine, monkeypatch, caplog):
-    """warning 日志必须带**退避秒数**与频道名 —— 只有"断连了"三个字无法排障。"""
+    """The warning log must carry the **backoff seconds** and channel name — "disconnected" alone
+    can't triage."""
     m = engine
     ps1 = FakePubSub([RedisConnectionError("Connection reset by peer")])
     ps2 = FakePubSub([[]])
@@ -396,16 +411,17 @@ def test_backoff_value_present_in_warning_log(engine, monkeypatch, caplog):
 
     assert exc is None
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert warnings, "重连未打 warning 日志"
+    assert warnings, "reconnect did not emit a warning log"
     text = warnings[0].getMessage()
     assert "ConnectionError" in text or "Connection reset" in text
-    assert settings.chan_stream_all in text, f"日志缺频道名: {text!r}"
+    assert settings.chan_stream_all in text, f"log missing channel name: {text!r}"
 
 
-# ---------------------------------------------------------------- V3 行为不变
+# ---------------------------------------------------------------- V3 behavior unchanged
 
 def test_normal_messages_still_consumed_after_reconnect(engine, monkeypatch):
-    """重连后消息处理必须照旧 —— "退避 + 重订"不能把窗口/在线态弄丢。"""
+    """After reconnect, message handling must proceed as before — "backoff + re-subscribe" must not
+    lose the window / online state."""
     m = engine
     ps1 = FakePubSub([RedisConnectionError("down")])
     ps2 = FakePubSub([[_msg("humanoid-007", 85.0)]])
@@ -415,16 +431,16 @@ def test_normal_messages_still_consumed_after_reconnect(engine, monkeypatch):
     exc = asyncio.run(_run(m, target_listens=2))
 
     assert exc is None
-    assert m.last_seen.get("humanoid-007") is not None, "重连后的消息未被消费"
+    assert m.last_seen.get("humanoid-007") is not None, "message after reconnect was not consumed"
     assert len(m.windows["humanoid-007"]) == 1
 
 
 def test_json_decode_error_still_skipped(engine, monkeypatch):
-    """`JSONDecodeError` 仍逐条跳过（R-14 不得弱化既有异常处理）。"""
+    """`JSONDecodeError` is still skipped per message (R-14 must not weaken existing exception handling)."""
     m = engine
     ps = FakePubSub([[
         {"type": "message", "data": "not-json{{{"},
-        {"type": "subscribe", "data": "1"},          # 非 message 类型也照旧跳过
+        {"type": "subscribe", "data": "1"},          # non-message type also skipped as before
         _msg("humanoid-009"),
     ]])
     _wire(monkeypatch, m, [ps, FakePubSub([[]])])
@@ -438,7 +454,8 @@ def test_json_decode_error_still_skipped(engine, monkeypatch):
 
 
 def test_rule_exception_still_contained(engine, monkeypatch):
-    """单条规则抛异常仍被兜底（不得弱化既有处理），且**不**被误判为断连。"""
+    """A single rule throwing is still contained (existing handling must not be weakened), and is
+    **not** misjudged as a disconnect."""
     m = engine
 
     class BoomRule:
@@ -454,15 +471,15 @@ def test_rule_exception_still_contained(engine, monkeypatch):
     exc = asyncio.run(_run(m, target_listens=1))
 
     assert exc is None
-    assert sleeps == [], "规则异常被误判为断连、触发了重连"
+    assert sleeps == [], "rule exception was misjudged as disconnect, triggering a reconnect"
     assert fake.created == 1
     assert m.last_seen.get("humanoid-010") is not None
 
 
-# ---------------------------------------------------------------- amain 隔离
+# ---------------------------------------------------------------- amain isolation
 
 def test_isolate_swallows_crash_of_one_line(engine):
-    """`_isolate` 让一条驱动线崩溃后**不影响兄弟**，且不吞 CancelledError。"""
+    """`_isolate` lets one driver line crash without affecting siblings, and doesn't swallow CancelledError."""
     m = engine
 
     async def boom():
@@ -480,11 +497,11 @@ def test_isolate_swallows_crash_of_one_line(engine):
         )
 
     results = asyncio.run(scenario())
-    assert results == [None, "alive"], f"兄弟协程被连累: {results}"
+    assert results == [None, "alive"], f"sibling coroutine was dragged down: {results}"
 
 
 def test_isolate_reraises_cancelled_error(engine):
-    """`_isolate` **不得**吞 `CancelledError`，否则进程关不干净。"""
+    """`_isolate` must **not** swallow `CancelledError`, otherwise the process can't shut down cleanly."""
     m = engine
 
     async def hang():

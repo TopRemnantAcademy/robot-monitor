@@ -1,12 +1,13 @@
-"""通知器单测 —— 不联网，用假 urlopen 拦截请求。
+"""Notifier unit tests — no network, intercepts requests with a fake urlopen.
 
-⚠️ 本文件原为「手工脚本」形态：14 条断言写在 `run()` 里靠 `check()` 计数，
-pytest 收集到 **0 个用例**，永远不会在 CI 中执行，却因文件名 `test_*.py`
-给人"有测试覆盖"的假象。已改写为真正的 pytest 用例，断言逐条保留。
-（发现经过：回收分支后 `pytest alert_engine/tests/ -q` 仍是 11 passed，
-与新增文件前完全一致 —— 数字没变就是信号。）
+⚠️ This file was originally a "hand-rolled script": 14 assertions lived inside `run()` and were
+counted by `check()`, so pytest collected **0 tests** — it would never run in CI, yet the
+filename `test_*.py` gave the false impression of "test coverage". Rewritten as real pytest
+cases, with every assertion preserved.
+(How it was found: after merging the branch, `pytest alert_engine/tests/ -q` still showed
+11 passed — identical to before the new files were added. That unchanged number was the signal.)
 
-跑法：
+Run with:
     cd alert_engine && python -m pytest tests/ -q
 """
 
@@ -20,18 +21,18 @@ import pytest
 from app.notifiers.webhook import WebhookNotifier, build_notifier
 from app.rules.base import Alert
 
-# ---------------------------------------------------------------- 夹具
+# ---------------------------------------------------------------- fixtures
 
 
 def make_alert(sev: int = 3, rule: str = "motor_temp") -> Alert:
     return Alert(robot_id="humanoid-001", rule_id=rule, severity=sev,
-                 message="关节 3 温度 82.1°C 超过 75°C",
+                 message="Joint 3 temperature 82.1°C exceeds 75°C",
                  detail={"joint": 3, "temp": 82.1})
 
 
 class FakeResp:
-    """urllib.request.urlopen 返回的是 `with ... as resp` 用的上下文管理器，
-    故 status/read() 必须挂在 `__enter__` 的返回值上，而不是假对象本身。"""
+    """urllib.request.urlopen returns a context manager used as `with ... as resp`,
+    so status/read() must hang off the `__enter__` return value, not the fake object itself."""
 
     def __init__(self, body: bytes, status: int = 200):
         self._body, self.status = body, status
@@ -56,15 +57,14 @@ class SettingsWecom:
     alert_webhook_min_severity = 2
 
 
-# ------------------------------------------------- 1. payload 形状
-# 钉钉 vs 企微 的关键字段不同，写错会被对方 400
-
+# ------------------------------------------------- 1. payload shape
+# DingTalk vs WeCom differ in key fields; getting it wrong gets a 400 from the peer
 
 def test_dingtalk_payload_uses_markdown_text():
     dd = WebhookNotifier("dingtalk", "http://x").build_payload(make_alert())
     assert dd["msgtype"] == "markdown"
     assert "text" in dd["markdown"] and "content" not in dd["markdown"]
-    assert dd["markdown"]["title"].startswith("[严重]")
+    assert dd["markdown"]["title"].startswith("[Critical]")
 
 
 def test_wecom_payload_uses_markdown_content():
@@ -79,8 +79,7 @@ def test_generic_payload_passes_original_fields():
     assert gen["severity"] == 3
 
 
-# ------------------------------------------------- 2. severity 门槛
-
+# ------------------------------------------------- 2. severity threshold
 
 def test_below_min_severity_is_not_sent_and_issues_no_request():
     n = WebhookNotifier("generic", "http://x", min_severity=3)
@@ -88,14 +87,13 @@ def test_below_min_severity_is_not_sent_and_issues_no_request():
                     return_value=FakeResp(b'{"errcode":0}')) as m:
         ok2 = asyncio.run(n.send(make_alert(sev=2)))
         ok3 = asyncio.run(n.send(make_alert(sev=3)))
-    assert ok2 is False          # severity<3 不推送
-    assert ok3 is True           # severity==3 推送
-    assert m.call_count == 1     # 门槛过滤时根本不发请求
+    assert ok2 is False          # severity<3 not pushed
+    assert ok3 is True           # severity==3 pushed
+    assert m.call_count == 1     # threshold filter issues no request at all
 
 
-# ------------------------------------------------- 3. 业务码判定
-# HTTP 200 但 errcode!=0 必须视为失败
-
+# ------------------------------------------------- 3. business-code judgement
+# HTTP 200 but errcode!=0 must be treated as a failure
 
 def test_errcode_nonzero_is_treated_as_failure():
     with mock.patch("urllib.request.urlopen",
@@ -109,18 +107,17 @@ def test_errcode_zero_is_treated_as_success():
         assert asyncio.run(WebhookNotifier("dingtalk", "http://x").send(make_alert())) is True
 
 
-# ------------------------------------------------- 4. 异常不外抛
-# 通知失败不能拖垮告警引擎
-
+# ------------------------------------------------- 4. exceptions never escape
+# A notification failure must not bring down the alert engine
 
 def test_network_error_is_swallowed_and_returns_false():
     with mock.patch("urllib.request.urlopen", side_effect=OSError("conn refused")):
-        # 若实现改成向外抛，本用例会直接失败（而不是被静默忽略）
+        # If the implementation were changed to raise outward, this case would fail outright
+        # (instead of being silently ignored)
         assert asyncio.run(WebhookNotifier("generic", "http://x").send(make_alert())) is False
 
 
-# ------------------------------------------------- 5. 未配置则整条链路跳过
-
+# ------------------------------------------------- 5. unconfigured → whole chain skipped
 
 def test_blank_url_builds_no_notifier():
     assert build_notifier(SettingsBlank()) is None
@@ -133,9 +130,8 @@ def test_configured_url_wires_kind_and_threshold():
     assert got.min_severity == 2
 
 
-# ------------------------------------------------- 6. 非法 kind 立即报错
-# 防拼错后静默不生效
-
+# ------------------------------------------------- 6. illegal kind errors immediately
+# Prevent a typo'd kind from silently doing nothing
 
 def test_unknown_kind_raises_value_error():
     with pytest.raises(ValueError):

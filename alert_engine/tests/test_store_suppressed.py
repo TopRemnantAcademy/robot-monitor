@@ -1,21 +1,22 @@
-"""订单 35 —— 被抑制告警**必须落库**（`store.save_suppressed`）。
+"""Order 35 —— suppressed alerts **must be persisted** (`store.save_suppressed`).
 
-为什么这条测试是订单 35 的后端核心
+Why this test is the backend core of Order 35
 ----------------------------------
-订单 30 给出了抑制的判定与 `InhibitionRecord` 凭证，但它只产出到**日志与指标**为止：
-告警一旦被抑制就 `return`，从不写库。于是 `GET /alerts` 里根本没有这行 ——
-「不静默丢弃」在 REST 层面并未闭环，运维只能在日志系统里回答
-「这条为什么没出去」，告警台上看不到被压住的那条。
+Order 30 gave the suppression judgement and the `InhibitionRecord` voucher, but it only produced
+up to **logs and metrics**: once an alert was suppressed it `return`ed and never wrote to the DB.
+So `GET /alerts` had no such row at all — "don't silently drop" was not closed at the REST layer;
+ops could only answer "why didn't this one go out" inside the log system, not on the alert board.
 
-本文件钉住三件事（每一条都是"写错就退化"的点）：
-  1. 被抑制的告警**进了库**，且 `suppressed=TRUE` + `suppressed_by=根因规则`；
-  2. 它**不发** `robot:alerts` —— 抑制的语义就是"不推给看板实时流"，
-     若也发出去，抑制层在观感上等于不存在；
-  3. `detail` 里带齐取证字段（reason / severity 对比 / ts），
-     使"为什么被压"不必再翻日志。
+This file nails down three things (each a "degrades if written wrong" point):
+  1. The suppressed alert **enters the DB**, with `suppressed=TRUE` + `suppressed_by=<root-cause rule>`;
+  2. It does **not** PUBLISH to `robot:alerts` — the semantics of suppression is "don't push to the
+     live dashboard stream"; if it were also published, the suppression layer would visually not exist;
+  3. `detail` carries the full forensic fields (reason / severity comparison / ts), so "why was it
+     suppressed" doesn't require digging through logs again.
 
-被测对象是真 `store.save_suppressed`，只把连接入口换成内存记录器 ——
-不断言替身逻辑（与 test_store_metrics.py 同一纪律）。
+The object under test is the real `store.save_suppressed`; only the connection entry points are
+swapped for in-memory recorders — the fake's logic is not asserted (same discipline as
+test_store_metrics.py).
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ from app.store import save_suppressed
 
 
 class _RecordingConn:
-    """记下 (sql, args)，并按 SUPPRESSED_INSERT_SQL 的列序回填一个自增 id。"""
+    """Records (sql, args) and back-fills an auto-increment id in the SUPPRESSED_INSERT_SQL column order."""
 
     def __init__(self, sink: list):
         self._sink = sink
@@ -63,7 +64,7 @@ class _Pool:
 
 
 class _GhostRedis:
-    """发布会被记录下来 —— 本文件用它做**反向**断言（必须一次都没发）。"""
+    """Publish is recorded — this file uses it for the **reverse** assertion (must never be sent)."""
 
     def __init__(self, sent: list):
         self._sent = sent
@@ -74,7 +75,7 @@ class _GhostRedis:
 
 @pytest.fixture()
 def store_env(monkeypatch):
-    """把 `app.store` 的池与 Redis 换成内存件，返回 (module, sql_sink, pub_sink)。"""
+    """Swap `app.store`'s pool and Redis for in-memory ones; return (module, sql_sink, pub_sink)."""
     import app.store as store
 
     sql_sink: list = []
@@ -92,12 +93,12 @@ def store_env(monkeypatch):
 
 
 def _alert() -> Alert:
-    """被压住的那条：battery_low(sev2)，同机有 motor_temp(sev3) 在活跃。"""
+    """The suppressed one: battery_low(sev2), with motor_temp(sev3) active on the same robot."""
     return Alert(
         robot_id="humanoid-001",
         rule_id="battery_low",
         severity=2,
-        message="电量 17.4% 低于 20%",
+        message="Battery 17.4% below 20%",
         detail={"battery_pct": 17.4},
     )
 
@@ -114,49 +115,52 @@ def _record() -> InhibitionRecord:
     )
 
 
-# ---------------------------------------------------------- 1. 落库
+# ---------------------------------------------------------- 1. persistence
 
 def test_suppressed_alert_is_persisted(store_env):
-    """核心：抑制记录写进 robot_alert，且有 suppressed / suppressed_by 两个标记。"""
+    """Core: the suppression record is written to robot_alert, with both suppression markers."""
     _store, sql_sink, _pub = store_env
     run(save_suppressed(_alert(), _record()))
 
-    assert len(sql_sink) == 1, "被抑制告警必须落库一次"
+    assert len(sql_sink) == 1, "a suppressed alert must persist exactly once"
     sql, args = sql_sink[0]
-    # 断言语义而不是整段 SQL 文本相等：整段相等会让改注释/换行就红。
+    # Assert semantics, not the entire SQL text equality: full-text equality would go red on a
+    # comment or whitespace change.
     assert "INSERT INTO robot_alert" in sql
-    assert "suppressed, suppressed_by" in sql, "INSERT 必须显式写两个抑制标记列"
-    assert "TRUE" in sql, "suppressed 必须由 SQL 置 TRUE（不是靠列默认值）"
+    assert "suppressed, suppressed_by" in sql, "INSERT must write both suppression marker columns explicitly"
+    assert "TRUE" in sql, "suppressed must be set TRUE by SQL (not rely on the column default)"
 
-    # 参数位序与列序一一对应（robot_id, rule_id, severity, message, detail, suppressed_by）
+    # Argument position order matches the column order
+    # (robot_id, rule_id, severity, message, detail, suppressed_by)
     assert args[1] == "humanoid-001"
     assert args[2] == "battery_low"
     assert args[3] == 2
-    assert args[4] == "电量 17.4% 低于 20%"
-    assert args[6] == "motor_temp", "suppressed_by 必须是抑制源规则"
+    assert args[4] == "Battery 17.4% below 20%"
+    assert args[6] == "motor_temp", "suppressed_by must be the suppression source rule"
 
 
 def test_suppressed_alert_does_not_publish(store_env):
-    """抑制项**不发** robot:alerts —— 否则抑制层在观感上等于不存在。
+    """A suppressed item does **not** publish to robot:alerts — otherwise the suppression layer
+    visually does not exist.
 
-    这条是「不推给看板实时流」的唯一机器化保证：`save()` 会 PUBLISH，
-    `save_suppressed()` 不会。两者一旦被合并（图省事复用 `save()`），
-    这里立刻红。
-    """
+    This is the only mechanized guarantee of "don't push to the live dashboard stream": `save()`
+    PUBLISHes while `save_suppressed()` does not. The moment the two are merged (reusing `save()`
+    for convenience), this goes red immediately."""
     _store, _sql, pub_sink = store_env
     run(save_suppressed(_alert(), _record()))
-    assert pub_sink == [], "被抑制告警不得发布到 robot:alerts"
+    assert pub_sink == [], "a suppressed alert must not be published to robot:alerts"
 
 
 def test_detail_carries_forensic_fields(store_env):
-    """detail 里带齐取证字段：reason / severity 对比 / ts —— 事后无需翻日志。"""
+    """detail carries the full forensic fields: reason / severity comparison / ts — no log dig needed
+    afterwards."""
     _store, sql_sink, _pub = store_env
     run(save_suppressed(_alert(), _record()))
 
     detail = json.loads(sql_sink[0][1][5])
-    # 规则自带的 detail 必须保留（`||` 合并而非覆盖）
+    # The rule's own detail must be preserved (`||` merge, not overwrite)
     assert detail["battery_pct"] == 17.4
-    # 抑制凭证
+    # Suppression voucher
     assert detail["suppressed_reason"] == "severity"
     assert detail["suppressed_source_rule"] == "motor_temp"
     assert detail["suppressed_source_severity"] == 3
@@ -164,10 +168,11 @@ def test_detail_carries_forensic_fields(store_env):
     assert detail["suppressed_ts_ms"] == 1760000000000
 
 
-# ---------------------------------------------------------- 2. 失败可观测
+# ---------------------------------------------------------- 2. failures observable
 
 def test_insert_failure_increments_store_errors(monkeypatch):
-    """落库失败必须计数 —— 与 `save()` 同一纪律，否则"库里没有"与"没这条告警"不可分辨。"""
+    """A persistence failure must be counted — same discipline as `save()`, otherwise "not in DB"
+    and "no such alert" are indistinguishable."""
     import re
 
     import app.store as store
@@ -187,9 +192,9 @@ def test_insert_failure_increments_store_errors(monkeypatch):
     m = re.search(r"^robot_alert_store_errors_total ([0-9.eE+-]+)$", text, re.M)
     before = float(m.group(1)) if m else 0.0
 
-    run(save_suppressed(_alert(), _record()))          # 必须不抛（旁路语义）
+    run(save_suppressed(_alert(), _record()))          # must not raise (bypass semantics)
 
     text = generate_latest(metrics.registry).decode()
     m = re.search(r"^robot_alert_store_errors_total ([0-9.eE+-]+)$", text, re.M)
     after = float(m.group(1)) if m else 0.0
-    assert after == before + 1, "save_suppressed 失败未计入 store_errors"
+    assert after == before + 1, "save_suppressed failure not counted in store_errors"

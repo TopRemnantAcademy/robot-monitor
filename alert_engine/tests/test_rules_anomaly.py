@@ -1,4 +1,4 @@
-"""AnomalyRule 단위 테스트 (stateless z-score detector)."""
+"""AnomalyRule unit tests (stateless z-score detector)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from app.rules.anomaly import AnomalyRule
 
 
 def _window(values, robot_id="humanoid-001", joint="left_shoulder_pitch"):
-    """values: list[float] — battery_pct 와 해당 joint 온도를 동일 시계열로 구성."""
+    """values: list[float] — build battery_pct and the given joint temperature as the same time series."""
     w = deque(maxlen=settings.window_maxlen)
     for v in values:
         w.append(
@@ -24,7 +24,7 @@ def _window(values, robot_id="humanoid-001", joint="left_shoulder_pitch"):
 
 
 def test_no_alert_when_stable():
-    # 50 개의 안정적 값 (~40 ± 0.3) -> std 가 작아 anomaly_min_std 미만이거나 z 미도달
+    # 50 stable values (~40 ± 0.3) → std is small, below anomaly_min_std or z not reached
     vals = [40.0 + 0.2 * (i % 3) for i in range(50)]
     rule = AnomalyRule()
     state = {
@@ -37,7 +37,7 @@ def test_no_alert_when_stable():
 
 
 def test_alert_on_sudden_spike():
-    # 정상 ~40 에서 마지막 샘플이 90 으로 돌변 -> z 가 임계 초과
+    # Normal ~40 then the last sample jumps to 90 → z exceeds threshold
     vals = [40.0 + 0.2 * (i % 3) for i in range(49)] + [90.0]
     rule = AnomalyRule()
     state = {
@@ -55,7 +55,7 @@ def test_alert_on_sudden_spike():
 
 
 def test_no_alert_below_sample_threshold():
-    # window 가 너무 작으면 평가 자체를 하지 않음
+    # If the window is too small, evaluation is skipped entirely
     rule = AnomalyRule()
     small = deque(
         [{"robot_id": "humanoid-001", "battery_pct": 40.0 + i, "max_joint_temp": 40.0 + i,
@@ -67,7 +67,7 @@ def test_no_alert_below_sample_threshold():
 
 
 def test_alert_uses_joint_temperature_series():
-    # joint_temperatures 의 특정 관절에서만 돌변 -> metric 이 해당 관절임
+    # Sudden jump only in a specific joint of joint_temperatures → the metric is that joint
     vals = [50.0 + 0.1 * (i % 2) for i in range(49)] + [120.0]
     rule = AnomalyRule()
     state = {

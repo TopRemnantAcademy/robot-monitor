@@ -1,19 +1,20 @@
-"""订单 04（Issue #4）验收测试：4 条规则 / offline ticker / 去重幂等 / 落库+发布。
+"""Order 04 (Issue #4) acceptance tests: 4 rules / offline ticker / dedup idempotence / persist + publish.
 
-本文件补的是**此前测不到的缺口**：仓库现有用例覆盖的是告警闭环层
-（抑制顺序、静默顺序、落库失败计数），**没有一条**真正喂遥测进 4 个规则、
-也没有一条证明去重器幂等或 store 真的写了 robot_alert 并发布 robot:alerts。
+This file fills a gap **previously untested**: the repo's existing cases cover the alert
+closed-loop layer (inhibition order, silence order, persistence-failure counting), but **not a
+single one** actually feeds telemetry into the 4 rules, nor proves the deduplicator is
+idempotent or that store really writes robot_alert and publishes robot:alerts.
 
-被测对象是真实实现，不是替身：
-- `should_emit` → 真 `app.deduplicator`，配 fakeredis 顶替 Redis；
-  `SET NX` 是 Redis 服务端语义，**必须由真 Redis 语义**（fakeredis）来验，
-  进程内的 dict 替身测不出「幂等」。
-- `save` → 真 `app.store`，配「记录 SQL 的假连接 + 记录 PUBLISH 的假 Redis」，
-  断言的是 SQL 文本、参数序列与频道名，而非「函数存在」。
-- `ticker` → 真 `app.main.ticker`，跑**真一轮**（不 mock 掉判定），
-  再把 `last_seen` 往前拨 11s 模拟「10s 无遥测」。
+The object under test is the real implementation, not a fake:
+- `should_emit` → real `app.deduplicator` with fakeredis standing in for Redis;
+  `SET NX` is Redis-server-side semantics that **must** be verified by real Redis semantics
+  (fakeredis) — an in-process dict fake can't test "idempotent".
+- `save` → real `app.store` with "SQL-recording fake connection + PUBLISH-recording fake Redis",
+  asserting SQL text, argument sequence, and channel name rather than "the function exists".
+- `ticker` → real `app.main.ticker`, running **one real round** (not mocking away the judgement),
+  then dialing `last_seen` back 11s to simulate "10s without telemetry".
 
-依据：`orders/04-alert-engine.md` §验收标准、`spec/02` §3/§3.1/§4/§5。
+Basis: `orders/04-alert-engine.md` §acceptance criteria, `spec/02` §3/§3.1/§4/§5.
 """
 
 from __future__ import annotations
@@ -36,16 +37,17 @@ from app.rules.motor_temp import MotorTempRule
 from app.rules.offline import OfflineRule
 
 
-# ---------------------------------------------------------------- payload 构造
+# ---------------------------------------------------------------- payload construction
 
 def payload(rid: str = "humanoid-001", *, temp: float = 40.0,
             batt: float = 80.0, angle: float = 0.0,
             torque: float = 1.0) -> dict:
-    """按 spec/01 §3 的字段名造一条遥测（24 关节键名取自 simulator 的标准键表）。
+    """Build one telemetry record per spec/01 §3 field names (24-joint key names from the
+    simulator's standard key table).
 
-    只造 1 个关节的字典即可：4 条规则都按「字典里有什么键就判什么键」工作，
-    `motor_temp` 取 max、`joint_stuck` 取 `state` 的键集，不依赖固定 24 个。
-    """
+    Building just one joint's dict suffices: all 4 rules work on "judge whatever keys are present",
+    `motor_temp` takes max, `joint_stuck` takes `state`'s key set — they don't depend on a fixed
+    24 joints."""
     return {
         "robot_id": rid,
         "status_code": 1,
@@ -60,33 +62,39 @@ def payload(rid: str = "humanoid-001", *, temp: float = 40.0,
     }
 
 
-# ---------------------------------------------------------------- 1. 四规则齐全
+# ---------------------------------------------------------------- 1. all five rules present
 
 def test_all_four_rules_exist_and_inherit_base():
-    """验收标准 1：4 个规则类齐全且继承 Rule 基类（joint_stuck 不得遗漏）。
+    """Acceptance criterion 1: all rule classes present and inherit the Rule base (joint_stuck
+    must not be omitted).
 
-    直接对着 `app.main.RULES` 断言 —— 那才是引擎**实际调度**的清单；
-    只 import 四个类不断言注册表，漏接一个也照样绿。
-    """
+    Assert directly against `app.main.RULES` — that's the list the engine **actually schedules**;
+    importing the rule classes without asserting the registry would stay green even if one were
+    dropped.
+
+    NOTE: the registry carries five rules (motor_temp / battery_low / joint_stuck / offline /
+    anomaly); anomaly was added after the original "four-rule" wording — this assertion tracks the
+    real registry rather than a stale count."""
     import app.main as m
 
     ids = sorted(r.rule_id for r in m.RULES)
-    assert ids == ["battery_low", "joint_stuck", "motor_temp", "offline"]
+    assert ids == ["anomaly", "battery_low", "joint_stuck", "motor_temp", "offline"]
     for r in m.RULES:
-        assert isinstance(r, Rule), f"{r.rule_id} 未继承 Rule 基类"
-    # severity / 去重窗口与 orders/04 表格逐一对照
+        assert isinstance(r, Rule), f"{r.rule_id} does not inherit the Rule base"
+    # severity / dedup window checked one-by-one against the orders/04 table and config
     assert {r.rule_id: (r.severity, r.dedup_window_s) for r in m.RULES} == {
         "motor_temp": (3, 60),
         "battery_low": (2, 120),
         "offline": (3, 30),
         "joint_stuck": (2, 60),
+        "anomaly": (2, settings.anomaly_dedup_s),
     }
 
 
 # ---------------------------------------------------------------- 2. motor_temp
 
 def test_motor_temp_needs_three_consecutive_samples():
-    """motor_temp：>75°C 且**连续 ≥3 采样点**才触发；不足 3 点不触发。"""
+    """motor_temp: triggers only on >75°C AND **≥3 consecutive samples**; fewer than 3 does not trigger."""
     rule = MotorTempRule()
 
     hot = payload(temp=82.0)
@@ -94,7 +102,7 @@ def test_motor_temp_needs_three_consecutive_samples():
 
     w.append(payload(temp=82.0))
     w.append(payload(temp=82.0))
-    assert rule.evaluate(hot, w) is None, "仅 2 个采样点不应触发（要求 ≥3）"
+    assert rule.evaluate(hot, w) is None, "only 2 samples should not trigger (requires ≥3)"
 
     w.append(hot)
     alert = rule.evaluate(hot, w)
@@ -104,31 +112,32 @@ def test_motor_temp_needs_three_consecutive_samples():
 
 
 def test_motor_temp_threshold_is_strict_and_resets_on_gap():
-    """恰等于 75°C **不**触发（规范是 `>` 而非 `>=`）；中间夹一个低温点要重新计数。"""
+    """Exactly 75°C does **not** trigger (spec is `>` not `>=`); a low-temp point in the middle
+    must restart counting."""
     rule = MotorTempRule()
     w = deque(maxlen=settings.window_maxlen)
 
     at_threshold = payload(temp=75.0)
     for _ in range(3):
         w.append(at_threshold)
-    assert rule.evaluate(at_threshold, w) is None, "75°C 不应触发（严格大于阈值）"
+    assert rule.evaluate(at_threshold, w) is None, "75°C must not trigger (strictly greater than threshold)"
 
     w.clear()
     w.append(payload(temp=80.0))
-    w.append(payload(temp=30.0))          # 中间回落到正常温度
+    w.append(payload(temp=30.0))          # dips back to normal temperature in the middle
     w.append(payload(temp=80.0))
     assert rule.evaluate(payload(temp=80.0), w) is None, \
-        "最近 3 点里含一个正常温度，说明不是「持续」过热"
+        "a normal temp among the last 3 means it's not 'sustained' overheating"
 
 
 # ---------------------------------------------------------------- 3. battery_low
 
 def test_battery_low_triggers_below_threshold_only():
-    """battery_low：<15% 触发（severity 2 / 去重 120s），≥15% 不触发。"""
+    """battery_low: triggers below 15% (severity 2 / dedup 120s); ≥15% does not trigger."""
     rule = BatteryLowRule()
     w = deque(maxlen=settings.window_maxlen)
 
-    assert rule.evaluate(payload(batt=15.0), w) is None, "15.0% 不触发（严格小于）"
+    assert rule.evaluate(payload(batt=15.0), w) is None, "15.0% does not trigger (strictly less than)"
     assert rule.evaluate(payload(batt=40.0), w) is None
 
     alert = rule.evaluate(payload(batt=9.3), w)
@@ -139,7 +148,8 @@ def test_battery_low_triggers_below_threshold_only():
 
 
 def test_battery_low_ignores_missing_field():
-    """字段缺失不得抛异常（后端 schema 漂移时引擎要活下来，而不是崩掉整条消费线）。"""
+    """Missing fields must not raise (when the backend schema drifts the engine must survive, not
+    crash the whole consumption line)."""
     rule = BatteryLowRule()
     assert rule.evaluate({"robot_id": "humanoid-001"}, deque()) is None
 
@@ -147,12 +157,13 @@ def test_battery_low_ignores_missing_field():
 # ---------------------------------------------------------------- 4. joint_stuck
 
 def test_joint_stuck_requires_still_angle_but_high_torque():
-    """joint_stuck：5s 窗内角度方差≈0 且平均扭矩超阈值；动起来就不算卡死。"""
+    """joint_stuck: within a 5s window the angle variance≈0 and mean torque exceeds threshold; once
+    it moves it's not stuck."""
     rule = JointStuckRule()
     n = rule.need_samples
-    assert n == 50, "5s × 10Hz 应为 50 个采样点"
+    assert n == 50, "5s × 10Hz should be 50 samples"
 
-    # (a) 角度完全不动 + 扭矩 10 > 8.0 → 卡死
+    # (a) angle completely still + torque 10 > 8.0 → stuck
     w = deque((payload(angle=0.7, torque=10.0) for _ in range(n)),
               maxlen=settings.window_maxlen)
     alert = rule.evaluate(payload(angle=0.7, torque=10.0), w)
@@ -160,13 +171,13 @@ def test_joint_stuck_requires_still_angle_but_high_torque():
     assert alert.severity == 2
     assert alert.detail["variance"] == 0.0
 
-    # (b) 角度在动（方差远大于 1e-6）→ 不触发
+    # (b) angle moving (variance far above 1e-6) → no trigger
     import math
     w2 = deque((payload(angle=math.sin(i), torque=10.0) for i in range(n)),
                maxlen=settings.window_maxlen)
     assert rule.evaluate(payload(angle=0.0, torque=10.0), w2) is None
 
-    # (c) 角度不动但扭矩未超阈值（没在发力，可能只是停着）→ 不触发
+    # (c) angle still but torque below threshold (not exerting force, maybe just parked) → no trigger
     w3 = deque((payload(angle=0.7, torque=3.0) for _ in range(n)),
                maxlen=settings.window_maxlen)
     assert rule.evaluate(payload(angle=0.7, torque=3.0), w3) is None
@@ -175,11 +186,11 @@ def test_joint_stuck_requires_still_angle_but_high_torque():
 # ---------------------------------------------------------------- 5. offline
 
 def test_offline_rule_semantics():
-    """offline：>10s 无遥测触发；从未上报（last_seen=None）同样触发。"""
+    """offline: no telemetry for >10s triggers; never reported (last_seen=None) also triggers."""
     rule = OfflineRule()
 
     assert rule.evaluate({"robot_id": "humanoid-001", "last_seen": time.time()},
-                         deque()) is None, "刚上报过不应判离线"
+                         deque()) is None, "just reported should not be judged offline"
 
     fresh = rule.evaluate({"robot_id": "humanoid-001",
                            "last_seen": time.time() - 11.0}, deque())
@@ -187,16 +198,15 @@ def test_offline_rule_semantics():
     assert fresh.detail["age_s"] >= 10.0
 
     never = rule.evaluate({"robot_id": "humanoid-002", "last_seen": None}, deque())
-    assert never is not None, "从未上线也必须能判离线"
+    assert never is not None, "never-online must also be judgeable as offline"
 
 
 def test_offline_has_no_redis_expiry_dependency():
-    """验收标准 2：代码中**不出现**对 Redis 过期事件的依赖。
+    """Acceptance criterion 2: the code must **not** depend on Redis key-expiry events.
 
-    静态断言 + 真实形态断言双保险：
-      1) offline 规则与 main 的判定路径里不出现 keyspace/expired 相关 API；
-      2) offline 规则**不碰 Redis**（get_redis 在 app.rules.offline 不可见）。
-    """
+    Static assertion + real-shape assertion, double-checked:
+      1) the offline rule and main's judgement path contain no keyspace/expired related API;
+      2) the offline rule does **not** touch Redis (get_redis is not visible in app.rules.offline)."""
     import ast
     import inspect
     import textwrap
@@ -205,12 +215,11 @@ def test_offline_has_no_redis_expiry_dependency():
     import app.main as main_mod
 
     def code_only(mod) -> str:
-        """只保留可执行代码：剥掉 docstring 与 `#` 注释。
+        """Keep only executable code: strip docstrings and `#` comments.
 
-        必要性：`rules/offline.py` 与 `main.ticker()` 的**注释里刻意写了**
-        "notify-keyspace-events 默认关闭"来解释为何不用过期事件；
-        直接对原文做字符串扫描会把「说明为什么禁用」误判成「依赖它」。
-        """
+        Necessity: `rules/offline.py` and `main.ticker()` **deliberately write in their comments**
+        "notify-keyspace-events is off by default" to explain why expiry events aren't used;
+        scanning the raw text would misjudge "why it's disabled" as "it depends on it"."""
         src = inspect.getsource(mod)
         tree = ast.parse(textwrap.dedent(src))
         for node in ast.walk(tree):
@@ -227,17 +236,16 @@ def test_offline_has_no_redis_expiry_dependency():
     src = code_only(offline_mod) + "\n" + code_only(main_mod.ticker)
     for forbidden in ("notify-keyspace-events", "keyspace", "__keyevent@",
                       "expired", "get_redis", "psubscribe"):
-        assert forbidden not in src, f"offline 判定路径出现了 Redis 过期事件依赖：{forbidden}"
+        assert forbidden not in src, f"offline judgement path has a Redis key-expiry dependency: {forbidden}"
 
-    assert not hasattr(offline_mod, "get_redis"), "offline 规则不应自行连 Redis"
+    assert not hasattr(offline_mod, "get_redis"), "offline rule should not connect to Redis itself"
 
 
 def test_offline_ticker_only_uses_in_memory_last_seen(engine, monkeypatch):
-    """真跑一轮 ticker：内存 last_seen 过期 → 出 offline；恢复上报 → 不再出。
+    """Run one real ticker round: in-memory last_seen expiry → offline; resume reporting → no more.
 
-    这里**不 mock 掉规则判定**，只把 emit 的出口（save）与 DB 更新换成记录器，
-    断言的是 ticker 的判定与在线状态机本身。
-    """
+    Here we **don't mock the rule judgement**, only swap emit's exit (save) and DB update for
+    recorders, asserting the ticker's judgement and online-state machine itself."""
     import app.main as m
 
     saved: list = []
@@ -250,47 +258,47 @@ def test_offline_ticker_only_uses_in_memory_last_seen(engine, monkeypatch):
 
     monkeypatch.setattr(m, "save", fake_save)
     monkeypatch.setattr(m, "update_online", fake_update_online)
-    # 只保留一台机器人，避免整表 100 台每轮都 spawn 一批落库任务
-    # settings.robot_ids 是只读 property（config.py:robot_ids），不能 setattr；
-    # 但 ticker 读的是 `settings.robot_ids`，故整体替换 settings 上该属性的可写影子。
+    # Keep only one robot, to avoid the whole-table 100-robot per-round spawn of persistence tasks.
+    # settings.robot_ids is a read-only property (config.py:robot_ids) and can't be setattr;
+    # but ticker reads `settings.robot_ids`, so replace the writable shadow of that attribute on settings.
     monkeypatch.setattr(type(m.settings), "robot_ids",
                         property(lambda self: ["humanoid-001"]))
-    # 一轮一轮地手动驱动：ticker 是 `while True: sleep(interval); <body>`，
-    # 若 interval=0 会疯狂空转，出成百条告警、断言失去意义。
-    # 这里把 interval 设为「比 sleep 长」，用一个 sleep 精确放行**恰好一轮**。
+    # Drive round by round manually: ticker is `while True: sleep(interval); <body>`;
+    # if interval=0 it spins furiously, emitting hundreds of alerts and losing assertion meaning.
+    # Here set interval "longer than one sleep" and use one sleep to release **exactly one round**.
     monkeypatch.setattr(m.settings, "tick_interval_s", 0.2)
 
     async def one_round():
         import asyncio as _a
         task = _a.create_task(m.ticker())
-        await _a.sleep(0.3)      # interval 0.2 → 只跑完一轮，第二轮还在 sleep 里
+        await _a.sleep(0.3)      # interval 0.2 → only one round completes, the 2nd is still sleeping
         task.cancel()
         try:
             await task
         except _a.CancelledError:
             pass
-        if m._tasks:             # 放出 spawn 出去的落库/更新任务
+        if m._tasks:             # release the spawned persistence/update tasks
             await _a.gather(*list(m._tasks), return_exceptions=True)
 
-    # (a) 11s 前上报过 → 本轮判离线
+    # (a) reported 11s ago → judged offline this round
     engine.last_seen["humanoid-001"] = time.time() - 11.0
     engine.online_state["humanoid-001"] = True
     run(one_round())
     assert [a.rule_id for a in saved] == ["offline"]
-    assert engine.online_state["humanoid-001"] is False, "ticker 必须同步维护在线状态"
+    assert engine.online_state["humanoid-001"] is False, "ticker must maintain online state in sync"
 
-    # (b) 恢复上报（last_seen=now）→ 不再判离线
+    # (b) resume reporting (last_seen=now) → no more offline alert
     saved.clear()
     engine.last_seen["humanoid-001"] = time.time()
     run(one_round())
-    assert saved == [], "恢复上报后不应再出离线告警"
+    assert saved == [], "after resume reporting there should be no more offline alert"
     assert engine.online_state["humanoid-001"] is True
 
 
-# ---------------------------------------------------------------- 6. 去重幂等
+# ---------------------------------------------------------------- 6. dedup idempotence
 
 class _FakeRedis:
-    """fakeredis 的薄包装：只暴露本用例真正用到的 `set(nx=..., ex=...)`。"""
+    """Thin wrapper over fakeredis: only exposes the `set(nx=..., ex=...)` this case really uses."""
 
     def __init__(self):
         self._r = fakeredis.FakeRedis(decode_responses=True)
@@ -311,7 +319,8 @@ def fake_redis(monkeypatch):
 
 
 def test_dedup_is_idempotent_within_window(fake_redis):
-    """验收标准 3：同一窗口内重复消息只放行一次（不重复写库）。"""
+    """Acceptance criterion 3: repeated messages within the same window pass through only once
+    (no duplicate writes)."""
     alert = MotorTempRule().evaluate(
         payload(temp=82.0),
         deque((payload(temp=82.0) for _ in range(3)), maxlen=settings.window_maxlen))
@@ -322,22 +331,22 @@ def test_dedup_is_idempotent_within_window(fake_redis):
     third = run(deduplicator.should_emit(alert, window))
 
     assert [first, second, third] == [True, False, False], \
-        "窗口内重复消息必须只放行第一条"
+        "repeated messages within the window must pass only the first one"
 
 
 def test_dedup_key_shape_and_ttl(fake_redis):
-    """去重 Key 形状 `alert:dedup:{robot_id}:{rule_id}`，TTL = 窗口秒数。"""
+    """Dedup key shape `alert:dedup:{robot_id}:{rule_id}`, TTL = window seconds."""
     alert = BatteryLowRule().evaluate(payload(batt=9.0), deque())
     run(deduplicator.should_emit(alert, BatteryLowRule().dedup_window_s))
 
     key = "alert:dedup:humanoid-001:battery_low"
     assert fake_redis._r.exists(key) == 1
     ttl = fake_redis._r.ttl(key)
-    assert 0 < ttl <= 120, f"TTL 应为去重窗口（120s），实际 {ttl}"
+    assert 0 < ttl <= 120, f"TTL should be the dedup window (120s), actual {ttl}"
 
 
 def test_dedup_is_per_robot_and_per_rule(fake_redis):
-    """去重粒度是 (robot_id, rule_id)：换一台/换一条规则必须能各自发出。"""
+    """Dedup granularity is (robot_id, rule_id): a different robot / a different rule must each pass."""
     a1 = BatteryLowRule().evaluate(payload("humanoid-001", batt=9.0), deque())
     a2 = BatteryLowRule().evaluate(payload("humanoid-002", batt=9.0), deque())
     a3 = MotorTempRule().evaluate(
@@ -346,12 +355,13 @@ def test_dedup_is_per_robot_and_per_rule(fake_redis):
               maxlen=settings.window_maxlen))
 
     assert run(deduplicator.should_emit(a1, 120)) is True
-    assert run(deduplicator.should_emit(a2, 120)) is True, "不同机器人不应互相压制"
-    assert run(deduplicator.should_emit(a3, 60)) is True, "不同规则不应互相压制"
+    assert run(deduplicator.should_emit(a2, 120)) is True, "different robots must not suppress each other"
+    assert run(deduplicator.should_emit(a3, 60)) is True, "different rules must not suppress each other"
 
 
 def test_dedup_fails_open_when_redis_down(monkeypatch):
-    """Redis 不可达时 fail-open（放行）—— 宁可吵，不可让真故障静默。"""
+    """When Redis is unreachable, fail-open (pass through) — rather make noise than silently drop a
+    real fault."""
     async def boom():
         raise ConnectionError("injected: redis down")
 
@@ -360,10 +370,10 @@ def test_dedup_fails_open_when_redis_down(monkeypatch):
     assert run(deduplicator.should_emit(alert, 120)) is True
 
 
-# ---------------------------------------------------------------- 7. 落库 + 发布
+# ---------------------------------------------------------------- 7. persist + publish
 
 class _RecordingConn:
-    """记录 INSERT 的 SQL 与参数序列，返回一个 alert_id。"""
+    """Records the INSERT SQL and argument sequence, returns an alert_id."""
 
     def __init__(self):
         self.calls: list = []
@@ -401,11 +411,11 @@ class _RecordingRedis:
 
 
 def test_save_writes_robot_alert_and_publishes(monkeypatch):
-    """验收标准 4：写入 `robot_alert` 且 PUBLISH `robot:alerts` 生效。
+    """Acceptance criterion 4: write to `robot_alert` and PUBLISH to `robot:alerts` takes effect.
 
-    断言到 SQL 文本与参数序列：表名、列序、`::jsonb` 转型、RETURNING alert_id
-    全部逐项对照 `app/store.py` 与 `infra/init.sql` 的列定义。
-    """
+    Assertions go down to SQL text and argument sequence: table name, column order, `::jsonb`
+    cast, RETURNING alert_id all checked item-by-item against `app/store.py` and
+    `infra/init.sql` column definitions."""
     import json
     from app.rules.base import Alert
 
@@ -422,35 +432,36 @@ def test_save_writes_robot_alert_and_publishes(monkeypatch):
     monkeypatch.setattr(store_mod, "get_redis", fake_get_redis)
 
     alert = Alert(robot_id="humanoid-001", rule_id="motor_temp", severity=3,
-                  message="电机过热", detail={"joint": "head_yaw", "temp": 82.0})
+                  message="Motor over-temperature", detail={"joint": "head_yaw", "temp": 82.0})
     run(store_mod.save(alert))
 
-    # (1) 落库：一条 INSERT INTO robot_alert，6 个参数，detail 走 jsonb
+    # (1) persist: one INSERT INTO robot_alert, 6 params, detail via jsonb
     assert len(conn.calls) == 1
     sql, args = conn.calls[0]
     assert "INSERT INTO robot_alert" in sql
     assert "RETURNING alert_id" in sql
-    assert "$6::jsonb" in sql, "detail 必须显式转 jsonb（否则 asyncpg 无法推断类型）"
-    assert args[0].tzinfo is not None, "time 必须是带时区的 UTC 时间戳"
-    assert args[1:6] == ("humanoid-001", "motor_temp", 3, "电机过热",
+    assert "$6::jsonb" in sql, "detail must be explicitly cast to jsonb (otherwise asyncpg can't infer the type)"
+    assert args[0].tzinfo is not None, "time must be a timezone-aware UTC timestamp"
+    assert args[1:6] == ("humanoid-001", "motor_temp", 3, "Motor over-temperature",
                          json.dumps({"joint": "head_yaw", "temp": 82.0}))
 
-    # (2) 发布：频道与信封字段
+    # (2) publish: channel and envelope fields
     assert len(redis.published) == 1
     chan, raw = redis.published[0]
     assert chan == "robot:alerts"
     env = json.loads(raw)
-    assert env["type"] if "type" in env else True      # 信封为扁平 JSON（无 type 字段属存量形态）
+    assert env["type"] if "type" in env else True      # envelope is flat JSON (no type field is legacy)
     for field in ("robot_id", "rule_id", "severity", "message", "detail", "ts"):
-        assert field in env, f"信封缺字段 {field}"
+        assert field in env, f"envelope missing field {field}"
     assert env["robot_id"] == "humanoid-001"
     assert env["severity"] == 3
-    # alert_id 来自 RETURNING，前端「确认」按钮靠它寻址
+    # alert_id comes from RETURNING; the frontend "ack" button addresses it
     assert env["alert_id"] == 4242
 
 
 def test_save_publishes_even_if_insert_fails(monkeypatch):
-    """落库失败仍要发布：前端告警流是唯一可见面（两段 try 独立，见 store.py 顶部）。"""
+    """A failed write must still publish: the frontend alert stream is the only visible surface
+    (the two try blocks are independent, see the top of store.py)."""
     from app.rules.base import Alert
 
     class _BrokenPool:
@@ -469,25 +480,25 @@ def test_save_publishes_even_if_insert_fails(monkeypatch):
     monkeypatch.setattr(store_mod, "get_redis", fake_get_redis)
 
     run(store_mod.save(Alert(robot_id="humanoid-001", rule_id="battery_low",
-                             severity=2, message="低电量", detail={"battery_pct": 9.0})))
+                             severity=2, message="Low battery", detail={"battery_pct": 9.0})))
 
-    assert len(redis.published) == 1, "落库失败不该掐掉前端告警流"
+    assert len(redis.published) == 1, "a failed write must not choke the frontend alert stream"
     assert redis.published[0][0] == "robot:alerts"
 
 
-# ---------------------------------------------------------------- 8. 消费线 → 落库
+# ---------------------------------------------------------------- 8. consumption line → persist
 
 def test_consume_line_feeds_window_and_emits(engine, monkeypatch):
-    """消费线：一条真实 payload 进窗口 → 三条约会规则跑一遍 → 命中即走 emit。
+    """Consumption line: one real payload into the window → three stream rules run once → a hit goes to emit.
 
-    用 3 条过热 payload 模拟连续采样，验证 `consume()` 的窗口维护与规则调度。
+    Use 3 overheating payloads to simulate consecutive sampling, verifying `consume()`'s window
+    maintenance and rule scheduling.
 
-    注意（订单 30 后）：本用例断言的是**规则调度与窗口**，不是抑制行为。
-    第 3 条 payload 同时命中 motor_temp(sev3) 与 battery_low(sev2)，
-    而订单 30 的 severity 抑制会正确地把 battery_low 压掉 —— 那是另一层的
-    契约（见 test_severity_inhibition.py）。故此处显式关闭 severity 抑制，
-    只留纯调度路径，避免用「抑制副作用」去测「规则是否被跑到」。
-    """
+    Note (after Order 30): this case asserts the **rule scheduling and window**, not inhibition
+    behavior. The 3rd payload hits both motor_temp(sev3) and battery_low(sev2); Order 30's severity
+    inhibition would correctly suppress battery_low — that's a different layer's contract (see
+    test_severity_inhibition.py). So here we explicitly disable severity inhibition, keeping only
+    the pure scheduling path, to avoid using "inhibition side-effect" to test "was the rule run"."""
     import app.main as m
     from app.config import settings
     monkeypatch.setattr(settings, "inhibit_severity", False)
@@ -503,15 +514,17 @@ def test_consume_line_feeds_window_and_emits(engine, monkeypatch):
     monkeypatch.setattr(m, "save", fake_save)
     monkeypatch.setattr(m, "should_emit", fake_should_emit)
 
-    # 直接喂消费线的"单条处理"逻辑：把 pubsub.listen() 换成固定序列。
+    # Feed the consumption line's "single-item processing" logic directly: swap pubsub.listen() for a fixed sequence.
     #
-    # ⚠️ R-14 后本替身必须**忠于真实驱动**：真 redis-py 的 `listen()` 永不自然结束
-    # （只在断连时抛异常）。R-14 前 consume() 是一句裸的 `async for`，替身"吐完就
-    # 返回"会让 consume() 顺势返回 —— 本用例当时靠这个副作用收尾。
-    # 现在 consume() 外层是 `while True`（断连自愈的必要代价），替身再"自然结束"
-    # 就等价于让 consume() 每轮重新 subscribe，本用例会永久跑下去（实测 30s 超时）。
-    # 故此处改为：吐完 3 条消息后挂起，由 drive() 主动 cancel 收尾 ——
-    # 断言对象（窗口内容 + 触发到的规则）与改动前**完全一致**。
+    # ⚠️ After R-14 this fake must **faithfully match the real driver**: real redis-py's `listen()`
+    # never ends naturally (it only throws on disconnect). Before R-14 consume() was a bare
+    # `async for`; a fake that "returns after yielding" let consume() return along — this case
+    # piggybacked on that side effect to finish. Now consume() is wrapped in `while True`
+    # (the necessary cost of disconnect self-heal); if the fake "ends naturally" again it's
+    # equivalent to making consume() re-subscribe every round, and this case would run forever
+    # (empirically 30s timeout). So here: after yielding 3 messages, hang, and let drive()
+    # cancel to finish — the assertion target (window contents + which rules fired) is **unchanged**
+    # from before.
     class _PubSub:
         def __init__(self):
             self._msgs = [
@@ -530,7 +543,7 @@ def test_consume_line_feeds_window_and_emits(engine, monkeypatch):
         async def listen(self):
             for msg in self._msgs:
                 yield msg
-            # 消息吐完 → 永不返回（真驱动的性质：连接仍在，只是暂时没消息）
+            # After yielding messages → never returns (real-driver property: connection still up, just no message yet)
             await __import__("asyncio").Event().wait()
 
     class _R:
@@ -543,7 +556,7 @@ def test_consume_line_feeds_window_and_emits(engine, monkeypatch):
     monkeypatch.setattr(m, "get_redis", fake_get_redis)
 
     async def drive():
-        # 等 3 条消息都进窗口（消费线是协程，不能 await 到它自己结束）
+        # Wait until 3 messages are in the window (the consumption line is a coroutine; you can't await it to finish itself)
         task = __import__("asyncio").ensure_future(m.consume())
         for _ in range(200):
             await __import__("asyncio").sleep(0)
@@ -554,7 +567,7 @@ def test_consume_line_feeds_window_and_emits(engine, monkeypatch):
             await task
         except __import__("asyncio").CancelledError:
             pass
-        # consume() 内部用 spawn() 把 emit 扔进后台任务，等它们跑完再收尾
+        # consume() internally uses spawn() to throw emit into a background task; wait for them to finish
         if m._tasks:
             await __import__("asyncio").gather(*list(m._tasks),
                                               return_exceptions=True)
@@ -562,6 +575,6 @@ def test_consume_line_feeds_window_and_emits(engine, monkeypatch):
     run(drive())
 
     rule_ids = sorted({a.rule_id for a in saved})
-    assert "motor_temp" in rule_ids, "3 条连续过热应触发 motor_temp"
-    assert "battery_low" in rule_ids, "第 3 条 payload 电量 9% 应触发 battery_low"
+    assert "motor_temp" in rule_ids, "3 consecutive overheating samples should trigger motor_temp"
+    assert "battery_low" in rule_ids, "the 3rd payload's battery 9% should trigger battery_low"
     assert m.windows["humanoid-001"].__len__() == 3

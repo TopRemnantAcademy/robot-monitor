@@ -1,7 +1,8 @@
-"""订单 10 — 告警抑制（inhibition）验收测试。
+"""Order 10 — acceptance tests for alert inhibition.
 
-覆盖 issue #13 §4 要求的 5 个必测场景，外加 3 个边界场景。
-全部断言落在 `OnlineState` + `emit()` 的真实行为上，不 mock 被测逻辑本身。
+Covers the 5 mandatory scenarios from issue #13 §4, plus 3 boundary scenarios.
+All assertions land on the real behavior of `OnlineState` + `emit()`, without mocking the logic
+under test itself.
 """
 
 from __future__ import annotations
@@ -21,45 +22,46 @@ def _alert(rid: str = "humanoid-001", rule_id: str = "battery_low",
                  message=f"{rule_id} on {rid}", detail={})
 
 
-# ------------------------------------------------ 必测 5 场景
+# ------------------------------------------------ 5 mandatory scenarios
 
 def test_offline_active_inhibits_battery_low(engine):
-    """场景 1：机器人离线时，battery_low 被抑制且不落库。"""
-    engine.online_state["humanoid-001"] = False          # ticker 已判离线
+    """Scenario 1: when a robot is offline, battery_low is inhibited and not persisted."""
+    engine.online_state["humanoid-001"] = False          # ticker already judged offline
     run(engine.emit(_alert()))
 
-    assert engine.emitted == [], "离线时 battery_low 不应落库"
+    assert engine.emitted == [], "battery_low must not persist while offline"
 
 
 def test_offline_rule_never_inhibited(engine):
-    """场景 2：offline 规则自身永不被抑制（否则根因告警永远报不出来）。"""
+    """Scenario 2: the offline rule itself is never inhibited (otherwise the root-cause alert
+    would never surface)."""
     engine.online_state["humanoid-001"] = False
     run(engine.emit(_alert(rule_id="offline", severity=3)))
 
     assert [a.rule_id for a in engine.emitted] == ["offline"]
 
-    # 直接验证判定函数，写死这条不变量
+    # Verify the judgement function directly, hard-coding this invariant
     assert engine.is_inhibited(_alert(rule_id="offline", severity=3)) is False
 
 
 def test_inhibition_lifted_after_recovery(engine):
-    """场景 3：机器人恢复在线后，抑制自动解除，battery_low 重新发出。"""
+    """Scenario 3: after the robot recovers online, inhibition is lifted and battery_low fires again."""
     engine.online_state["humanoid-001"] = False
     run(engine.emit(_alert()))
-    assert engine.emitted == []                          # 离线期间被抑制
+    assert engine.emitted == []                          # inhibited while offline
 
-    engine.online_state["humanoid-001"] = True           # ticker 判恢复
+    engine.online_state["humanoid-001"] = True           # ticker judged recovery
     run(engine.emit(_alert()))
     assert [a.rule_id for a in engine.emitted] == ["battery_low"]
 
 
 def test_unseen_robot_not_inhibited(engine):
-    """场景 4：`online_state` 无该 robot（刚启动）时**不抑制**。
+    """Scenario 4: when `online_state` has no record for the robot (just started) it is **not**
+    inhibited.
 
-    这是本单最关键的陷阱：ticker 跑满一轮前字典是空的，
-    若用 `not online_state.get(rid)` 会把所有告警全吞掉。
-    """
-    assert "humanoid-042" not in engine.online_state      # 前提：字典无记录
+    This is the most critical trap of this order: before the ticker has run a full round the dict
+    is empty; using `not online_state.get(rid)` would swallow every alert."""
+    assert "humanoid-042" not in engine.online_state      # precondition: no record
     run(engine.emit(_alert(rid="humanoid-042")))
 
     assert [a.rule_id for a in engine.emitted] == ["battery_low"]
@@ -67,18 +69,18 @@ def test_unseen_robot_not_inhibited(engine):
 
 
 def test_switch_off_restores_old_behaviour(engine, monkeypatch):
-    """场景 5：`inhibit_offline=False` 时行为与加抑制之前一致。"""
+    """Scenario 5: with `inhibit_offline=False` the behavior matches before inhibition existed."""
     from app.config import settings
     monkeypatch.setattr(settings, "inhibit_offline", False)
 
-    engine.online_state["humanoid-001"] = False          # 明明离线
+    engine.online_state["humanoid-001"] = False          # clearly offline
     run(engine.emit(_alert()))
 
     assert [a.rule_id for a in engine.emitted] == ["battery_low"], \
-        "关闭开关后不应抑制"
+        "nothing should be inhibited when the switch is off"
 
 
-# ------------------------------------------------ 边界场景
+# ------------------------------------------------ boundary scenarios
 
 @pytest.mark.parametrize("rule_id,severity", [
     ("motor_temp", 3),
@@ -86,7 +88,7 @@ def test_switch_off_restores_old_behaviour(engine, monkeypatch):
     ("joint_stuck", 2),
 ])
 def test_all_stream_rules_inhibited(engine, rule_id, severity):
-    """离线时，消费线三条规则**全部**被抑制（不只是 battery_low）。"""
+    """When offline, **all three** stream rules are inhibited (not just battery_low)."""
     engine.online_state["humanoid-007"] = False
     run(engine.emit(_alert(rid="humanoid-007", rule_id=rule_id, severity=severity)))
 
@@ -94,7 +96,7 @@ def test_all_stream_rules_inhibited(engine, rule_id, severity):
 
 
 def test_inhibition_is_per_robot(engine):
-    """抑制按 robot_id 隔离：A 离线不影响 B。"""
+    """Inhibition is isolated by robot_id: A offline does not affect B."""
     engine.online_state["humanoid-001"] = False
     engine.online_state["humanoid-002"] = True
 
@@ -106,7 +108,7 @@ def test_inhibition_is_per_robot(engine):
 
 
 def test_inhibited_alert_logged_at_debug(engine, caplog):
-    """被抑制的告警必须有 DEBUG 日志，不能静默丢弃。"""
+    """Inhibited alerts must produce a DEBUG log; they must not be silently dropped."""
     engine.online_state["humanoid-001"] = False
 
     with caplog.at_level(logging.DEBUG, logger="alert_engine"):
@@ -114,11 +116,11 @@ def test_inhibited_alert_logged_at_debug(engine, caplog):
 
     msgs = [r.getMessage() for r in caplog.records]
     assert any("inhibited" in m and "humanoid-001" in m for m in msgs), \
-        f"缺少抑制 DEBUG 日志，实际: {msgs}"
+        f"missing inhibition DEBUG log, actual: {msgs}"
 
 
 def test_dedup_runs_after_inhibition(engine, monkeypatch):
-    """抑制是**前置**于去重的一层：被抑制时不应触碰 deduplicator。"""
+    """Inhibition is a layer **preceding** dedup: when inhibited, the deduplicator must not be touched."""
     calls: list = []
 
     async def spy_should_emit(alert, window_s):
@@ -129,8 +131,8 @@ def test_dedup_runs_after_inhibition(engine, monkeypatch):
     engine.online_state["humanoid-001"] = False
     run(engine.emit(_alert()))
 
-    assert calls == [], "被抑制的告警不应进入去重逻辑"
+    assert calls == [], "an inhibited alert must not enter the dedup logic"
 
     engine.online_state["humanoid-001"] = True
     run(engine.emit(_alert()))
-    assert calls == ["battery_low"], "未抑制时应正常走去重"
+    assert calls == ["battery_low"], "when not inhibited, dedup should run normally"

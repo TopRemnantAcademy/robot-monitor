@@ -1,13 +1,15 @@
-"""订单 30 — severity 层抑制（高等级抑制同机低等级）+ 可追溯性验收测试。
+"""Order 30 — severity-layer inhibition (higher severity on the same robot suppresses lower)
++ traceability acceptance tests.
 
-覆盖两条硬要求：
-  A. **高等级抑制同机低等级**：同机 sev3 活跃时，sev2/sev1 被抑制；
-     同级不互压；跨机不互压；源恢复后自动解除。
-  B. **可追溯，禁止静默丢弃**：每次抑制都产出 `InhibitionRecord` 凭证、
-     WARNING 日志（含 source/target/reason）、独立指标（带 reason 维度）。
+Covers two hard requirements:
+  A. **Higher severity suppresses same-robot lower severity**: when sev3 is active on a robot,
+     sev2/sev1 are suppressed; equal levels don't suppress each other; cross-robot doesn't
+     suppress; after the source recovers it auto-lifts.
+  B. **Traceable, no silent drops**: every suppression produces an `InhibitionRecord` voucher,
+     a WARNING log (with source/target/reason), and a standalone metric (with a reason dimension).
 
-断言落在真实的 `is_inhibited()` / `inhibition_reason()` / `emit()` 行为上，
-不 mock 被测逻辑本身。`engine` fixture（conftest）已清空 active_alerts。
+Assertions land on the real `is_inhibited()` / `inhibition_reason()` / `emit()` behavior, without
+mocking the logic under test. The `engine` fixture (conftest) has already cleared active_alerts.
 """
 
 from __future__ import annotations
@@ -29,15 +31,15 @@ def _alert(rid: str = "humanoid-001", rule_id: str = "battery_low",
                  message=f"{rule_id} on {rid}", detail={})
 
 
-# ================================================================ A. 语义
+# ================================================================ A. Semantics
 
 def test_high_severity_inhibits_lower_on_same_robot(engine):
-    """核心：同机 motor_temp(sev3) 活跃 → battery_low(sev2) 被抑制。"""
+    """Core: same-robot motor_temp(sev3) active → battery_low(sev2) inhibited."""
     engine.active_alerts.register(_alert(rule_id="motor_temp", severity=3))
 
     rec = engine.inhibition_reason(_alert(rule_id="battery_low", severity=2))
 
-    assert rec is not None, "sev3 应抑制同机 sev2"
+    assert rec is not None, "sev3 should inhibit same-robot sev2"
     assert rec.reason == "severity"
     assert rec.source_rule == "motor_temp"
     assert rec.source_severity == 3
@@ -46,28 +48,28 @@ def test_high_severity_inhibits_lower_on_same_robot(engine):
 
 
 def test_equal_severity_not_inhibited(engine):
-    """同级不互压：两颗 sev2（battery_low / joint_stuck）互不抑制。
+    """Equal levels don't suppress each other: two sev2 (battery_low / joint_stuck) don't suppress
+    each other.
 
-    否则先进先出取决于字典序，是竞态误伤。
-    """
+    Otherwise FIFO order would depend on dict iteration order — a race-condition miss."""
     engine.active_alerts.register(_alert(rule_id="battery_low", severity=2))
 
     assert engine.inhibition_reason(
         _alert(rule_id="joint_stuck", severity=2)
-    ) is None, "同 severity 不应互相抑制"
+    ) is None, "same severity must not suppress each other"
 
 
 def test_lower_severity_does_not_inhibit_higher(engine):
-    """反向不成立：sev2 活跃不能压制 sev3。"""
+    """The reverse doesn't hold: an active sev2 cannot suppress a sev3."""
     engine.active_alerts.register(_alert(rule_id="battery_low", severity=2))
 
     assert engine.inhibition_reason(
         _alert(rule_id="motor_temp", severity=3)
-    ) is None, "低等级不得抑制高等级"
+    ) is None, "lower severity must not suppress higher"
 
 
 def test_severity_inhibition_is_per_robot(engine):
-    """跨机不互压（equal: [robot_id]）：A 机高温不抑制 B 机低电量。"""
+    """Cross-robot doesn't suppress (equal: [robot_id]): A's high temp doesn't inhibit B's low battery."""
     engine.active_alerts.register(
         _alert(rid="humanoid-001", rule_id="motor_temp", severity=3)
     )
@@ -75,12 +77,13 @@ def test_severity_inhibition_is_per_robot(engine):
     rec = engine.inhibition_reason(
         _alert(rid="humanoid-002", rule_id="battery_low", severity=2)
     )
-    assert rec is None, "抑制必须限定同一 robot_id"
+    assert rec is None, "inhibition must be limited to the same robot_id"
 
 
 def test_source_below_min_severity_does_not_inhibit(engine):
-    """抑制源必须 ≥ MIN_SOURCE_SEVERITY：sev2 不配压制 sev1（避免抑制面过宽）。"""
-    assert MIN_SOURCE_SEVERITY == 3, "本用例锁死当前阈值，改动需同步此断言"
+    """The suppression source must be ≥ MIN_SOURCE_SEVERITY: sev2 is not allowed to suppress sev1
+    (avoids an over-broad suppression surface)."""
+    assert MIN_SOURCE_SEVERITY == 3, "this case locks the current threshold; change in sync"
     engine.active_alerts.register(_alert(rule_id="battery_low", severity=2))
 
     assert engine.inhibition_reason(
@@ -89,18 +92,19 @@ def test_source_below_min_severity_does_not_inhibit(engine):
 
 
 def test_lifted_when_source_recovers(engine):
-    """源恢复（登记被 clear）后抑制自动解除，低等级告警重新发出。"""
+    """After the source recovers (registration cleared) the inhibition auto-lifts and low-severity
+    alerts fire again."""
     engine.active_alerts.register(_alert(rule_id="motor_temp", severity=3))
     run(engine.emit(_alert(rule_id="battery_low", severity=2)))
-    assert engine.emitted == [], "源活跃期间应被抑制"
+    assert engine.emitted == [], "should be inhibited while the source is active"
 
-    engine.active_alerts.clear("humanoid-001", "motor_temp")   # 规则恢复
+    engine.active_alerts.clear("humanoid-001", "motor_temp")   # rule recovered
     run(engine.emit(_alert(rule_id="battery_low", severity=2)))
     assert [a.rule_id for a in engine.emitted] == ["battery_low"]
 
 
 def test_registry_keeps_highest(engine):
-    """登记簿在多条活跃告警并存时，取最高 severity 作为抑制源。"""
+    """When multiple active alerts coexist, the registry takes the highest severity as the source."""
     engine.active_alerts.register(_alert(rule_id="battery_low", severity=2))
     engine.active_alerts.register(_alert(rule_id="motor_temp", severity=3))
 
@@ -111,7 +115,7 @@ def test_registry_keeps_highest(engine):
 
 
 def test_switch_off_restores_old_behaviour(engine, monkeypatch):
-    """`inhibit_severity=False` 时行为回到加抑制之前。"""
+    """With `inhibit_severity=False` behavior returns to before the suppression existed."""
     monkeypatch.setattr(settings, "inhibit_severity", False)
     engine.active_alerts.register(_alert(rule_id="motor_temp", severity=3))
 
@@ -121,23 +125,24 @@ def test_switch_off_restores_old_behaviour(engine, monkeypatch):
 
 
 def test_offline_layer_unchanged(engine):
-    """offline 层语义不受影响（订单 10 回归）：离线仍抑制同机衍生告警。"""
+    """The offline layer semantics are unaffected (Order 10 regression): offline still suppresses
+    same-robot derivative alerts."""
     engine.online_state["humanoid-001"] = False
     rec = engine.inhibition_reason(_alert(rule_id="battery_low", severity=2))
     assert rec is not None and rec.reason == "offline"
 
 
-# ================================================================ B. 可追溯
+# ================================================================ B. Traceability
 
 def test_inhibition_emits_warning_log_with_evidence(engine, caplog):
-    """每次抑制必须打 WARNING 日志，含 source/target/reason（可 grep 追溯）。"""
+    """Every suppression must log a WARNING containing source/target/reason (grep-able for audit)."""
     engine.active_alerts.register(_alert(rule_id="motor_temp", severity=3))
 
     with caplog.at_level(logging.WARNING, logger="alert_engine"):
         run(engine.emit(_alert(rule_id="battery_low", severity=2)))
 
     msgs = [r.getMessage() for r in caplog.records]
-    assert any("inhibited" in m for m in msgs), f"缺少抑制日志: {msgs}"
+    assert any("inhibited" in m for m in msgs), f"missing inhibition log: {msgs}"
     joined = " ".join(msgs)
     assert "reason=severity" in joined
     assert "source=motor_temp(sev3)" in joined
@@ -146,7 +151,7 @@ def test_inhibition_emits_warning_log_with_evidence(engine, caplog):
 
 
 def test_inhibition_increments_reason_labeled_metric(engine):
-    """抑制计数带 reason 维度，可归因到 severity（区别于 offline）。"""
+    """The suppression counter carries a reason dimension, attributable to severity (distinct from offline)."""
     from app import metrics
     engine.active_alerts.register(_alert(rule_id="motor_temp", severity=3))
 
@@ -158,11 +163,11 @@ def test_inhibition_increments_reason_labeled_metric(engine):
         rule_id="battery_low", reason="severity"
     )._value.get()
 
-    assert after == before + 1, "severity 抑制必须计入 reason=severity 指标"
+    assert after == before + 1, "severity suppression must count under reason=severity"
 
 
 def test_inhibition_record_is_json_serialisable_evidence(engine):
-    """凭证是结构化对象（禁止静默丢弃：必须留下可机器消费的证据）。"""
+    """The voucher is a structured object (no silent drop: machine-consumable evidence must remain)."""
     engine.active_alerts.register(_alert(rule_id="motor_temp", severity=3))
     rec = engine.inhibition_reason(_alert(rule_id="battery_low", severity=2))
 
@@ -175,7 +180,8 @@ def test_inhibition_record_is_json_serialisable_evidence(engine):
 
 
 def test_suppressed_alert_not_saved_nor_registered(engine):
-    """被抑制的告警既不落库，也不登记为活跃告警（不污染后续判据）。"""
+    """A suppressed alert is neither persisted nor registered as an active alert (no pollution of
+    later judgements)."""
     engine.active_alerts.register(_alert(rule_id="motor_temp", severity=3))
     run(engine.emit(_alert(rule_id="battery_low", severity=2)))
 
@@ -183,15 +189,14 @@ def test_suppressed_alert_not_saved_nor_registered(engine):
     assert "battery_low" not in engine.active_alerts.snapshot()["humanoid-001"]
 
 
-# ================================================================ C. 落库闭环（订单 35）
+# ================================================================ C. Persistence closed-loop (Order 35)
 
 def test_emit_persists_inhibition_record(engine, monkeypatch):
-    """被抑制时 `emit()` 必须调 `save_suppressed`（把凭证落库，order 35）。
+    """When inhibited, `emit()` must call `save_suppressed` (persist the voucher, order 35).
 
-    订单 30 只做到"日志 + 指标"，`GET /alerts` 查不到被压制的行。
-    这条钉住 wiring：抑制分支必须 spawn 一次落库 —— 且**不是** `save()`
-    （后者会 PUBLISH，等于把抑制退化成放行）。
-    """
+    Order 30 only got as far as "log + metric"; `GET /alerts` couldn't find the suppressed row.
+    This nails the wiring: the suppression branch must spawn a persist once — and it must **not**
+    be `save()` (the latter would PUBLISH, effectively degrading suppression back into a pass)."""
     import app.main as m
 
     persisted: list = []
@@ -204,8 +209,8 @@ def test_emit_persists_inhibition_record(engine, monkeypatch):
     engine.active_alerts.register(_alert(rule_id="motor_temp", severity=3))
     run(engine.emit(_alert(rule_id="battery_low", severity=2)))
 
-    assert engine.emitted == [], "被抑制的告警不得走 save()/发布路径"
-    assert len(persisted) == 1, "抑制分支必须落库一次（订单 35）"
+    assert engine.emitted == [], "a suppressed alert must not go through save()/publish"
+    assert len(persisted) == 1, "the suppression branch must persist once (order 35)"
     alert, record = persisted[0]
     assert alert.rule_id == "battery_low"
     assert record.source_rule == "motor_temp"
@@ -213,7 +218,8 @@ def test_emit_persists_inhibition_record(engine, monkeypatch):
 
 
 def test_emit_does_not_persist_when_not_inhibited(engine, monkeypatch):
-    """反向护栏：放行的告警不应**额外**产生一条抑制记录（否则库里翻倍）。"""
+    """Reverse guard: a passed-through alert must not *also* produce a suppression record
+    (otherwise the DB would double-count)."""
     import app.main as m
 
     persisted: list = []
@@ -226,4 +232,4 @@ def test_emit_does_not_persist_when_not_inhibited(engine, monkeypatch):
     run(engine.emit(_alert(rule_id="battery_low", severity=2)))
 
     assert [a.rule_id for a in engine.emitted] == ["battery_low"]
-    assert persisted == [], "未抑制的告警不该有抑制落库"
+    assert persisted == [], "a non-inhibited alert must not produce a suppression record"
