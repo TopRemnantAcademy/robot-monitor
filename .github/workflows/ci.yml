@@ -103,26 +103,33 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install bridge deps
-        run: |
-          set -eu
-          python -m pip install --upgrade pip
-          python -m pip install -r bridge/requirements.txt
-          python -m pip install pytest pytest-timeout
       - name: Install Rust toolchain (builds iso21423_rs extension)
         uses: dtolnay/rust-toolchain@stable
-      - name: Build Rust extension (iso21423_rs)
+      - name: Set up venv, install deps, build Rust extension
+        # maturin develop REQUIRES a virtualenv (or activated conda env); setup-python
+        # does not create one, so we make .venv at the repo root and activate it for
+        # every step that touches the extension.
         run: |
           set -eu
-          python -m pip install maturin
+          python -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          pip install -r bridge/requirements.txt
+          pip install pytest pytest-timeout maturin
           cd bridge/iso21423-rs
-          python -m maturin develop
+          maturin develop
       - name: pytest bridge/tests (standalone package, no app collision)
         # test_backend_active.py now FAILS if the shim fell back to Python,
         # so this lane actually exercises (and guards) the Rust port.
-        run: python -m pytest bridge/tests/ -v --timeout=60
+        run: |
+          set -eu
+          . .venv/bin/activate
+          python -m pytest bridge/tests/ -v --timeout=60
       - name: Compile all (syntax gate)
-        run: python -m compileall -q bridge simulator
+        run: |
+          set -eu
+          . .venv/bin/activate
+          python -m compileall -q bridge simulator
       - name: Test-file sanity (each test_*.py has a real test function)
         run: |
           set -eu
