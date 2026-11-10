@@ -3,13 +3,13 @@
     "schemas": {
       "AckRequest": {
         "additionalProperties": false,
-        "description": "确认/撤回的请求体：**必须为空**。\n\n存在这个模型只有一个目的：让 FastAPI 在客户端多传字段时报 422 而不是静默忽略。\n`extra=\"forbid\"` 挡住的最重要一例就是 `ack_by` —— 前端若能传成功，\n就等于审计列可伪造（派工单禁止项 2）。声明成模型并设 forbid 后，\n`POST /alerts/{id}/ack {\"ack_by\":\"x\"}` 返回 422（HTTP 测试已覆盖）。",
+        "description": "Ack/unack request body: **must be empty**.\n\nThis model exists for one purpose only: make FastAPI return 422 instead of\nsilently ignoring extra fields from the client. The most important field\n`extra=\"forbid\"` blocks is `ack_by` -- if the frontend could pass it\nsuccessfully, the audit column would be forgeable (work-order forbidden item\n2). After declaring the model with forbid,\n`POST /alerts/{id}/ack {\"ack_by\":\"x\"}` returns 422 (covered by the HTTP test).",
         "properties": {},
         "title": "AckRequest",
         "type": "object"
       },
       "AckResult": {
-        "description": "确认/撤回结果。\n\n`changed=False` 表示**幂等命中**（目标行已是目标状态），不是错误。\n派工单要求「重复 ack 幂等（不报错、不重复写）」，故用 200 + changed=false\n表达，而不是 409。\n\n`ack_at` / `ack_by` 回填**库中现值**，便于前端立即纠正本地乐观更新。",
+        "description": "Ack/unack result.\n\n`changed=False` means an **idempotent hit** (the target row is already in the\ntarget state), not an error. The work-order requires \"repeated ack is\nidempotent (no error, no re-write)\", so we express it with 200 + changed=false\nrather than 409.\n\n`ack_at` / `ack_by` backfill the **current DB value**, so the frontend can\nimmediately correct its local optimistic update.",
         "properties": {
           "ack": {
             "title": "Ack",
@@ -43,7 +43,7 @@
             "type": "integer"
           },
           "changed": {
-            "description": "是否真的改了状态（false = 幂等命中）",
+            "description": "whether state actually changed (false = idempotent hit)",
             "title": "Changed",
             "type": "boolean"
           }
@@ -57,7 +57,7 @@
         "type": "object"
       },
       "AlertItem": {
-        "description": "`GET /alerts` 列表项。字段与 `robot_alert` 列一一对应（含订单 17 的 escalated）。\n\n订单 35 追加 `suppressed` / `suppressed_by`：被抑制的告警**也在这张表里**，\n前端据此在行内标「已抑制」（降视觉权重而非隐藏行）。这是订单 30\n「抑制不等于静默丢弃」在 REST 契约上的落点 —— 抑制的判定与凭证仍在\nalert_engine，这里只把它的产物读出来。",
+        "description": "`GET /alerts` list item. Fields map one-to-one to `robot_alert` columns\n(including order 17's escalated).\n\nOrder 35 appends `suppressed` / `suppressed_by`: suppressed alerts are **also\nin this table**; the frontend uses them to mark \"suppressed\" in-row (lower\nvisual weight, not hiding the row). This is the landing point of order 30's\n\"suppression != silent discard\" at the REST contract -- the suppression\njudgment and evidence still live in alert_engine; here we only read out its\nproduct.",
         "properties": {
           "ack": {
             "title": "Ack",
@@ -93,6 +93,7 @@
           "detail": {
             "anyOf": [
               {
+                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -157,7 +158,7 @@
         "type": "object"
       },
       "AlertPage": {
-        "description": "分页响应。\n\n`total` 是**同筛选条件下的总条数**（不受 limit/offset 影响），\n前端据此算总页数；缺了它前端只能\"翻到空页才知道到底了\"。",
+        "description": "Paginated response.\n\n`total` is the **total count under the same filter** (not affected by\nlimit/offset), so the frontend can compute the total page count; without it\nthe frontend would only know it reached the end by hitting an empty page.",
         "properties": {
           "items": {
             "items": {
@@ -300,7 +301,7 @@
         "type": "object"
       },
       "HealthResponse": {
-        "description": "`GET /healthz` 存活探针。\n\n`status` 表达**依赖可达性**而非进程存活，故 HTTP 恒 200（见 main.py 的 docstring）。\n字段与 `main.py` healthz() 的返回逐字一致，含 ISSUE #19 的丢行三元组。",
+        "description": "`GET /healthz` liveness probe.\n\nstatus expresses DEPENDENCY reachability, not just process liveness, so HTTP\nis always 200 (see main.py docstring). Fields match main.py healthz()'s\nreturn byte-for-byte, including the row-loss triplet from ISSUE #19.",
         "properties": {
           "db": {
             "description": "up | down",
@@ -344,7 +345,7 @@
             "type": "integer"
           },
           "status": {
-            "description": "ok（DB/Redis 可达）| degraded（进程活着但依赖不可达）",
+            "description": "ok (DB/Redis reachable) | degraded (process alive but deps unreachable)",
             "title": "Status",
             "type": "string"
           },
@@ -371,7 +372,7 @@
         "type": "object"
       },
       "HistoryPointOut": {
-        "description": "`/history` 的单个时间桶（`main.py` history() 的 points[] 元素）。",
+        "description": "A single time bucket from /history (an element of history()'s points[] in main.py).",
         "properties": {
           "battery_pct": {
             "title": "Battery Pct",
@@ -407,7 +408,7 @@
             "type": "integer"
           },
           "time": {
-            "description": "ISO8601 时间桶起点",
+            "description": "ISO8601 bucket start time",
             "title": "Time",
             "type": "string"
           }
@@ -425,7 +426,7 @@
         "type": "object"
       },
       "RobotHistoryResponse": {
-        "description": "`GET /robots/{robot_id}/history`（spec/00 §5.3）。",
+        "description": "`GET /robots/{robot_id}/history` (spec/00 §5.3).",
         "properties": {
           "points": {
             "items": {
@@ -452,7 +453,7 @@
         "type": "object"
       },
       "RobotListResponse": {
-        "description": "`GET /robots` —— 100 台最新状态（WS 之外的兜底/首屏）。",
+        "description": "`GET /robots` — latest status of 100 robots (fallback/first-screen outside WS).",
         "properties": {
           "robots": {
             "items": {
@@ -469,7 +470,7 @@
         "type": "object"
       },
       "RobotTelemetryOut": {
-        "description": "单台机器人最新遥测（与 `state_cache._decode()` 的返回逐字段一致）。\n\n来源是 Redis Hash `robot:state:{robot_id}` 经 `_decode()` 还原类型后的 dict\n（`backend_ingestion/app/services/state_cache.py`）。\n注意 `joint_positions` 必须在这份契约里 —— 它正是 STATUS.md §六第 2 条\n那次事故（Drawer 第三条折线恒空）缺的字段。\n\n`is_online` / `last_seen` 是 ISSUE #77 追加的两个**新增可选字段**（非 breaking：\n老前端不读即忽略）。它们的来源不是遥测 Hash，而是 `app/services/liveness.py`\n的接收侧台账，由 `state_cache.snapshot()` 批量补齐。",
+        "description": "Latest telemetry for a single robot (matches state_cache._decode()'s return field-by-field).\n\nSource is the Redis Hash robot:state:{robot_id} restored to typed dict by\n_decode() (backend_ingestion/app/services/state_cache.py).\nNote joint_positions must be in this contract — it is exactly the field\nmissing in the STATUS.md §6.2 incident (Drawer's third line was permanently\nempty).\n\nis_online / last_seen are two NEW optional fields added by ISSUE #77\n(non-breaking: old frontends ignore them). Their source is not the telemetry\nHash but the receive-side ledger in app/services/liveness.py, backfilled in\nbulk by state_cache.snapshot().",
         "properties": {
           "battery_pct": {
             "title": "Battery Pct",
@@ -482,7 +483,7 @@
           },
           "is_online": {
             "default": false,
-            "description": "后端判定：距最后一次收到遥测是否在阈值内（ISSUE #77）",
+            "description": "Backend judgment: whether last telemetry was received within threshold (ISSUE #77)",
             "title": "Is Online",
             "type": "boolean"
           },
@@ -516,7 +517,7 @@
                 "type": "null"
               }
             ],
-            "description": "最后一次收到该机器人遥测的 epoch 秒；从未上报为 null",
+            "description": "epoch seconds of the last telemetry received for this robot; null if never reported",
             "title": "Last Seen"
           },
           "max_joint_temp": {
@@ -528,7 +529,7 @@
             "type": "string"
           },
           "status_code": {
-            "description": "0 离线 / 1 正常 / 2 预警 / 3 故障",
+            "description": "0 offline / 1 ok / 2 warning / 3 fault",
             "title": "Status Code",
             "type": "integer"
           },
@@ -550,9 +551,109 @@
         "title": "RobotTelemetryOut",
         "type": "object"
       },
+      "SupportedRobotOut": {
+        "description": "A single \"platform-supported and actually-registered\" model + its registered fleet composition.\n\nField sources: model_type / total / online / firmware_versions / stations come\nfrom the robot_metadata aggregation query; display_name / form_factor / dof /\nvendor / description / generic come from app.catalog.lookup()'s display\nmetadata (unregistered models fall back to a placeholder).",
+        "properties": {
+          "description": {
+            "description": "model description",
+            "title": "Description",
+            "type": "string"
+          },
+          "display_name": {
+            "description": "display name (catalog metadata; falls back to model_type if unregistered)",
+            "title": "Display Name",
+            "type": "string"
+          },
+          "dof": {
+            "description": "degrees of freedom (joint count); 0 for unknown models",
+            "title": "Dof",
+            "type": "integer"
+          },
+          "firmware_versions": {
+            "description": "distinct firmware versions in use",
+            "items": {
+              "type": "string"
+            },
+            "title": "Firmware Versions",
+            "type": "array"
+          },
+          "form_factor": {
+            "description": "form factor (e.g. bipedal humanoid / -)",
+            "title": "Form Factor",
+            "type": "string"
+          },
+          "generic": {
+            "default": false,
+            "description": "true = catalog metadata unregistered, placeholder returned by lookup() (no fabricated display info)",
+            "title": "Generic",
+            "type": "boolean"
+          },
+          "model_type": {
+            "description": "model identifier (distinct value of robot_metadata.model_type)",
+            "title": "Model Type",
+            "type": "string"
+          },
+          "online": {
+            "description": "how many are currently online (is_online)",
+            "title": "Online",
+            "type": "integer"
+          },
+          "stations": {
+            "default": 0,
+            "description": "distinct count of assigned stations",
+            "title": "Stations",
+            "type": "integer"
+          },
+          "total": {
+            "description": "total registered robots of this model",
+            "title": "Total",
+            "type": "integer"
+          },
+          "vendor": {
+            "description": "vendor / source",
+            "title": "Vendor",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model_type",
+          "display_name",
+          "form_factor",
+          "dof",
+          "vendor",
+          "description",
+          "total",
+          "online"
+        ],
+        "title": "SupportedRobotOut",
+        "type": "object"
+      },
+      "SupportedRobotsResponse": {
+        "description": "`GET /supported-robots` — catalog of platform-supported and registered models + fleet composition.\n\nThe source of truth for \"which models the platform supports\" is the distinct\nrobot_metadata.model_type (DB-driven); readable from viewer role up (this is a\npublic description of platform capabilities, with no write operations).",
+        "properties": {
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/SupportedRobotOut"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "total_robots": {
+            "description": "total registered robots across all models",
+            "title": "Total Robots",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "models",
+          "total_robots"
+        ],
+        "title": "SupportedRobotsResponse",
+        "type": "object"
+      },
       "UserCreate": {
         "additionalProperties": false,
-        "description": "注册请求。\n\n**刻意不接受 `role` 字段**：允许请求体指定角色等于开了一个自助提权后门\n（`POST /auth/register {\"email\":…, \"role\":\"admin\"}`）。\n`extra=\"forbid\"` 让它显式报 422，而不是静默忽略。",
+        "description": "Registration request.\n\n**Deliberately does not accept a `role` field**: allowing the body to specify\na role opens a self-service privilege-escalation backdoor\n(`POST /auth/register {\"email\":…, \"role\":\"admin\"}`).\n`extra=\"forbid\"` makes it return 422 explicitly rather than silently ignoring.",
         "properties": {
           "email": {
             "format": "email",
@@ -608,7 +709,7 @@
         "type": "object"
       },
       "UserRead": {
-        "description": "当前用户信息。`role` 供前端做 UI 级权限裁剪（真正的判定在后端）。",
+        "description": "Current user info. `role` lets the frontend do UI-level permission\ntrimming (the real judgment is on the backend).",
         "properties": {
           "email": {
             "format": "email",
@@ -649,7 +750,7 @@
       },
       "UserUpdate": {
         "additionalProperties": false,
-        "description": "更新请求。同样禁止改 `role`（提权只能由运维改库）。",
+        "description": "Update request. Also forbids changing `role` (escalation only by ops\nediting the DB).",
         "properties": {
           "email": {
             "anyOf": [
@@ -769,11 +870,11 @@
   "paths": {
     "/alerts": {
       "get": {
-        "description": "分页查询告警（解 H5）。\n\n只读，viewer 起可访问 —— 与 `GET /robots` 权限一致（看板必须所有人都能看）。\n典型用法：前端筛选「未确认」= `GET /alerts?ack=false&limit=50&offset=0`。\n\n`suppressed`（订单 35）刻意是**可选**参数，省略时返回全集（含被抑制行）。\n为什么不把「排除已抑制」设成默认：默认值一变，既有调用方（前端告警流、\nRobotDetailDrawer 的 200 条拉取）的行为会在没人改代码的情况下静默改变。\n把「默认视图要不要藏被抑制行」交给**调用方显式表达**，契约本身保持中性。\n\n注意这与「前端默认不进未确认流」是两件事：前者是 API 的中立性，\n后者是 `AlertLogTable` 的展示决策（默认 `suppressed=false` + 一个开关）。",
+        "description": "Paginated alert query (resolves H5).\n\nRead-only, accessible from viewer up -- same permission as `GET /robots`\n(the dashboard must be viewable by everyone). Typical usage: the frontend\nfilters \"unacked\" with `GET /alerts?ack=false&limit=50&offset=0`.\n\n`suppressed` (order 35) is deliberately an **optional** parameter; when\nomitted it returns the full set (including suppressed rows).\nWhy not default to \"exclude suppressed\": changing the default would silently\nchange the behavior of existing callers (frontend alert stream, RobotDetailDrawer's\n200-row pull) without any code change. Leaving \"does the default view hide\nsuppressed rows\" to the **caller's explicit expression** keeps the contract\nitself neutral.\n\nNote this is a different thing from \"the frontend by default does not enter the\nunacked stream\": the former is the API's neutrality, the latter is\n`AlertLogTable`'s display decision (default `suppressed=false` + a toggle).",
         "operationId": "list_alerts_alerts_get",
         "parameters": [
           {
-            "description": "true/false 筛选确认状态；省略=全部",
+            "description": "true/false filter on ack status; omitted=all",
             "in": "query",
             "name": "ack",
             "required": false,
@@ -786,12 +887,12 @@
                   "type": "null"
                 }
               ],
-              "description": "true/false 筛选确认状态；省略=全部",
+              "description": "true/false filter on ack status; omitted=all",
               "title": "Ack"
             }
           },
           {
-            "description": "true 只看已升级告警",
+            "description": "true = only escalated alerts",
             "in": "query",
             "name": "escalated",
             "required": false,
@@ -804,12 +905,12 @@
                   "type": "null"
                 }
               ],
-              "description": "true 只看已升级告警",
+              "description": "true = only escalated alerts",
               "title": "Escalated"
             }
           },
           {
-            "description": "true 只看已抑制 / false 排除已抑制；省略=全部（含已抑制）",
+            "description": "true = only suppressed / false = exclude suppressed; omitted=all (including suppressed)",
             "in": "query",
             "name": "suppressed",
             "required": false,
@@ -822,12 +923,12 @@
                   "type": "null"
                 }
               ],
-              "description": "true 只看已抑制 / false 排除已抑制；省略=全部（含已抑制）",
+              "description": "true = only suppressed / false = exclude suppressed; omitted=all (including suppressed)",
               "title": "Suppressed"
             }
           },
           {
-            "description": "按机器人过滤",
+            "description": "filter by robot",
             "in": "query",
             "name": "robot_id",
             "required": false,
@@ -840,7 +941,7 @@
                   "type": "null"
                 }
               ],
-              "description": "按机器人过滤",
+              "description": "filter by robot",
               "title": "Robot Id"
             }
           },
@@ -903,7 +1004,7 @@
     },
     "/alerts/{alert_id}/ack": {
       "post": {
-        "description": "确认告警。**幂等**：重复确认返回 200 + changed=false，不报错、不覆盖首次确认人。\n\n操作人（`ack_by`）只从 JWT 取，`body` 声明为 `AckRequest`（extra=forbid）\n仅为拒绝伪造字段；其内容**不被读取**。",
+        "description": "Acknowledge an alert. **Idempotent**: re-acking returns 200 + changed=false,\nno error, no overwrite of the first ack-er.\n\nThe operator (`ack_by`) is taken only from the JWT; `body` is declared as\n`AckRequest` (extra=forbid) only to reject forged fields; its content **is not\nread**.",
         "operationId": "ack_alert_alerts__alert_id__ack_post",
         "parameters": [
           {
@@ -968,7 +1069,7 @@
     },
     "/alerts/{alert_id}/unack": {
       "post": {
-        "description": "撤回确认（误确认时用）。同样幂等：对未确认的告警再 unack 返回 changed=false。",
+        "description": "Retract acknowledgement (for mis-acks). Also idempotent: unacking an\nalready-unacked alert returns changed=false.",
         "operationId": "unack_alert_alerts__alert_id__unack_post",
         "parameters": [
           {
@@ -1197,7 +1298,7 @@
     },
     "/healthz": {
       "get": {
-        "description": "健康检查。\n\n`status` 反映**依赖可达性**，不只是「进程活着」：\n- `ok`       —— DB 与 Redis 都可达\n- `degraded` —— 进程活着但依赖不可达（此时写入会堆积到队列，需立刻告警）\n- 仍返回 HTTP 200：这是**存活探针**语义，改为 503 会让容器被重启掉，\n  而依赖恢复后本服务能自愈，重启反而丢在飞数据。依赖不健康由 `status` 字段表达。",
+        "description": "Health check.\n\n`status` reflects DEPENDENCY reachability, not just \"process alive\":\n- `ok`       —— DB and Redis both reachable\n- `degraded` —— process alive but deps unreachable (writes queue up; alert now)\n- still returns HTTP 200: this is liveness-probe semantics; switching to 503 would let\n  the container be restarted, yet the service self-heals once deps recover, and restart\n  would lose in-flight data. Unhealthy deps are expressed via the `status` field.",
         "operationId": "healthz_healthz_get",
         "responses": {
           "200": {
@@ -1216,7 +1317,7 @@
     },
     "/metrics": {
       "get": {
-        "description": "Prometheus 抓取端点（`infra/observability/prometheus.yml` 的 `robot_backend` job）。\n\n与 `/healthz` 的区别是**模型**而不是内容：`/healthz` 回瞬时快照，\n抓取端拿到的永远是\"上一次写入那一刻\"的值；这里的 Counter 是单调累加的，\nPrometheus 才能算出 `rate()` / `increase()`，让 1000 msg/s 有历史曲线。\n\n函数名**不能叫 `metrics`** —— 那会遮蔽模块名 `app.metrics`（`from app import metrics`）。",
+        "description": "Prometheus scrape endpoint (the `robot_backend` job in infra/observability/prometheus.yml).\n\nThe difference from /healthz is the MODEL, not the content: /healthz returns an instant\nsnapshot, so the scraper always gets \"the values at the last write moment\"; here the\nCounter is monotonically accumulating, so Prometheus can compute rate() / increase(),\ngiving the 1000 msg/s a historical curve.\n\nThe function name must NOT be `metrics` — that would shadow the module name `app.metrics`\n(from app import metrics).",
         "operationId": "prometheus_metrics_metrics_get",
         "responses": {
           "200": {
@@ -1235,7 +1336,7 @@
     },
     "/robots": {
       "get": {
-        "description": "100 台最新状态。只读端点：viewer 起可访问，返回体与加鉴权前逐字段一致。\n\nISSUE #77：返回体新增 `is_online` / `last_seen` 两个可选字段，并**恒定返回 100 台**\n（停报的机器人回落为离线占位，而不是从列表里消失）。",
+        "description": "Latest status of 100 robots. Read-only endpoint: accessible from viewer role up; the\nresponse body is byte-for-byte identical to before auth was added.\n\nISSUE #77: the response adds two optional fields `is_online` / `last_seen`, and ALWAYS\nreturns 100 robots (a robot that stopped reporting falls back to an offline placeholder\nrather than disappearing from the list).",
         "operationId": "list_robots_robots_get",
         "responses": {
           "200": {
@@ -1259,7 +1360,7 @@
     },
     "/robots/{robot_id}/history": {
       "get": {
-        "description": "最近 N 分钟历史（供 Drawer 折线 + 关节热力图）。\n\n数据源（ISSUE #76 起）：**优先查连续聚合 `robot_history_10s`**，\n该视图的刷新策略是 end_offset=10s / schedule=30s，延迟在数十秒内\n（见 infra/init.sql §5.1），满足 Drawer 对「最近数据」的要求。\n\n为什么不再直查原始表：\n  原实现对 `robot_telemetry` 做 `time_bucket`，过滤 `time >= now() - 5min`。\n  100 台 × 10Hz = 1000 行/s ⇒ 5 分钟窗口内单台约 3000 行、全量扫描更多；\n  每次 Drawer 打开都要在原始 hypertable 上区间扫描 + 逐行 last() 聚合。\n  改查连续聚合后，同一查询只读「已预聚合的 ~30 行/台」，扫描量下降三个数量级\n  —— 这是真快，不是靠 Histogram 观测出来的假快。\n\n为什么保留原始表回退：\n  连续聚合在 `REFRESH` 之前是空的（`WITH NO DATA` + 策略异步刷新），\n  冷启动、策略 job 未跑到、或刷新窗口尚未覆盖时，直查会返回空数组 →\n  Drawer 曲线恒空。回退保证「聚合未就绪 ≠ 端点失效」，\n  语义与 spec/00 §5.3「聚合未就绪时回退原始表」逐字一致。\n\n`last(joint_positions, time)` 在两个分支中都**必须保留** ——\n它是 Drawer 第三条折线「角度(rad)」的唯一数据源\n（RobotDetailDrawer.tsx:88），缺了它曲线恒为 null（订单 16 踩过的坑）。",
+        "description": "History for the last N minutes (for the Drawer lines + joint heatmap).\n\nData source (since ISSUE #76): PREFER the continuous aggregate `robot_history_10s`, whose\nrefresh policy is end_offset=10s / schedule=30s, with latency within tens of seconds (see\ninfra/init.sql §5.1), satisfying the Drawer's need for \"recent data\".\n\nWhy no longer querying the raw table directly:\n  The old implementation did time_bucket on robot_telemetry, filtering time >= now() - 5min.\n  100 robots × 10Hz = 1000 rows/s ⇒ ~3000 rows per robot in a 5-min window, far more for a\n  full scan; every Drawer open required an interval scan on the raw hypertable + per-row\n  last() aggregation. Switching to the continuous aggregate reads only \"~30 pre-aggregated\n  rows/robot\" for the same query, cutting scan volume by three orders of magnitude — this is\n  real speed, not false speed observed via a Histogram.\n\nWhy keep the raw-table fallback:\n  The continuous aggregate is empty before REFRESH (WITH NO DATA + async refresh policy), so\n  a cold start, an unrun policy job, or a refresh window not yet covered makes the direct\n  query return an empty array → the Drawer line is permanently empty. The fallback guarantees\n  \"aggregate not ready ≠ endpoint broken\", semantically identical to spec/00 §5.3 \"fall back\n  to raw table when aggregate not ready\".\n\n`last(joint_positions, time)` MUST be kept in BOTH branches — it is the ONLY data source for\nthe Drawer's third line \"angle (rad)\" (RobotDetailDrawer.tsx:88); without it the line is\npermanently null (a pitfall from Order 16).\n\nSpan routing (R-12): `minutes <= HOURILY_AFTER_MINUTES(180)` still uses the 10s aggregate,\nbyte-for-byte consistent with ISSUE #76 (R-03 §4 contract hard red line); beyond that it\nswitches to the hourly aggregate `robot_history_1h` (infra/init.sql §5.1b), compressing a\n24h window from 8640 points/robot to 24 points/robot. The hourly path's `resolution` echoes\n`3600s` (the real bucket seconds, not the input `10s`) — `resolution` is the fact label of\n\"how many seconds each point represents\"; echoing the input would make the frontend treat a\n1h bucket as a 10s bucket. Do NOT introduce `resolution=1h`: `_parse_resolution` is locked\nto integer-second semantics by R-03 §4.1; hourly downsampling is triggered by the `minutes`\nthreshold, orthogonal to the `resolution` parameter.",
         "operationId": "history_robots__robot_id__history_get",
         "parameters": [
           {
@@ -1320,6 +1421,30 @@
           }
         ],
         "summary": "History"
+      }
+    },
+    "/supported-robots": {
+      "get": {
+        "description": "Catalog of platform-supported models + composition of the registered fleet.\n\nThe source of truth for \"which models the platform supports\" is the distinct\nrobot_metadata.model_type (DB-driven, zero hallucination); display metadata (name/\ndescription/DOF/form) is supplemented by app.catalog.lookup(); unregistered models fall\nback to a placeholder, never fabricated. Readable from viewer role up (this is a public\ndescription of \"platform capability\", with no write operations).\n\nThe response also gives each model's registered total / online count / firmware versions /\nstation distribution — the UI uses it to render \"supported models\" cards; the admin UI\nadditionally shows fleet-management details.",
+        "operationId": "supported_robots_supported_robots_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportedRobotsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Supported Robots"
       }
     },
     "/users/me": {
