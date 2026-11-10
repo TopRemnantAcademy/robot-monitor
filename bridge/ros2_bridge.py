@@ -52,7 +52,7 @@ DEFAULT_ROS_TOPICS: dict[str, str] = {
 # Pure ROS 2 message -> envelope accumulator
 # --------------------------------------------------------------------------
 
-class ROS2StateAccumulator:
+class _ROS2StateAccumulatorPy:
     """Accumulates ROS 2 messages (as plain JSON) for one robot into an
     ISO 21423 envelope. Pure (no I/O) -- fully unit-testable.
     """
@@ -314,3 +314,20 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# --------------------------------------------------------------------------
+# Phase 1 shim: prefer the compiled Rust accumulator (in the `iso21423_rs`
+# extension, built by maturin); fall back to the pure-Python reference so the
+# module still works without the extension and the existing test suite passes
+# unchanged either way. `RosbridgeClient` constructs `ROS2StateAccumulator`,
+# which resolves to whichever backend is available.
+# --------------------------------------------------------------------------
+try:
+    from iso21423_rs import Ros2StateAccumulator as _ROS2StateAccumulatorRs  # type: ignore
+
+    ROS2StateAccumulator = _ROS2StateAccumulatorRs
+    _ACC_BACKEND = "rust"
+except ImportError:  # pragma: no cover
+    ROS2StateAccumulator = _ROS2StateAccumulatorPy
+    _ACC_BACKEND = "python"
