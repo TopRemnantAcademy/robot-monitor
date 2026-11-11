@@ -1,4 +1,4 @@
-fastapi==0.110.0
+fastapi==0.162.2
 uvicorn[standard]==0.28.0
 # ⚠️ pydantic / pydantic-settings MUST stay exactly identical to alert_engine/requirements.txt:
 # CI's backend job installs both requirements files into **the same venv** to run tests; divergence causes
