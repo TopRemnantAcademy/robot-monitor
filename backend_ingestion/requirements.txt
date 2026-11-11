@@ -49,4 +49,4 @@ bcrypt==4.0.1
 opentelemetry-sdk==1.22.0
 opentelemetry-exporter-otlp-proto-http==1.22.0
 opentelemetry-instrumentation-fastapi==0.43b0
-opentelemetry-instrumentation-asyncpg==0.43b0
+opentelemetry-instrumentation-asyncpg==0.66b2
