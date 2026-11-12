@@ -87,6 +87,29 @@ def parse_ts(s):
     return dt.datetime.fromisoformat(s)
 
 
+def get_raw(url):
+    req = urllib.request.Request(url)
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read().decode(), r.headers.get("Content-Type", "")
+
+
+def metric_names(text):
+    names = set()
+    for line in text.splitlines():
+        if line.startswith("# TYPE "):
+            parts = line.split(" ", 3)
+            if len(parts) >= 3:
+                names.add(parts[2])
+    return names
+
+
+def metric_value(text, name):
+    for line in text.splitlines():
+        if line.startswith(name + " ") or line.startswith(name + "{"):
+            return line.rsplit(" ", 1)[-1]
+    return None
+
+
 failures = []
 checks = 0
 
@@ -237,6 +260,44 @@ py = get(BASE_PY + "/alerts?ack=false&limit=50", tok)
 rs = get(BASE_RS + "/alerts?ack=false&limit=50")
 check("filtered total equal", py["total"] == rs["total"], f"py={py['total']} rs={rs['total']}")
 check("filtered ack all false (rs)", all(not it["ack"] for it in rs["items"]), "rs has ack=true")
+
+# ---------------------------------------------------------------- /metrics (schema parity)
+# NOTE: /metrics is the Prometheus exposition endpoint (text/plain), not a
+# dashboard data API. Both backends expose metric names/types/HELP; values are
+# produced by the live ingest pipeline. The Rust read-replica emits ingest metrics
+# at 0 but derives `robot_backend_robots_online` live (same ZCOUNT source as
+# Python). Parity here is SCHEMA parity, plus the one value both can compute.
+print("=== /metrics (schema parity) ===")
+py_body, py_ct = get_raw(BASE_PY + "/metrics")
+rs_body, rs_ct = get_raw(BASE_RS + "/metrics")
+check("content-type identical", py_ct == rs_ct and py_ct != "",
+      f"py={py_ct} rs={rs_ct}")
+check("content-type is prometheus 1.0.0",
+      rs_ct == "text/plain; version=1.0.0; charset=utf-8", f"rs={rs_ct}")
+py_names = metric_names(py_body)
+rs_names = metric_names(rs_body)
+# prometheus_client emits a `_created` gauge per counter only once that counter has
+# an active series, so the Python `_created` set is non-deterministic across scrapes.
+# Rust emits `_created` unconditionally; the stable invariants are therefore:
+#   - Rust covers every metric name Python currently exposes (superset);
+#   - Rust never introduces a NEW base metric name (only the conventional `_created`
+#     companions, which mirror prometheus_client's behavior).
+rs_base = {n for n in rs_names if not n.endswith("_created")}
+py_base = {n for n in py_names if not n.endswith("_created")}
+check("rust introduces no new base metric names", rs_base <= py_base,
+      f"only_rs={sorted(rs_base - py_base)}")
+check("rust covers all python metric names", py_names <= rs_names,
+      f"missing={sorted(py_names - rs_names)}")
+py_online = metric_value(py_body, "robot_backend_robots_online")
+rs_online = metric_value(rs_body, "robot_backend_robots_online")
+# Both backends compute this live from the same `liveness:last_seen` ZSET, so the
+# numeric value must match (Python formats the gauge as a float, Rust mirrors it).
+check("robots_online present + equal (same ZSET)",
+      py_online is not None and rs_online is not None
+      and float(py_online) == float(rs_online),
+      f"py={py_online} rs={rs_online}")
+check("robots_online is a non-negative number",
+      rs_online is not None and float(rs_online) >= 0, f"rs={rs_online}")
 
 # ---------------------------------------------------------------- error contract
 print("=== error contract ===")

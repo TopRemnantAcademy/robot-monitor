@@ -533,6 +533,210 @@ fn server_err(e: &dyn std::fmt::Display) -> (axum::http::StatusCode, Json<serde_
     )
 }
 
+// --------------------------------------------------------------- /metrics
+// Mirror of backend_ingestion/app/metrics.py + main.py:299 `prometheus_metrics`.
+//
+// PARITY SCOPE (deliberately narrow): this is the Prometheus *exposition*
+// endpoint, not a dashboard data API. In Python, counter/gauge/histogram values
+// are produced by the live INGESTION pipeline (batch_writer / MQTT / WS hub).
+// This Rust spike is a STATELESS READ REPLICA — it does NOT ingest — so every
+// ingest/WS metric is emitted at 0 (honest: "this process runs no ingest loop").
+// The one metric Rust can legitimately derive live is `robot_backend_robots_online`,
+// computed by mirroring `liveness.online_count()` (ZCOUNT of `liveness:last_seen`
+// within the offline threshold). The content-type is passed through verbatim from
+// prometheus_client (`text/plain; version=0.0.4; charset=utf-8`) — Prometheus
+// negotiates the format by this version string, so it must not be altered.
+//
+// Therefore parity for this endpoint is SCHEMA parity, NOT value parity:
+//   (1) content-type identical to Python;
+//   (2) every metric name Rust emits is also declared by Python (no invented names).
+// Both are verified live in verify_spike.py.
+
+const OFFLINE_THRESHOLD_S: f64 = 30.0; // mirror config.py: robot_offline_threshold_s
+// Mirrors prometheus_client.CONTENT_TYPE_LATEST (the installed client is 1.0.0).
+const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=1.0.0; charset=utf-8";
+
+/// Mirror of `liveness.online_count()`: count members of the `liveness:last_seen`
+/// ZSET whose score (epoch seconds) is within `OFFLINE_THRESHOLD_S` of now.
+async fn online_count(redis: &mut ConnectionManager) -> Result<i64, redis::RedisError> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let min = format!("{:.6}", now - OFFLINE_THRESHOLD_S);
+    let cnt: i64 = redis::cmd("ZCOUNT")
+        .arg("liveness:last_seen")
+        .arg(&min)
+        .arg("+inf")
+        .query_async(redis)
+        .await?;
+    Ok(cnt)
+}
+
+#[derive(Clone, Copy)]
+enum MType {
+    Counter,
+    Gauge,
+    Histogram,
+}
+
+struct Metric {
+    name: &'static str,
+    mtype: MType,
+    help: &'static str,
+    /// For labeled counters, one series is emitted per (label, value) pair.
+    labels: &'static [(&'static str, &'static str)],
+}
+
+/// Metric registry mirrored from backend_ingestion/app/metrics.py (verbatim names,
+/// types, and HELP strings). Adding/renaming here must track that file.
+const METRICS: &[Metric] = &[
+    Metric { name: "robot_backend_telemetry_written_total", mtype: MType::Counter, help: "Telemetry rows successfully written to TimescaleDB (accumulated per batch, unit: rows)", labels: &[] },
+    Metric { name: "robot_backend_batch_flushes_total", mtype: MType::Counter, help: "BatchWriter flush count, split by trigger reason (count=full 500 rows / timeout=full 1s)", labels: &[("reason", "count"), ("reason", "timeout")] },
+    Metric { name: "robot_backend_queue_depth", mtype: MType::Gauge, help: "Current backlog of the asyncio.Queue (steadily rising = flush cannot keep up with 1000 msg/s)", labels: &[] },
+    Metric { name: "robot_backend_mqtt_received_total", mtype: MType::Counter, help: "Telemetry messages received over MQTT", labels: &[] },
+    Metric { name: "robot_backend_mqtt_dropped_total", mtype: MType::Counter, help: "Messages dropped due to MQTT validation failure (>0 means the payload contract is broken)", labels: &[] },
+    Metric { name: "robot_backend_action_mqtt_received_total", mtype: MType::Counter, help: "VLA policy-action messages received over MQTT (robots/+/action)", labels: &[] },
+    Metric { name: "robot_backend_action_mqtt_dropped_total", mtype: MType::Counter, help: "VLA policy-action messages dropped due to validation failure", labels: &[] },
+    Metric { name: "robot_backend_ws_probe_alive", mtype: MType::Gauge, help: "Latest WS synthetic-probe result (1=handshake + received snapshot first frame / 0=failure)", labels: &[] },
+    Metric { name: "robot_backend_ws_probe_failures_total", mtype: MType::Counter, help: "Cumulative WS synthetic-probe failures (>0 means the client-perspective realtime stream dropped)", labels: &[] },
+    Metric { name: "robot_backend_ws_connections", mtype: MType::Gauge, help: "Current active /ws/robots connection count (including in-handshake connections not yet authenticated)", labels: &[] },
+    Metric { name: "robot_backend_robots_online", mtype: MType::Gauge, help: "Online robot count (now - last_seen <= threshold, ISSUE #77; stopped reporters excluded)", labels: &[] },
+    Metric { name: "robot_backend_history_latency_seconds", mtype: MType::Histogram, help: "/history endpoint processing time (incl. DB query, the data source for Drawer line chart + heatmap)", labels: &[] },
+    Metric { name: "robot_backend_history_source_total", mtype: MType::Counter, help: "/history actual data source hit: cagg=continuous aggregate robot_history_10s / raw=raw table fallback", labels: &[("source", "cagg"), ("source", "raw")] },
+    Metric { name: "robot_backend_ws_outbound_queue_depth", mtype: MType::Gauge, help: "Combined outbound backlog frame count across all /ws/robots connections (persistent >0 means a slow client)", labels: &[] },
+    Metric { name: "robot_backend_ws_telemetry_frames_dropped_total", mtype: MType::Counter, help: "Telemetry frames dropped due to a full outbound queue (drop oldest, the backpressure cost of a slow client)", labels: &[] },
+    Metric { name: "robot_backend_ws_alerts_deferred_total", mtype: MType::Counter, help: "Alert frames deferred because the outbound queue was full (should be 0; >0 means alert backlog, scale up or drop a connection)", labels: &[] },
+    Metric { name: "robot_backend_ws_slow_client_evicted_total", mtype: MType::Counter, help: "Slow client connections actively closed due to a persistently full outbound queue or heartbeat timeout", labels: &[] },
+    Metric { name: "robot_backend_ws_hub_frames_total", mtype: MType::Counter, help: "WS hub frames actually sent, split by kind (telemetry=one merged frame per robot / alert=sent individually)", labels: &[("kind", "telemetry"), ("kind", "alert")] },
+    Metric { name: "robot_backend_ws_hub_coalesced_total", mtype: MType::Counter, help: "Telemetry frames merged away by the tick (received this tick - actually fanned out; >0 = keep-latest-per-robot in effect)", labels: &[] },
+    Metric { name: "robot_backend_telemetry_buffered_total", mtype: MType::Counter, help: "Telemetry rows stored in the offline buffer (Redis list) after a DB write failure (awaiting replay)", labels: &[] },
+    Metric { name: "robot_backend_telemetry_buffered_replayed_total", mtype: MType::Counter, help: "Telemetry rows replayed from the offline buffer and re-enqueued into the writer", labels: &[] },
+];
+
+const HISTORY_LATENCY_BUCKETS: &[f64] = &[0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5];
+
+/// Render the Prometheus exposition (HELP + TYPE + samples), matching the text
+/// format produced by prometheus_client.generate_latest().
+///
+/// prometheus_client strips the conventional `_total` suffix when emitting the
+/// auto-generated `_created` gauge (e.g. `..._written_total` -> `..._written_created`).
+fn created_name(name: &str) -> String {
+    let base = name.strip_suffix("_total").unwrap_or(name);
+    format!("{base}_created")
+}
+
+fn render_metrics(online: i64) -> String {
+    let mut out = String::new();
+    for m in METRICS {
+        out.push_str("# HELP ");
+        out.push_str(m.name);
+        out.push(' ');
+        out.push_str(m.help);
+        out.push('\n');
+
+        let t = match m.mtype {
+            MType::Counter => "counter",
+            MType::Gauge => "gauge",
+            MType::Histogram => "histogram",
+        };
+        out.push_str("# TYPE ");
+        out.push_str(m.name);
+        out.push(' ');
+        out.push_str(t);
+        out.push('\n');
+
+        match m.mtype {
+            MType::Histogram => {
+                for &b in HISTORY_LATENCY_BUCKETS {
+                    out.push_str(m.name);
+                    out.push_str("_bucket{le=\"");
+                    out.push_str(&format!("{b}"));
+                    out.push_str("\"} 0\n");
+                }
+                out.push_str(m.name);
+                out.push_str("_bucket{le=\"+Inf\"} 0\n");
+                out.push_str(m.name);
+                out.push_str("_sum 0\n");
+                out.push_str(m.name);
+                out.push_str("_count 0\n");
+                // prometheus_client also emits a `_created` gauge for histograms.
+                let cn = created_name(m.name);
+                out.push_str("# HELP ");
+                out.push_str(&cn);
+                out.push(' ');
+                out.push_str(m.help);
+                out.push('\n');
+                out.push_str("# TYPE ");
+                out.push_str(&cn);
+                out.push_str(" gauge\n");
+                out.push_str(&cn);
+                out.push_str(" 0\n");
+            }
+            MType::Counter => {
+                if m.labels.is_empty() {
+                    out.push_str(m.name);
+                    out.push_str(" 0\n");
+                } else {
+                    for (k, v) in m.labels {
+                        out.push_str(m.name);
+                        out.push('{');
+                        out.push_str(k);
+                        out.push_str("=\"");
+                        out.push_str(v);
+                        out.push_str("\"} 0\n");
+                    }
+                }
+                // prometheus_client emits a `_created` gauge for counters that have an
+                // active series (with the conventional `_total` suffix stripped). We emit
+                // it unconditionally so the monitoring contract is stable even before a
+                // counter has been incremented on a given label (Python only emits it
+                // once a series exists, which is non-deterministic across scrape timing).
+                let cn = created_name(m.name);
+                out.push_str("# HELP ");
+                out.push_str(&cn);
+                out.push(' ');
+                out.push_str(m.help);
+                out.push('\n');
+                out.push_str("# TYPE ");
+                out.push_str(&cn);
+                out.push_str(" gauge\n");
+                out.push_str(&cn);
+                out.push_str(" 0\n");
+            }
+            MType::Gauge => {
+                out.push_str(m.name);
+                if m.name == "robot_backend_robots_online" {
+                    // Prometheus gauges are formatted as floats (mirrors "0.0").
+                    out.push_str(&format!(" {online}.0\n"));
+                } else {
+                    out.push_str(" 0.0\n");
+                }
+            }
+        }
+    }
+    out
+}
+
+async fn metrics(State(state): State<AppState>) -> impl axum::response::IntoResponse {
+    let online = match online_count(&mut state.redis.clone()).await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!("metrics online_count failed: {e}");
+            0
+        }
+    };
+    let body = render_metrics(online);
+    (
+        axum::http::StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static(PROMETHEUS_CONTENT_TYPE),
+        )],
+        body,
+    )
+}
+
 // --------------------------------------------------------------- /alerts
 // Mirror of backend_ingestion/app/alerts/{router.py,repository.py}: paginated
 // alert query (GET /alerts). Source of truth for columns is the explicit
@@ -730,6 +934,7 @@ async fn main() {
         .route("/supported-robots", get(supported_robots))
         .route("/robots/:robot_id/history", get(history))
         .route("/alerts", get(list_alerts_handler))
+        .route("/metrics", get(metrics))
         .with_state(state);
 
     let addr: std::net::SocketAddr = "0.0.0.0:8001".parse().expect("valid addr");
@@ -753,6 +958,80 @@ async fn main() {
 mod tests {
     use super::*;
     use serde_json::{Map, Value};
+
+    #[test]
+    fn metrics_exposition_schema_matches_prometheus_format() {
+        // content-type must equal prometheus_client's CONTENT_TYPE_LATEST (1.0.0).
+        assert_eq!(
+            PROMETHEUS_CONTENT_TYPE,
+            "text/plain; version=1.0.0; charset=utf-8"
+        );
+
+        let body = render_metrics(42);
+
+        // HELP + TYPE present for every declared metric.
+        for m in METRICS {
+            assert!(
+                body.contains(&format!("# HELP {m}", m = m.name)),
+                "missing HELP for {}",
+                m.name
+            );
+            let t = match m.mtype {
+                MType::Counter => "counter",
+                MType::Gauge => "gauge",
+                MType::Histogram => "histogram",
+            };
+            assert!(
+                body.contains(&format!("# TYPE {m} {t}", m = m.name, t = t)),
+                "missing TYPE for {}",
+                m.name
+            );
+            // prometheus_client emits a `_created` gauge for counters and histograms,
+            // with the `_total` suffix stripped from the name.
+            let expect_created =
+                matches!(m.mtype, MType::Counter) || matches!(m.mtype, MType::Histogram);
+            if expect_created {
+                let cn = created_name(m.name);
+                assert!(
+                    body.contains(&format!("# TYPE {cn} gauge", cn = cn)),
+                    "missing _created TYPE for {} (expected {})",
+                    m.name,
+                    cn
+                );
+            }
+        }
+
+        // online gauge carries the injected live value (Prometheus float formatting).
+        assert!(
+            body.contains("robot_backend_robots_online 42.0"),
+            "online value not injected"
+        );
+
+        // labeled counters emit each label value.
+        assert!(body.contains("robot_backend_batch_flushes_total{reason=\"count\"} 0"));
+        assert!(body.contains("robot_backend_history_source_total{source=\"cagg\"} 0"));
+        assert!(body.contains("robot_backend_ws_hub_frames_total{kind=\"alert\"} 0"));
+
+        // histogram helper lines.
+        assert!(body.contains("robot_backend_history_latency_seconds_bucket{le=\"0.01\"} 0"));
+        assert!(body.contains("robot_backend_history_latency_seconds_bucket{le=\"+Inf\"} 0"));
+        assert!(body.contains("robot_backend_history_latency_seconds_sum 0"));
+        assert!(body.contains("robot_backend_history_latency_seconds_count 0"));
+
+        // every non-comment line is a well-formed `name[{labels}] value` sample.
+        for line in body.lines() {
+            if line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.rsplitn(2, ' ');
+            let v = parts.next().unwrap_or("");
+            let _name = parts.next().unwrap_or("");
+            assert!(
+                v.parse::<f64>().is_ok(),
+                "non-numeric sample value in line: {line}"
+            );
+        }
+    }
 
     #[test]
     fn lookup_registered_model_matches_catalog() {
