@@ -1,0 +1,24 @@
+[package]
+name = "robot-monitor-backend-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Rust spike backend for RobotMonitor (strangler-fig migration target)"
+license = "AGPL-3.0"
+
+# ---- Spike scope (T2): minimal Axum + Tokio + serde to prove the toolchain
+# and project skeleton. DB/Redis/auth deps are added in T3 when GET /robots lands. ----
+[dependencies]
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "json"] }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

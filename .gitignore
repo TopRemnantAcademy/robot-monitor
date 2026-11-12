@@ -17,6 +17,8 @@ venv/
 
 # Rust/maturin build artifacts (Phase 0 POC: bridge/iso21423-rs)
 bridge/iso21423-rs/target/
+# Rust backend spike (strangler-fig migration target)
+backend_rs/target/
 
 # Node
 node_modules/
@@ -50,3 +52,20 @@ dump.rdb
 
 # Ops-layer local state (Grafana-created dashboards are not committed; source is infra/ops/grafana/dashboards)
 infra/ops/grafana/data/
+
+# ============================================================================
+# REAL / PRODUCTION DATA — NEVER COMMIT, NEVER PUSH TO PUBLIC REMOTE
+# ============================================================================
+# encosmart (Segway Go Cloud Robotics) is a REAL delivery platform. The files
+# below are local verification captures of that live system and contain REAL
+# robot fleet IDs, telemetry, and API payloads. They must NOT enter git and
+# must NEVER be pushed to the public mirror (origin = github.com/TopRemnantAcademy).
+# Only the private CNB remote may ever hold them, and only if explicitly intended.
+# The public AGPL repo must remain free of any real customer/robot data.
+frontend_dashboard/enco_*
+frontend_dashboard/gen_seed.cjs
+# Broad catch-all in case these artifacts are moved elsewhere in the tree:
+**/enco_seed.sql
+**/enco-*.json
+**/enco-*.png
+**/gen_seed.cjs
