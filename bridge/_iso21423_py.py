@@ -223,3 +223,63 @@ def iso21423_to_telemetry(state: ISO21423RobotState) -> dict:
         "orient_z": round(p.qz, 4),
         "ts": state.timestamp_ms,
     }
+
+
+# --------------------------------------------------------------------------
+# Policy action mapping (R-VLA-EVAL Phase 1)
+#
+# Maps a ROS 2 ``robotmonitor_msgs/msg/PolicyAction`` JSON dict (as rosbridge
+# delivers it) into RobotMonitor's ``PolicyAction`` wire format that
+# ``backend_ingestion/app/services/action_subscriber.py`` validates against
+# ``app/schemas/telemetry.PolicyAction``.
+#
+# The ROS 2 message body does NOT carry ``robot_id`` -- that is parsed by the
+# bridge from the MQTT topic ``robots/{robot_id}/action`` and passed in. The
+# Rust ``iso21423_rs`` port mirrors this function field-for-field; ``mock_test``
+# asserts zero divergence between the two backends.
+# --------------------------------------------------------------------------
+
+def policy_action_to_wire(pa: dict, *, robot_id: str) -> dict:
+    """Map a ROS 2 PolicyAction message dict to the RobotMonitor wire format.
+
+    Args:
+        pa: ROS 2 ``robotmonitor_msgs/msg/PolicyAction`` as a plain dict
+            (rosbridge JSON). Expected keys: ``policy_version`` (str),
+            ``trial_id`` (str, '' when not in a trial), ``action`` (list of
+            numbers), ``goal`` (str, '' when none), and an optional
+            ``header.stamp`` ({sec, nanosec}) for ``ts``.
+        robot_id: robot identity, supplied by the bridge from the MQTT topic.
+
+    Returns:
+        A dict with exactly the keys the backend ``PolicyAction`` schema
+        expects: ``robot_id``, ``policy_version``, ``trial_id``, ``action``,
+        ``goal``, ``ts``.
+    """
+    # ``""`` / missing -> None (mirrors ``pa.get(k) or None``).
+    trial = pa.get("trial_id") or None
+    goal = pa.get("goal") or None
+
+    # action: list of numbers -> list[float]; None elements become 0.0 so the
+    # output is bit-identical to the Rust port (which also coerces None->0.0).
+    action: list[float] = []
+    for x in (pa.get("action") or []):
+        action.append(0.0 if x is None else float(x))
+
+    # ts (ms) derived from header.stamp.{sec, nanosec}; None when absent/malformed.
+    ts = None
+    header = pa.get("header")
+    if isinstance(header, dict):
+        stamp = header.get("stamp") or {}
+        sec = stamp.get("sec")
+        nanosec = stamp.get("nanosec")
+        if isinstance(sec, int) and isinstance(nanosec, int):
+            ts = sec * 1000 + nanosec // 1_000_000
+
+    return {
+        "robot_id": robot_id,
+        "policy_version": pa.get("policy_version") or "",
+        "trial_id": trial,
+        "action": action,
+        "goal": goal,
+        "ts": ts,
+    }

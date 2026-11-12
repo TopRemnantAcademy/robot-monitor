@@ -44,11 +44,14 @@ from app.schemas.api import (
     HealthResponse,
     RobotHistoryResponse,
     RobotListResponse,
+    SupportedRobotOut,
     SupportedRobotsResponse,
 )
 from app.catalog import lookup
 from app.security_middleware import install_cors, install_rate_limit
 from app.services import liveness, mqtt_subscriber, state_cache
+from app.services import action_subscriber
+from app.services.action_writer import PolicyActionBatchWriter
 from app.services.batch_writer import BatchWriter
 from app.services.metadata_writer import metadata_writer
 from app.services.offline_buffer import DurableBuffer, run_replay
@@ -64,6 +67,8 @@ configure_json_logging(logging.INFO)
 log = logging.getLogger("main")
 
 writer = BatchWriter()
+# R-VLA-EVAL Phase 1: parallel writer for the VLA policy-action stream.
+action_writer = PolicyActionBatchWriter()
 
 # R-12: span routing and upper bound for /history (history() specific; see infra/init.sql §5.1b).
 # Size threshold: > 3h goes to the hourly bucket. 180 is used instead of 1440 (24h) because
@@ -81,6 +86,10 @@ MAX_HISTORY_MINUTES = 7 * 24 * 60  # 10080
 async def lifespan(app: FastAPI):
     # startup
     writer_task = asyncio.create_task(writer.run())
+    # R-VLA-EVAL Phase 1: parallel action stream. Same residency model as the
+    # telemetry writer (start and stay resident, flush before shutdown).
+    action_writer_task = asyncio.create_task(action_writer.run())
+    action_mqtt_task = asyncio.create_task(action_subscriber.run(action_writer))
     # robot_metadata heartbeat (G-6 / ISSUE #96): a side path independent of batch_writer,
     # collapsed at 1s + single-statement batched UPDATE. Its daemon style matches writer's —
     # both are "start and stay resident, explicitly flush before shutdown". When the switch is
@@ -112,6 +121,8 @@ async def lifespan(app: FastAPI):
     app.state.writer_task = writer_task
     app.state.metadata_task = metadata_task
     app.state.mqtt_task = mqtt_task
+    app.state.action_writer_task = action_writer_task
+    app.state.action_mqtt_task = action_mqtt_task
     app.state.probe_task = probe_task
     app.state.offline_task = offline_task
     # Order 16 T3: endpoint is a no-op if empty, returning False does not affect startup
@@ -141,6 +152,12 @@ async def lifespan(app: FastAPI):
     #      be lost.
     await writer.graceful_shutdown()
     await asyncio.gather(writer_task, return_exceptions=True)
+    #   ②b Flush the VLA action writer's backlog (R-VLA-EVAL Phase 1), same ordering
+    #      constraint as the telemetry writer: stop the inlet first, then flush.
+    action_mqtt_task.cancel()
+    await asyncio.gather(action_mqtt_task, return_exceptions=True)
+    await action_writer.graceful_shutdown()
+    await asyncio.gather(action_writer_task, return_exceptions=True)
     #   ③ Then flush the metadata heartbeat backlog. MUST be before close_pool(): stop() only
     #      sets the flag and wakes run(); the real flush() waits for run() to finish, so the
     #      pool must still be alive then.
@@ -230,6 +247,11 @@ async def healthz() -> HealthResponse:
         "queue_depth": writer.queue.qsize(),
         "mqtt_received": mqtt_subscriber.received,
         "mqtt_dropped": mqtt_subscriber.dropped,
+        # R-VLA-EVAL Phase 1: the VLA action stream has its own receive/drop
+        # counters, so a broken action payload is observable independently of
+        # telemetry.
+        "action_received": action_subscriber.received,
+        "action_dropped": action_subscriber.dropped,
         # Row-loss triplet (ISSUE #19 G2): submitted is rows handed to the store, written is
         # rows actually stored, skipped is rows silently dropped by ON CONFLICT DO NOTHING.
         # Together with rejected (bad rows judged unwritable by the degrade chain) they are the
@@ -311,14 +333,62 @@ async def prometheus_metrics():
 
 @app.get("/robots", response_model=RobotListResponse)
 async def list_robots(_user: RobotUser = Depends(current_active_user)):
-    """Latest status of 100 robots. Read-only endpoint: accessible from viewer role up; the
-    response body is byte-for-byte identical to before auth was added.
+    """Latest status of the FULL registered fleet (read-only, viewer role up).
 
-    ISSUE #77: the response adds two optional fields `is_online` / `last_seen`, and ALWAYS
-    returns 100 robots (a robot that stopped reporting falls back to an offline placeholder
-    rather than disappearing from the list).
+    The demo set `settings.robot_ids` (100 humanoid, live MQTT) is always included. On top of
+    that we merge every robot registered in `robot_metadata` that is NOT in the demo set
+    (e.g. the SEGWAY-S1 delivery fleet seeded from encosmart) so the main monitoring grid
+    shows the whole platform — not just the demo machines.
+
+    Those real-but-not-live robots have no Redis Hash (nothing publishes to MQTT for them),
+    so `state_cache.snapshot` returns an offline placeholder (battery 0 / never-seen). We then
+    backfill the *real* last-known facts from `robot_metadata` + the latest `robot_telemetry`
+    row so the cards show genuine data instead of a fake "0% / offline". The 100 demo ids are
+    deliberately NOT enriched — when live ingest is running they carry real-time values from the
+    snapshot, and when it isn't they stay as the honest "never reported" placeholder.
+
+    This change does NOT alter `settings.robot_ids` (still exactly 100, contract + tests intact).
     """
-    return {"robots": await state_cache.snapshot(settings.robot_ids)}
+    base_ids = settings.robot_ids  # 100 demo humanoid — live MQTT, never enriched.
+
+    from app.db.session import get_pool
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        extra_rows = await conn.fetch(
+            "SELECT robot_id FROM robot_metadata WHERE robot_id != ALL($1::text[])",
+            base_ids,
+        )
+        extra_ids = [r["robot_id"] for r in extra_rows]
+        merged = base_ids + extra_ids
+
+        snap = await state_cache.snapshot(merged)
+
+        if extra_ids:
+            meta_rows = await conn.fetch(
+                """
+                SELECT m.robot_id,
+                       m.is_online,
+                       (SELECT battery_pct
+                          FROM robot_telemetry t
+                         WHERE t.robot_id = m.robot_id
+                         ORDER BY time DESC
+                         LIMIT 1) AS last_battery
+                FROM robot_metadata m
+                WHERE m.robot_id = ANY($1::text[])
+                """,
+                extra_ids,
+            )
+            meta_by_id = {r["robot_id"]: r for r in meta_rows}
+            for d in snap:
+                rid = d.get("robot_id")
+                if rid in meta_by_id and (d.get("ts") or 0) == 0:
+                    # Offline placeholder (nothing on the live feed) -> backfill real facts.
+                    m = meta_by_id[rid]
+                    d["battery_pct"] = float(m["last_battery"] or 0.0)
+                    d["is_online"] = bool(m["is_online"])
+
+    return {"robots": snap}
 
 
 @app.get("/supported-robots", response_model=SupportedRobotsResponse)
@@ -453,31 +523,49 @@ async def history(
     # field name), so the result mapping is written once and there is no drift of "aggregate
     # added a column, fallback missed it". The only difference is FROM / WHERE: the aggregate
     # table filters by `bucket`, the raw table by `time`.
+    # The cagg branch reads `robot_history_10s`, whose time dimension is the pre-computed
+    # `bucket` column (there is NO raw `time` column in a continuous aggregate). The raw
+    # branch reads `robot_telemetry`, which DOES have a `time` column. `last(x, <order>)`
+    # therefore needs the ordering column to match the source: `bucket` for the cagg,
+    # `time` for the raw table. A hardcoded `time` on the cagg branch made the endpoint
+    # 503 ("column time does not exist") for EVERY robot — a global regression of the
+    # Drawer history lines. `time_order` parameterizes exactly that column.
+    #
+    # `res_s` (resolution seconds) and `span_s` (window seconds) are validated integers
+    # (resolution from `_parse_resolution`, span derived from `minutes`), so they are
+    # inlined as interval literals. This avoids the latent PG parameter-typing failure of
+    # `($1 || ' seconds')::interval` on the raw branch — that parameter could not be typed,
+    # so the error only surfaced once the cagg was empty and the raw fallback ran. Only
+    # `robot_id` remains a bound parameter.
     _select = """
         SELECT {bucket}                          AS bucket,
                robot_id,
-               last(status_code, time)           AS status_code,
-               last(battery_pct, time)           AS battery_pct,
-               max(max_joint_temp)               AS max_joint_temp,
-               last(joint_temperatures, time)    AS joint_temperatures,
-               last(joint_torques, time)         AS joint_torques,
+               last(status_code, {time_order})   AS status_code,
+               COALESCE(last(battery_pct, {time_order}), 0.0) AS battery_pct,
+               COALESCE(max(max_joint_temp), 0.0) AS max_joint_temp,
+               last(joint_temperatures, {time_order}) AS joint_temperatures,
+               last(joint_torques, {time_order}) AS joint_torques,
                -- joint_positions must be returned: the Drawer's third line "angle (rad)" data
                -- source is point.joint_positions[joint] (RobotDetailDrawer.tsx:88).
                -- When missing, that line is permanently null, the graph permanently blank.
-               last(joint_positions, time)       AS joint_positions
+               last(joint_positions, {time_order}) AS joint_positions
         FROM {source}
-        WHERE robot_id = $2
-          AND {time_col} >= now() - (($3 || ' seconds')::interval)
+        WHERE robot_id = $1
+          AND {time_filter}
         GROUP BY bucket, robot_id
         ORDER BY bucket
     """
     sql_cagg = _select.format(
-        bucket="bucket", time_col="bucket", source=agg_source
+        bucket="bucket",
+        time_order="bucket",
+        source=agg_source,
+        time_filter="bucket >= now() - interval '{span_s} seconds'".format(span_s=span_s),
     )
     sql_raw = _select.format(
-        bucket="time_bucket(($1 || ' seconds')::interval, time)",
-        time_col="time",
+        bucket="time_bucket('{res_s} seconds'::interval, time)".format(res_s=res_s),
+        time_order="time",
         source="robot_telemetry",
+        time_filter="time >= now() - interval '{span_s} seconds'".format(span_s=span_s),
     )
 
     from app.db.session import get_pool
@@ -498,14 +586,14 @@ async def history(
     source: str | None = None
     try:
         async with pool.acquire() as conn:
-            rows = await conn.fetch(sql_cagg, str(res_s), robot_id, str(span_s))
+            rows = await conn.fetch(sql_cagg, robot_id)
             if not rows:
                 # Aggregate not ready (policy hasn't refreshed to this window) → fall back to raw
                 # table. Fall back ONLY on empty results, not unconditionally double-querying:
                 # the non-empty path shouldn't pay a second cost, otherwise the gain from
                 # switching to continuous aggregates would be cancelled out by itself.
                 source = "raw"
-                rows = await conn.fetch(sql_raw, str(res_s), robot_id, str(span_s))
+                rows = await conn.fetch(sql_raw, robot_id)
             else:
                 source = "cagg"
     except Exception as exc:

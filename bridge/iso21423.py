@@ -32,6 +32,14 @@ except ImportError:  # pragma: no cover - exercised only without the wheel
     )
     _BACKEND = "python"
 
+# `policy_action_to_wire` (R-VLA-EVAL Phase 1) is a newer addition. Tolerate a
+# stale compiled extension: fall back to the pure-Python reference so the rest
+# of the bridge keeps importing (the Rust port is re-exported once rebuilt).
+try:
+    from iso21423_rs import policy_action_to_wire  # type: ignore
+except ImportError:  # pragma: no cover
+    from ._iso21423_py import policy_action_to_wire  # type: ignore
+
 __all__ = [
     "OperatingMode",
     "BatteryState",
@@ -41,5 +49,6 @@ __all__ = [
     "yaw_to_quat",
     "telemetry_to_iso21423",
     "iso21423_to_telemetry",
+    "policy_action_to_wire",
     "_BACKEND",
 ]

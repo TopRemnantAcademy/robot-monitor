@@ -42,7 +42,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 from app import metrics
 from app.config import settings
@@ -55,42 +57,61 @@ log = logging.getLogger("batch_writer")
 # Stop sentinel: graceful_shutdown() uses it to wake run() blocked on queue.get()
 _STOP = object()
 
-# Explicit column list: COPY must name columns explicitly (the bulk API cannot
-# infer them from Telemetry), and the order must match the tuple returned by
-# _to_row() position for position.
-COLUMNS: tuple[str, ...] = (
+# --------------------------------------------------------------------------
+# Writer configuration (parameterized so the SAME degradation chain can serve
+# multiple hypertables -- telemetry and the VLA policy_actions stream share the
+# COPY->staging->upsert / executemany / bad-row-isolation logic; only the
+# table/columns/row-shape differ). The telemetry config is the default, so the
+# existing `writer = BatchWriter()` in main.py is byte-for-byte unchanged.
+# --------------------------------------------------------------------------
+@dataclass(frozen=True)
+class WriterConfig:
+    staging_table: str
+    columns: tuple[str, ...]
+    insert_sql: str
+    staging_create: str
+    staging_truncate: str
+    staging_upsert: str
+
+
+# Telemetry (the original, unchanged column set + SQL).
+_TELEMETRY_COLUMNS: tuple[str, ...] = (
     "time", "robot_id", "status_code", "error_code", "battery_pct", "battery_temp",
     "max_joint_temp", "joint_temperatures", "joint_positions", "joint_torques",
     "pos_x", "pos_y", "pos_z", "orient_w", "orient_x", "orient_y", "orient_z",
 )
 
-# L2 fallback: executemany uses the higher-overhead extended protocol (no SQL
-# text concatenated for batch size), with an explicit ::jsonb cast so JSON text
-# lands correctly in the jsonb columns.
-INSERT_SQL = """
+TELEMETRY_CONFIG = WriterConfig(
+    staging_table="telemetry_stg",
+    columns=_TELEMETRY_COLUMNS,
+    # L2 fallback: executemany uses the higher-overhead extended protocol (no SQL
+    # text concatenated for batch size), with an explicit ::jsonb cast so JSON text
+    # lands correctly in the jsonb columns.
+    insert_sql="""
 INSERT INTO robot_telemetry (
     time, robot_id, status_code, error_code, battery_pct, battery_temp, max_joint_temp,
     joint_temperatures, joint_positions, joint_torques,
     pos_x, pos_y, pos_z, orient_w, orient_x, orient_y, orient_z
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10::jsonb,$11,$12,$13,$14,$15,$16,$17)
 ON CONFLICT (time, robot_id) DO NOTHING
-"""
-
-# L1 staging: the temp table inherits robot_telemetry's column definitions; the
-# jsonb columns are carried through the SELECT stage directly, without a
-# text->jsonb re-parse, so the jsonb type is never lost.
-STAGING_CREATE = "CREATE TEMP TABLE IF NOT EXISTS telemetry_stg (LIKE robot_telemetry INCLUDING DEFAULTS)"
-STAGING_TRUNCATE = "TRUNCATE telemetry_stg"
-STAGING_UPSERT = f"""
-INSERT INTO robot_telemetry ({", ".join(COLUMNS)})
-SELECT {", ".join(COLUMNS)} FROM telemetry_stg
+""",
+    # L1 staging: the temp table inherits robot_telemetry's column definitions; the
+    # jsonb columns are carried through the SELECT stage directly, without a
+    # text->jsonb re-parse, so the jsonb type is never lost.
+    staging_create="CREATE TEMP TABLE IF NOT EXISTS telemetry_stg (LIKE robot_telemetry INCLUDING DEFAULTS)",
+    staging_truncate="TRUNCATE telemetry_stg",
+    staging_upsert=f"""
+INSERT INTO robot_telemetry ({", ".join(_TELEMETRY_COLUMNS)})
+SELECT {", ".join(_TELEMETRY_COLUMNS)} FROM telemetry_stg
 ON CONFLICT (time, robot_id) DO NOTHING
-"""
+""",
+)
 
 
 class BatchWriter:
-    def __init__(self) -> None:
-        self.queue: asyncio.Queue[Telemetry] = asyncio.Queue(
+    def __init__(self, config: WriterConfig | None = None) -> None:
+        self.config = config or TELEMETRY_CONFIG
+        self.queue: asyncio.Queue = asyncio.Queue(
             maxsize=settings.batch_queue_maxsize
         )
         self._lock = asyncio.Lock()
@@ -123,7 +144,7 @@ class BatchWriter:
         self._stop_requested = False
 
     # ---- producer ----
-    async def put(self, t: Telemetry) -> None:
+    async def put(self, t: Any) -> None:
         """Drop the newest item and count it when the queue is full; never block the MQTT consume loop."""
         try:
             self.queue.put_nowait(t)
@@ -309,15 +330,18 @@ class BatchWriter:
         conflict-skipped rows are not counted. This is the quantified basis for
         "the data received did not all land" (ISSUE #19 G2).
         """
+        cfg = self.config
         pool = await get_pool()
         async with pool.acquire() as conn:
             async with conn.transaction():
-                await conn.execute(STAGING_CREATE)
-                await conn.execute(STAGING_TRUNCATE)
+                await conn.execute(cfg.staging_create)
+                await conn.execute(cfg.staging_truncate)
                 # copy_records_to_table does not support ON CONFLICT; idempotency
                 # comes from the staging table's upsert.
-                await conn.copy_records_to_table("telemetry_stg", records=rows, columns=list(COLUMNS))
-                status = await conn.execute(STAGING_UPSERT)
+                await conn.copy_records_to_table(
+                    cfg.staging_table, records=rows, columns=list(cfg.columns)
+                )
+                status = await conn.execute(cfg.staging_upsert)
         try:
             inserted = int(status.split()[-1])
         except (IndexError, ValueError):        # fallback: don't misreport dropped rows on unexpected status format
@@ -339,7 +363,7 @@ class BatchWriter:
         pool = await get_pool()
         async with pool.acquire() as conn:
             async with conn.transaction():
-                await conn.executemany(INSERT_SQL, rows)
+                await conn.executemany(self.config.insert_sql, rows)
         return len(rows)
 
     # ---- L3: binary-search isolation of bad rows, salvaging good data ----

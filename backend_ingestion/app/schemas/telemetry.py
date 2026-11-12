@@ -58,3 +58,26 @@ class Telemetry(BaseModel):
         if self.max_joint_temp is None:
             self.max_joint_temp = max(self.joint_temperatures.values())
         return self
+
+
+class PolicyAction(BaseModel):
+    """VLA policy action frame (R-VLA-EVAL Phase 1).
+
+    A *parallel* stream to ``Telemetry``: the external VLA policy node (e.g. via
+    SMEAC/rosetta_client or a direct ROS 2 ``robotmonitor_msgs/msg/PolicyAction``)
+    emits one of these per control tick. It is deliberately decoupled from the
+    telemetry path so the 38w+ telemetry rows are never touched.
+
+    ``action`` is the raw action vector the policy produced this tick
+    (e.g. 6-DoF end-effector delta, or a higher-dimensional joint-target vector).
+    ``policy_version`` ties the row to a trained checkpoint; ``trial_id`` ties it
+    to an A/B evaluation trial (R-VLA-EVAL Phase 2+) and may be null for normal
+    operation.
+    """
+
+    robot_id: str = Field(pattern=ROBOT_ID_PATTERN)
+    policy_version: str
+    trial_id: str | None = None
+    action: list[float] = Field(min_length=1, max_length=64)
+    goal: str | None = None
+    ts: int | None = None                     # client millisecond timestamp (optional)

@@ -872,6 +872,70 @@ impl Ros2StateAccumulator {
     }
 }
 
+// --------------------------------------------------------------------------
+// R-VLA-EVAL Phase 1: policy action mapping.
+//
+// Faithful Rust port of `_iso21423_py.policy_action_to_wire`. Maps a ROS 2
+// `robotmonitor_msgs/msg/PolicyAction` JSON dict (rosbridge delivery) into
+// RobotMonitor's `PolicyAction` wire format. The ROS 2 message body carries no
+// `robot_id`; it is supplied by the bridge from the MQTT topic and passed in.
+// `bridge/mock_test.py` asserts field-exact parity against the Python original.
+// --------------------------------------------------------------------------
+#[pyfunction]
+#[pyo3(signature = (pa, robot_id))]
+fn policy_action_to_wire(py: Python<'_>, pa: &Bound<PyDict>, robot_id: String) -> Py<PyDict> {
+    let policy_version = get_str(pa, "policy_version", "");
+    let trial_raw = get_str(pa, "trial_id", "");
+    let goal_raw = get_str(pa, "goal", "");
+
+    // action: list of numbers -> Vec<f64>; None elements become 0.0 (mirrors Python).
+    let action_items = get_list(pa, "action");
+    let mut action: Vec<f64> = Vec::with_capacity(action_items.len());
+    for item in &action_items {
+        if item.is_none() {
+            action.push(0.0);
+        } else {
+            action.push(item.extract::<f64>().unwrap_or(0.0));
+        }
+    }
+
+    // ts (ms) from header.stamp.{sec, nanosec}; None when absent/malformed.
+    let mut ts: Option<i64> = None;
+    let header = subdict(py, pa, "header");
+    let stamp = subdict(py, &header, "stamp");
+    if !stamp.is_empty() {
+        if let (Ok(Some(sec_v)), Ok(Some(nano_v))) = (stamp.get_item("sec"), stamp.get_item("nanosec")) {
+            if let (Ok(sec), Ok(nanosec)) = (sec_v.extract::<i64>(), nano_v.extract::<i64>()) {
+                ts = Some(sec * 1000 + nanosec / 1_000_000);
+            }
+        }
+    }
+
+    let d = PyDict::new(py);
+    d.set_item("robot_id", &robot_id).unwrap();
+    d.set_item("policy_version", &policy_version).unwrap();
+    if trial_raw.is_empty() {
+        d.set_item("trial_id", py.None()).unwrap();
+    } else {
+        d.set_item("trial_id", &trial_raw).unwrap();
+    }
+    d.set_item("action", action).unwrap();
+    if goal_raw.is_empty() {
+        d.set_item("goal", py.None()).unwrap();
+    } else {
+        d.set_item("goal", &goal_raw).unwrap();
+    }
+    match ts {
+        Some(t) => {
+            d.set_item("ts", t).unwrap();
+        }
+        None => {
+            d.set_item("ts", py.None()).unwrap();
+        }
+    }
+    d.unbind()
+}
+
 #[pymodule]
 fn iso21423_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<BatteryState>()?;
@@ -883,5 +947,6 @@ fn iso21423_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(yaw_to_quat, m)?)?;
     m.add_function(wrap_pyfunction!(telemetry_to_iso21423, m)?)?;
     m.add_function(wrap_pyfunction!(iso21423_to_telemetry, m)?)?;
+    m.add_function(wrap_pyfunction!(policy_action_to_wire, m)?)?;
     Ok(())
 }

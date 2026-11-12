@@ -29,6 +29,66 @@ CREATE TABLE IF NOT EXISTS robot_telemetry (
 
 SELECT create_hypertable('robot_telemetry', 'time', if_not_exists => TRUE, chunk_time_interval => INTERVAL '7 days');
 
+-- 2.1 Policy action table (R-VLA-EVAL Phase 1)
+--
+-- A *parallel* high-frequency table for VLA policy action frames. It is
+-- intentionally decoupled from `robot_telemetry` (different consumer: the
+-- evaluation/observability base, not the fleet-health dashboard) so the
+-- existing telemetry contract and the 38w+ historical rows are never affected.
+--
+-- Identity semantics mirror robot_telemetry: the composite PK must include the
+-- partitioning column `time` (a hard TimescaleDB requirement), hence (time, robot_id).
+-- `policy_version` ties each row to a trained checkpoint; `trial_id` ties it to an
+-- A/B evaluation trial (Phase 2+) and is nullable for normal operation.
+-- `action` is the raw action vector (JSONB to stay schema-flexible across
+--   policies of differing dimensionality — 6-DoF up to 64-D joint targets).
+-- `goal` is the natural-language instruction the policy was conditioned on
+--   (nullable; may be large, so it is NOT indexed).
+CREATE TABLE IF NOT EXISTS policy_actions (
+    time              TIMESTAMPTZ     NOT NULL,
+    robot_id          TEXT            NOT NULL,
+    policy_version    TEXT            NOT NULL,
+    trial_id          TEXT,
+    action            JSONB           NOT NULL,
+    goal              TEXT,
+    PRIMARY KEY (time, robot_id)
+);
+
+SELECT create_hypertable('policy_actions', 'time', if_not_exists => TRUE, chunk_time_interval => INTERVAL '7 days');
+
+-- 6.4 policy_actions: also a hypertable; low-frequency relative to telemetry but
+--     equally needs compression + retention guardrails (mirrors §6.2 telemetry 30d).
+ALTER TABLE policy_actions SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'robot_id',
+    timescaledb.compress_orderby   = 'time DESC'
+);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM timescaledb_information.jobs
+        WHERE proc_name = 'policy_compression'
+          AND hypertable_name = 'policy_actions'
+    ) THEN
+        PERFORM add_compression_policy('policy_actions', INTERVAL '1 day');
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM timescaledb_information.jobs
+        WHERE proc_name = 'policy_retention'
+          AND hypertable_name = 'policy_actions'
+    ) THEN
+        PERFORM add_retention_policy('policy_actions', INTERVAL '30 days');
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_policy_actions_robot_time ON policy_actions (robot_id, time DESC);
+CREATE INDEX IF NOT EXISTS idx_policy_actions_trial ON policy_actions (trial_id) WHERE trial_id IS NOT NULL;
+
 -- 3. Robot metadata table (low frequency)
 CREATE TABLE IF NOT EXISTS robot_metadata (
     robot_id         TEXT PRIMARY KEY,

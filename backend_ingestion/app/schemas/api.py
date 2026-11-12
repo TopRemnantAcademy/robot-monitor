@@ -165,3 +165,7 @@ class HealthResponse(BaseModel):
     rows_submitted: int
     rows_written: int
     rows_skipped: int
+    # R-VLA-EVAL Phase 1: VLA policy-action stream counters, surfaced so a broken
+    # action payload is observable independently of telemetry.
+    action_received: int = Field(description="VLA policy-action MQTT frames received + validated")
+    action_dropped: int = Field(description="VLA policy-action MQTT frames dropped (contract violation)")

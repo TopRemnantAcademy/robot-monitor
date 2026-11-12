@@ -201,6 +201,8 @@ class Settings(BaseSettings):
     chan_stream_all: str = "robot:stream:all"
     chan_stream_one: str = "robot:stream:{robot_id}"
     chan_alerts: str = "robot:alerts"
+    # R-VLA-EVAL Phase 1: VLA policy-action stream (parallel to telemetry).
+    chan_action_all: str = "robot:actions:all"
 
     # ---- Offline buffer (competitive benchmark C: store-and-forward, cf. Netdata/ORO) ----
     # When TimescaleDB fails, batch_writer used to drop rows (rejected); now they

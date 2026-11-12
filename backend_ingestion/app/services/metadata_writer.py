@@ -95,10 +95,18 @@ WHERE m.robot_id = v.robot_id
 # round would rewrite all 100 rows in the table (including ones that were never
 # online), creating meaningless WAL and bloat.
 # The `last_seen` predicate uses a timestamptz time difference (timezone-independent).
+#
+# Scoped to the live-monitored demo model (`HUMANOID-24DOF`): the platform only
+# runs a real MQTT ingest for those 100 demo units, so only they can legitimately
+# transition online<->offline here. Robots registered from an *external* source
+# (e.g. the SEGWAY-S1 delivery fleet seeded from encosmart, which has no live feed
+# into this backend) must keep the is_online value captured at seed time — letting
+# this sweep flip them would erase the real fleet's reported status every round.
 MARK_OFFLINE_SQL = """
 UPDATE robot_metadata
 SET is_online = FALSE
 WHERE is_online = TRUE
+  AND model_type = 'HUMANOID-24DOF'
   AND (last_seen IS NULL OR last_seen < NOW() - make_interval(secs => $1))
 RETURNING robot_id
 """

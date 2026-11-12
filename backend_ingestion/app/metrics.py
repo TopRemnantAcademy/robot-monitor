@@ -116,6 +116,21 @@ mqtt_dropped = Counter(
     registry=registry,
 )
 
+# ---- R-VLA-EVAL Phase 1: VLA policy-action stream (parallel to telemetry) ----
+# Same semantics as mqtt_received / mqtt_dropped, but for the `robots/+/action`
+# topic. Kept as separate counters so the two streams' health are observable
+# independently (a broken action payload must not be conflated with telemetry).
+action_mqtt_received = Counter(
+    "robot_backend_action_mqtt_received_total",
+    "VLA policy-action messages received over MQTT (robots/+/action)",
+    registry=registry,
+)
+action_mqtt_dropped = Counter(
+    "robot_backend_action_mqtt_dropped_total",
+    "VLA policy-action messages dropped due to validation failure",
+    registry=registry,
+)
+
 # ---- WS synthetic probe (gap G-3 "dashboard's fake green") ----
 # Note: these two are **probe-perspective** metrics, semantically different from
 # `robot_backend_ws_connections` (server-side connection count, order 16 T1b);

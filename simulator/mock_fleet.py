@@ -53,6 +53,13 @@ from rich.text import Text
 ROBOT_COUNT = 100
 PUBLISH_INTERVAL_S = 0.1          # 10Hz; 100 robots -> global ~1000 msg/s
 TELEMETRY_TOPIC = "robots/{robot_id}/telemetry"
+# R-VLA-EVAL Phase 1: parallel VLA policy-action topic (one action frame per
+# control tick, same frequency as telemetry).
+ACTION_TOPIC = "robots/{robot_id}/action"
+# Synthetic policy identity (stands in for a trained checkpoint until a real VLA
+# node is wired in via rosbag2/rosetta).
+POLICY_VERSION = "vla-sim-0.1"
+ACTION_DIM = 6                    # 6-DoF end-effector delta (x,y,z,rx,ry,rz)
 
 # telemetry.py (24 joint standard key names) — simulator/backend/frontend must all agree
 JOINT_NAMES: tuple[str, ...] = (
@@ -200,6 +207,24 @@ class RobotState:
             "ts": ts_ms,
         }
 
+    def build_action(self, ts_ms: int) -> dict:
+        """Build a synthetic VLA policy-action frame (R-VLA-EVAL Phase 1).
+
+        Stands in for an external policy node's output: a 6-DoF end-effector
+        delta command per tick. Mirrors the PolicyAction contract in
+        backend_ingestion/app/schemas/telemetry.py (robot_id / policy_version /
+        trial_id / action / goal / ts). trial_id/goal are None during normal
+        operation; they are populated by the A/B trial layer (Phase 2+).
+        """
+        return {
+            "robot_id": self.robot_id,
+            "policy_version": POLICY_VERSION,
+            "trial_id": None,
+            "action": [round(random.uniform(-0.1, 0.1), 4) for _ in range(ACTION_DIM)],
+            "goal": None,
+            "ts": ts_ms,
+        }
+
 
 # ---------------------------------------------------------------- counters / coroutines
 
@@ -233,6 +258,13 @@ async def run_robot(state: RobotState, queue: asyncio.Queue, start_at: float) ->
         last_ts_ms = ts_ms
         await queue.put((TELEMETRY_TOPIC.format(robot_id=state.robot_id),
                          json.dumps(state.build_payload(ts_ms),
+                                    separators=(",", ":"))))
+        # R-VLA-EVAL Phase 1: emit a parallel VLA policy-action frame. Reuses the
+        # same ts_ms so the two streams share the (time, robot_id) cadence; both
+        # go through the same single publisher and are independently validated on
+        # the backend (a bad action payload is dropped without touching telemetry).
+        await queue.put((ACTION_TOPIC.format(robot_id=state.robot_id),
+                         json.dumps(state.build_action(ts_ms),
                                     separators=(",", ":"))))
 
         # Re-align to the 10Hz cadence, absorbing drift from publish/scheduling cost

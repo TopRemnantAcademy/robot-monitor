@@ -102,6 +102,10 @@ class WsHub:
         # Alert event buffer: not coalesced, not dropped; forwarded verbatim on
         # the next beat.
         self._alerts: list[dict] = []
+        # R-VLA-EVAL Phase 1: latest policy-action frame per robot (overwrite
+        # semantics, same as telemetry). Coalesced into one frame per robot per
+        # beat and broadcast as {"type":"action","data":{...}}.
+        self._latest_action: dict[str, dict] = {}
         # [Deliberately no asyncio.Lock] All critical sections (snapshot+clear /
         # overwrite / registry add-remove) have **no await** inside, so on the
         # single-threaded event loop they are atomic by nature; uvicorn multi-
@@ -161,6 +165,7 @@ class WsHub:
         self._clients.clear()
         self._latest.clear()
         self._alerts.clear()
+        self._latest_action.clear()
 
     # ------------------------------------------------------------ connection registration
 
@@ -192,23 +197,33 @@ class WsHub:
         """
         latest = list(self._latest.values())
         alerts = list(self._alerts)
+        actions = list(self._latest_action.values())
         self._latest.clear()
         self._alerts.clear()
+        self._latest_action.clear()
         clients = list(self._clients)
 
-        if not clients or (not latest and not alerts):
+        if not clients or (not latest and not alerts and not actions):
             return
 
-        # Single serialization: telemetry once per robot, alert once per event,
-        # then N connections reuse the same string object.
-        frames = [(False, _envelope("telemetry", item)) for item in latest]
-        frames.extend((True, _envelope("alert", alert)) for alert in alerts)
+        # Single serialization: telemetry/action once per robot, alert once per
+        # event, then N connections reuse the same string object.
+        # `kind` here is the backpressure bucket: "telemetry" (droppable,
+        # coalesced) or "alert" (undroppable, deferred). Actions reuse the
+        # droppable bucket -- they are high-frequency control frames, not
+        # must-not-lose alerts.
+        frames: list[tuple[str, str]] = [
+            ("telemetry", _envelope("telemetry", item)) for item in latest
+        ]
+        frames.extend(("alert", _envelope("alert", alert)) for alert in alerts)
+        frames.extend(("telemetry", _envelope("action", action)) for action in actions)
         n_telem = len(latest)
         n_alert = len(alerts)
+        n_action = len(actions)
 
         for ob in clients:
-            for is_alert, text in frames:
-                ob.enqueue_raw("alert" if is_alert else "telemetry", text)
+            for kind, text in frames:
+                ob.enqueue_raw(kind, text)
 
         # Metrics: actual send volume and "the amount coalesced away".
         # frames are **one copy per connection**, so multiply by the connection
@@ -217,7 +232,7 @@ class WsHub:
         # absolute coalesced value directly proves "only the latest frame per
         # robot" is in effect.
         sent = len(clients)
-        metrics.ws_hub_frames_total.labels(kind="telemetry").inc(n_telem * sent)
+        metrics.ws_hub_frames_total.labels(kind="telemetry").inc((n_telem + n_action) * sent)
         metrics.ws_hub_frames_total.labels(kind="alert").inc(n_alert * sent)
 
         log.debug(
@@ -264,7 +279,9 @@ class WsHub:
             try:
                 r = await get_redis()
                 pubsub = r.pubsub()
-                await pubsub.subscribe(settings.chan_stream_all, settings.chan_alerts)
+                await pubsub.subscribe(
+                    settings.chan_stream_all, settings.chan_alerts, settings.chan_action_all
+                )
                 delay = 1.0
                 async for msg in pubsub.listen():
                     if msg.get("type") != "message":
@@ -286,6 +303,14 @@ class WsHub:
                             if rid in self._latest:
                                 metrics.ws_hub_coalesced_total.inc()
                             self._latest[rid] = data
+                    elif channel == settings.chan_action_all:
+                        rid = data.get("robot_id") if isinstance(data, dict) else None
+                        if rid:
+                            # Same overwrite/coalesce semantics as telemetry: only
+                            # the latest action per robot is fanned out per beat.
+                            if rid in self._latest_action:
+                                metrics.ws_hub_coalesced_total.inc()
+                            self._latest_action[rid] = data
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -295,7 +320,11 @@ class WsHub:
             finally:
                 if pubsub is not None:
                     try:
-                        await pubsub.unsubscribe(settings.chan_stream_all, settings.chan_alerts)
+                        await pubsub.unsubscribe(
+                            settings.chan_stream_all,
+                            settings.chan_alerts,
+                            settings.chan_action_all,
+                        )
                         await pubsub.aclose()
                     except Exception:
                         pass

@@ -10,9 +10,12 @@
     {
       "$ref": "#/$defs/TelemetryEnvelope"
     },
-    {
-      "$ref": "#/$defs/AlertEnvelope"
-    }
+      {
+        "$ref": "#/$defs/AlertEnvelope"
+      },
+      {
+        "$ref": "#/$defs/ActionEnvelope"
+      }
   ],
   "$defs": {
     "JointDict": {
@@ -179,6 +182,29 @@
         "data": {
           "$ref": "#/$defs/RobotAlert"
         }
+      }
+    },
+    "PolicyAction": {
+      "type": "object",
+      "description": "VLA policy-action frame (R-VLA-EVAL Phase 1). Field-by-field aligned with backend app/schemas/telemetry.py:PolicyAction; the WS hub forwards this model (dumped verbatim) as the `data` of the action envelope.",
+      "required": ["robot_id", "policy_version", "action"],
+      "properties": {
+        "robot_id": { "type": "string", "pattern": "^humanoid-[0-9]{3}$" },
+        "policy_version": { "type": "string" },
+        "trial_id": { "type": ["string", "null"] },
+        "action": { "type": "array", "items": { "type": "number" }, "minItems": 1, "maxItems": 64 },
+        "goal": { "type": ["string", "null"] },
+        "ts": { "type": ["integer", "null"] }
+      }
+    },
+    "ActionEnvelope": {
+      "type": "object",
+      "description": "④ VLA policy-action: single robot's latest policy action (coalesced per robot by the WS hub).",
+      "required": ["type", "data"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "action" },
+        "data": { "$ref": "#/$defs/PolicyAction" }
       }
     }
   }
