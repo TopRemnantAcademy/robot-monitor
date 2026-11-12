@@ -341,11 +341,54 @@ async fn supported_robots(State(state): State<AppState>) -> Json<SupportedRobots
     })
 }
 
-async fn healthz() -> Json<serde_json::Value> {
+// ----------------------------------------------------------------- /healthz
+// Mirror of backend_ingestion/app/main.py:220 `healthz()` in *spirit* — but NOT a
+// byte-copy, because the Python endpoint is coupled to the ingestion writer's
+// internal counters (writer.*, mqtt_subscriber.*, rows_submitted/written/skipped,
+// metadata.*). Those belong to the Python ingestion pipeline, which the Rust replica
+// does NOT run. So this is a faithful ADAPTATION: it reports the replica's own
+// dependency reachability (DB + Redis) exactly like Python (status reflects deps,
+// HTTP stays 200 — liveness semantics), plus the replica's real runtime signals
+// (WS connections + hub backpressure metrics). The ingestion-writer counters are
+// intentionally absent and must stay absent until/unless the replica also takes
+// over ingestion (out of strangler-fig spike scope).
+async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
+    // DB reachability: cheap `SELECT 1`. A transient failure does NOT flip to 503
+    // (same self-heal reasoning as the Python endpoint — restarting would lose
+    // in-flight data; unhealthy deps are expressed via the `status` field).
+    let db_ok = sqlx::query("SELECT 1").execute(&state.pool).await.is_ok();
+
+    // Redis reachability: PING. Clone the ConnectionManager (cheap Arc) so the
+    // hub's own connection is not disturbed.
+    let redis_ok = redis::cmd("PING")
+        .query_async::<String>(&mut state.redis.clone())
+        .await
+        .is_ok();
+
+    let status = if db_ok && redis_ok { "ok" } else { "degraded" };
+
+    // Replica runtime: WS hub signals (the Rust replica's real backpressure story).
+    let (conns, depth, dropped, deferred) = state.hub.client_stats();
+    let m = state.hub.metrics();
+    let (coalesced, frames_telemetry, frames_alert) = m.snapshot();
+
     Json(serde_json::json!({
-        "status": "ok",
+        "status": status,
         "service": "robot-monitor-backend-rs",
         "lang": "rust",
+        "db": if db_ok { "up" } else { "down" },
+        "redis": if redis_ok { "up" } else { "down" },
+        "ws_connections": conns,
+        "ws_queue_depth": depth,
+        "ws_coalesced": coalesced,
+        "ws_frames_telemetry": frames_telemetry,
+        "ws_frames_alert": frames_alert,
+        "ws_telemetry_dropped": dropped,
+        "ws_alerts_deferred": deferred,
+        // NOTE: ingestion-writer counters (written/flushes/retries/rejected/
+        // buffered/queue_depth/mqtt_received/dropped/rows_*/metadata) are NOT
+        // reported here — see the doc comment above. They live in the Python
+        // backend only.
     }))
 }
 
