@@ -199,6 +199,45 @@ check("resolution echoes 3600s", py["resolution"] == "3600s" and rs["resolution"
 check("hourly points count equal", len(py["points"]) == len(rs["points"]),
       f"py={len(py['points'])} rs={len(rs['points'])}")
 
+# ---------------------------------------------------------------- /alerts (default)
+print("=== /alerts (default limit=50) ===")
+py = get(BASE_PY + "/alerts", tok)
+rs = get(BASE_RS + "/alerts")
+check("alerts total equal", py["total"] == rs["total"], f"py={py['total']} rs={rs['total']}")
+check("alerts items len equal", len(py["items"]) == len(rs["items"]),
+      f"py={len(py['items'])} rs={len(rs['items'])}")
+check("alerts limit/offset echoed", py["limit"] == rs["limit"] and py["offset"] == rs["offset"],
+      f"py={py['limit']},{py['offset']} rs={rs['limit']},{rs['offset']}")
+pym = {it["alert_id"]: it for it in py["items"]}
+rsm = {it["alert_id"]: it for it in rs["items"]}
+check("alert_id sets equal", set(pym) == set(rsm),
+      f"only_py={sorted(set(pym)-set(rsm))[:5]} only_rs={sorted(set(rsm)-set(pym))[:5]}")
+bad = 0
+for aid in set(pym) & set(rsm):
+    p, s = pym[aid], rsm[aid]
+    for f in ("robot_id", "rule_id", "severity", "message", "ack", "escalated",
+              "suppressed", "ack_by", "suppressed_by"):
+        if p[f] != s[f]:
+            bad += 1
+            break
+    if p["time"] != s["time"]:
+        bad += 1
+        continue
+    if (p["ack_at"] or "") != (s["ack_at"] or ""):
+        bad += 1
+        continue
+    if json.dumps(p["detail"], sort_keys=True) != json.dumps(s["detail"], sort_keys=True):
+        bad += 1
+        continue
+check("per-alert fields equal", bad == 0, f"mismatches={bad}")
+
+# ---------------------------------------------------------------- /alerts (filtered)
+print("=== /alerts (filtered ack=false) ===")
+py = get(BASE_PY + "/alerts?ack=false&limit=50", tok)
+rs = get(BASE_RS + "/alerts?ack=false&limit=50")
+check("filtered total equal", py["total"] == rs["total"], f"py={py['total']} rs={rs['total']}")
+check("filtered ack all false (rs)", all(not it["ack"] for it in rs["items"]), "rs has ack=true")
+
 # ---------------------------------------------------------------- error contract
 print("=== error contract ===")
 pc, pb = get_err(f"{BASE_PY}/robots/{RID}/history?resolution=2.5s", tok)

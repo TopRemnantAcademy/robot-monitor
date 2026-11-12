@@ -406,6 +406,20 @@ fn iso_utc(ts: DateTime<Utc>) -> String {
     }
 }
 
+/// Python pydantic v2 datetime serialization (AlertItem.time/ack_at) for a UTC
+/// timestamp: `YYYY-MM-DDTHH:MM:SS[.ffffff]Z`. pydantic v2 emits a bare `Z` for a
+/// zero UTC offset (not `+00:00`), which is what `GET /alerts` actually returns on
+/// the wire — so the Rust output must match it byte-for-byte.
+fn iso_utc_z(ts: DateTime<Utc>) -> String {
+    let micros = ts.timestamp_subsec_micros();
+    let base = ts.format("%Y-%m-%dT%H:%M:%S").to_string();
+    if micros == 0 {
+        format!("{base}Z")
+    } else {
+        format!("{base}.{micros:06}Z")
+    }
+}
+
 async fn history(
     State(state): State<AppState>,
     Path(robot_id): Path<String>,
@@ -519,6 +533,173 @@ fn server_err(e: &dyn std::fmt::Display) -> (axum::http::StatusCode, Json<serde_
     )
 }
 
+// --------------------------------------------------------------- /alerts
+// Mirror of backend_ingestion/app/alerts/{router.py,repository.py}: paginated
+// alert query (GET /alerts). Source of truth for columns is the explicit
+// `_COLS` list in repository.py; we reproduce it verbatim. Filters are tri-state
+// (None = no filter). Sort is `(time DESC, alert_id DESC)` to keep pagination
+// boundaries stable. `detail` is a jsonb column: sqlx (with the "json" feature)
+// already decodes it to a serde_json::Value, so we keep objects and drop
+// everything else — exactly Python `_decode_detail`'s "return dict, else None".
+// Auth (JWT) is deferred — spike validates data/contract parity, not the boundary.
+
+const ALERT_COLS: &str = "alert_id, time, robot_id, rule_id, severity, message, detail, \
+    ack, ack_at, ack_by, escalated, suppressed, suppressed_by";
+
+#[derive(Clone)]
+enum Param {
+    B(bool),
+    S(String),
+}
+
+/// Mirror of `repository.py:_build_filters`: assemble the WHERE clause + $n params.
+/// Params are numbered contiguously from $1; limit/offset continue the numbering.
+fn build_alerts_where(
+    ack: Option<bool>,
+    escalated: Option<bool>,
+    suppressed: Option<bool>,
+    robot_id: Option<String>,
+) -> (String, Vec<Param>) {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<Param> = Vec::new();
+    if let Some(a) = ack {
+        params.push(Param::B(a));
+        clauses.push(format!("ack = ${}", params.len()));
+    }
+    if let Some(e) = escalated {
+        params.push(Param::B(e));
+        clauses.push(format!("escalated = ${}", params.len()));
+    }
+    if let Some(s) = suppressed {
+        params.push(Param::B(s));
+        clauses.push(format!("suppressed = ${}", params.len()));
+    }
+    if let Some(r) = robot_id {
+        params.push(Param::S(r));
+        clauses.push(format!("robot_id = ${}", params.len()));
+    }
+    let where_clause = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", clauses.join(" AND "))
+    };
+    (where_clause, params)
+}
+
+#[derive(Deserialize)]
+struct AlertQuery {
+    ack: Option<bool>,
+    escalated: Option<bool>,
+    suppressed: Option<bool>,
+    robot_id: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct AlertItemOut {
+    alert_id: i64,
+    time: String,
+    robot_id: String,
+    rule_id: String,
+    severity: i32,
+    message: String,
+    detail: Option<serde_json::Value>,
+    ack: bool,
+    ack_at: Option<String>,
+    ack_by: Option<String>,
+    escalated: bool,
+    suppressed: bool,
+    suppressed_by: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AlertPageOut {
+    items: Vec<AlertItemOut>,
+    total: i64,
+    limit: i64,
+    offset: i64,
+}
+
+/// Mirror of `repository.py:list_alerts`: same connection, same transaction,
+/// two reads (list + count) so total and items never disagree.
+async fn list_alerts_handler(
+    State(state): State<AppState>,
+    Query(q): Query<AlertQuery>,
+) -> Result<Json<AlertPageOut>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    let offset = q.offset.unwrap_or(0).max(0);
+    let (where_clause, params) =
+        build_alerts_where(q.ack, q.escalated, q.suppressed, q.robot_id);
+
+    let list_sql = format!(
+        "SELECT {ALERT_COLS} FROM robot_alert{where_clause} \
+         ORDER BY time DESC, alert_id DESC LIMIT ${} OFFSET ${}",
+        params.len() + 1,
+        params.len() + 2
+    );
+    let count_sql = format!("SELECT count(*) FROM robot_alert{where_clause}");
+
+    let mut lq = sqlx::query(&list_sql);
+    for p in &params {
+        lq = match p {
+            Param::B(b) => lq.bind(*b),
+            Param::S(s) => lq.bind(s.clone()),
+        };
+    }
+    lq = lq.bind(limit).bind(offset);
+    let rows = lq
+        .fetch_all(&state.pool)
+        .await
+        .map_err(|e| server_err(&e))?;
+
+    let mut cq = sqlx::query(&count_sql);
+    for p in &params {
+        cq = match p {
+            Param::B(b) => cq.bind(*b),
+            Param::S(s) => cq.bind(s.clone()),
+        };
+    }
+    let total = cq
+        .fetch_one(&state.pool)
+        .await
+        .map_err(|e| server_err(&e))?
+        .get::<i64, _>("count");
+
+    let mut items = Vec::with_capacity(rows.len());
+    for r in &rows {
+        let time: DateTime<Utc> = r.get("time");
+        let ack_at: Option<DateTime<Utc>> = r.get("ack_at");
+        let detail_raw: Option<serde_json::Value> = r.try_get("detail").ok().flatten();
+        let detail = match detail_raw {
+            Some(serde_json::Value::Object(_)) => detail_raw,
+            _ => None,
+        };
+        items.push(AlertItemOut {
+            alert_id: r.get("alert_id"),
+            time: iso_utc_z(time),
+            robot_id: r.get("robot_id"),
+            rule_id: r.get("rule_id"),
+            severity: r.get("severity"),
+            message: r.get("message"),
+            detail,
+            ack: r.get("ack"),
+            ack_at: ack_at.map(iso_utc_z),
+            ack_by: r.get("ack_by"),
+            escalated: r.get("escalated"),
+            suppressed: r.get("suppressed"),
+            suppressed_by: r.get("suppressed_by"),
+        });
+    }
+
+    Ok(Json(AlertPageOut {
+        items,
+        total,
+        limit,
+        offset,
+    }))
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -548,6 +729,7 @@ async fn main() {
         .route("/robots", get(list_robots))
         .route("/supported-robots", get(supported_robots))
         .route("/robots/:robot_id/history", get(history))
+        .route("/alerts", get(list_alerts_handler))
         .with_state(state);
 
     let addr: std::net::SocketAddr = "0.0.0.0:8001".parse().expect("valid addr");
@@ -622,6 +804,20 @@ mod tests {
         assert!(parse_resolution("10").is_err());
         assert!(parse_resolution("abc").is_err());
         assert!(parse_resolution("").is_err());
+    }
+
+    #[test]
+    fn build_alerts_where_mirrors_python_filters() {
+        // Mirrors repository.py:_build_filters — contiguous $n numbering, tri-state.
+        let (w, p) = build_alerts_where(Some(true), None, None, None);
+        assert_eq!(w, " WHERE ack = $1");
+        assert_eq!(p.len(), 1);
+        let (w, p) = build_alerts_where(None, Some(false), Some(true), Some("robot-1".into()));
+        assert_eq!(w, " WHERE escalated = $1 AND suppressed = $2 AND robot_id = $3");
+        assert_eq!(p.len(), 3);
+        let (w, p) = build_alerts_where(None, None, None, None);
+        assert_eq!(w, "");
+        assert_eq!(p.len(), 0);
     }
 
     #[test]
