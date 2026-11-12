@@ -12,15 +12,24 @@
 //!      `battery_pct` from the latest `robot_telemetry` row and `is_online` from
 //!      `robot_metadata` — exactly the Python extra_ids branch.
 //!
-//! Auth (JWT) is intentionally deferred — this spike validates data/contract
-//! parity, not the security boundary.
+//! Auth: the read endpoints (`/robots`, `/supported-robots`, `/history`,
+//! `/alerts`, `/metrics`) intentionally defer JWT — they validate data/contract
+//! parity. The real-time `/ws/robots` endpoint now authenticates with the same
+//! HS256 JWT (audience `fastapi-users:auth`) as the Python service, per the
+//! user-approved "full port" of the WebSocket layer.
+
+mod hub;
+mod ws;
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::Ordering::Relaxed;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, Query, State};
 use axum::{routing::get, Json, Router};
 use chrono::{DateTime, Utc};
+use hub::{Hub, HubConfig, WsMetrics};
 use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
 use serde::Deserialize;
@@ -34,10 +43,12 @@ use sqlx::Row;
 struct AppState {
     pool: PgPool,
     redis: ConnectionManager,
+    hub: Arc<Hub>,
+    jwt_secret: String,
 }
 
-#[derive(Serialize)]
-struct RobotTelemetryOut {
+#[derive(Clone, Serialize)]
+pub struct RobotTelemetryOut {
     robot_id: String,
     status_code: i32,
     error_code: i32,
@@ -127,7 +138,7 @@ struct SupportedRobotsResponse {
     total_robots: i32,
 }
 
-fn base_ids() -> Vec<String> {
+pub fn base_ids() -> Vec<String> {
     (1..=100).map(|i| format!("humanoid-{i:03}")).collect()
 }
 
@@ -200,6 +211,23 @@ async fn enrich(redis: &mut ConnectionManager, robots: &mut [RobotTelemetryOut],
             }
         }
     }
+}
+
+/// WS first-frame snapshot — mirror of `state_cache.snapshot(robot_ids)` for the
+/// demo set (NO fleet merge: `ws_robots` calls `snapshot(settings.robot_ids)`,
+/// which is the 100 `humanoid-00N` ids only). Enumerates every id (offline
+/// robots get the placeholder, not omission), then batch-enriches `is_online` /
+/// `last_seen` from the liveness ledger — identical to the Python path.
+pub async fn build_ws_snapshot(
+    redis: &mut ConnectionManager,
+    robot_ids: &[String],
+) -> Vec<RobotTelemetryOut> {
+    let mut robots: Vec<RobotTelemetryOut> = Vec::with_capacity(robot_ids.len());
+    for id in robot_ids {
+        robots.push(snapshot_one(redis, id).await);
+    }
+    enrich(redis, &mut robots, 30.0).await;
+    robots
 }
 
 async fn list_robots(State(state): State<AppState>) -> Json<RobotListResponse> {
@@ -626,7 +654,60 @@ fn created_name(name: &str) -> String {
     format!("{base}_created")
 }
 
-fn render_metrics(online: i64) -> String {
+/// Live values for the WS-derived metrics (all other metrics stay at their
+/// honest stateless-replica 0). See `hub::WsMetrics` / `Hub::client_stats`.
+struct WsLive {
+    connections: f64,
+    queue_depth: f64,
+    coalesced: f64,
+    frames_telemetry: f64,
+    frames_alert: f64,
+    dropped: f64,
+    deferred: f64,
+}
+
+impl Default for WsLive {
+    fn default() -> Self {
+        WsLive {
+            connections: 0.0,
+            queue_depth: 0.0,
+            coalesced: 0.0,
+            frames_telemetry: 0.0,
+            frames_alert: 0.0,
+            dropped: 0.0,
+            deferred: 0.0,
+        }
+    }
+}
+
+/// Override the value for a labeled counter with the live WS value, if the metric
+/// name is one the hub actually drives.
+fn ws_counter_sample(name: &str, label_value: Option<&str>, ws: &WsLive) -> Option<String> {
+    match name {
+        "robot_backend_ws_hub_coalesced_total" => Some(format!("{}", ws.coalesced as i64)),
+        "robot_backend_ws_telemetry_frames_dropped_total" => Some(format!("{}", ws.dropped as i64)),
+        "robot_backend_ws_alerts_deferred_total" => Some(format!("{}", ws.deferred as i64)),
+        "robot_backend_ws_hub_frames_total" => {
+            let v = match label_value {
+                Some("alert") => ws.frames_alert,
+                _ => ws.frames_telemetry,
+            } as i64;
+            Some(format!("{}", v))
+        }
+        _ => None,
+    }
+}
+
+/// Override the value for a gauge with the live WS value, if applicable.
+fn ws_gauge_sample(name: &str, ws: &WsLive) -> Option<String> {
+    match name {
+        "robot_backend_ws_connections" => Some(format!("{:.1}", ws.connections)),
+        "robot_backend_ws_outbound_queue_depth" => Some(format!("{:.1}", ws.queue_depth)),
+        _ => None,
+    }
+}
+
+fn render_metrics(online: i64, ws: &WsLive) -> String {
     let mut out = String::new();
     for m in METRICS {
         out.push_str("# HELP ");
@@ -675,16 +756,23 @@ fn render_metrics(online: i64) -> String {
             }
             MType::Counter => {
                 if m.labels.is_empty() {
+                    let val = ws_counter_sample(m.name, None, ws).unwrap_or_else(|| "0".to_string());
                     out.push_str(m.name);
-                    out.push_str(" 0\n");
+                    out.push(' ');
+                    out.push_str(&val);
+                    out.push('\n');
                 } else {
                     for (k, v) in m.labels {
+                        let val = ws_counter_sample(m.name, Some(v), ws)
+                            .unwrap_or_else(|| "0".to_string());
                         out.push_str(m.name);
                         out.push('{');
                         out.push_str(k);
                         out.push_str("=\"");
                         out.push_str(v);
-                        out.push_str("\"} 0\n");
+                        out.push_str("\"} ");
+                        out.push_str(&val);
+                        out.push('\n');
                     }
                 }
                 // prometheus_client emits a `_created` gauge for counters that have an
@@ -709,6 +797,8 @@ fn render_metrics(online: i64) -> String {
                 if m.name == "robot_backend_robots_online" {
                     // Prometheus gauges are formatted as floats (mirrors "0.0").
                     out.push_str(&format!(" {online}.0\n"));
+                } else if let Some(val) = ws_gauge_sample(m.name, ws) {
+                    out.push_str(&format!(" {val}\n"));
                 } else {
                     out.push_str(" 0.0\n");
                 }
@@ -726,7 +816,19 @@ async fn metrics(State(state): State<AppState>) -> impl axum::response::IntoResp
             0
         }
     };
-    let body = render_metrics(online);
+    let (conns, depth, _, _) = state.hub.client_stats();
+    let m = state.hub.metrics();
+    let (coalesced, frames_telemetry, frames_alert) = m.snapshot();
+    let ws = WsLive {
+        connections: conns as f64,
+        queue_depth: depth as f64,
+        coalesced: coalesced as f64,
+        frames_telemetry: frames_telemetry as f64,
+        frames_alert: frames_alert as f64,
+        dropped: m.telemetry_dropped_total.load(Relaxed) as f64,
+        deferred: m.alerts_deferred_total.load(Relaxed) as f64,
+    };
+    let body = render_metrics(online, &ws);
     (
         axum::http::StatusCode::OK,
         [(
@@ -904,6 +1006,24 @@ async fn list_alerts_handler(
     }))
 }
 
+fn env_f64(name: &str, default: f64) -> f64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(default)
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn env_string(name: &str, default: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| default.to_string())
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -922,12 +1042,33 @@ async fn main() {
         .connect(&database_url)
         .await
         .expect("postgres connect");
-    let redis_client = redis::Client::open(redis_url).expect("redis client");
+    let redis_client = redis::Client::open(redis_url.clone()).expect("redis client");
     let redis = ConnectionManager::new(redis_client)
         .await
         .expect("redis connection manager");
 
-    let state = AppState { pool, redis };
+    // ---- WebSocket hub config (mirrors backend_ingestion/app/config.py) ----
+    let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_default();
+    let hub_config = HubConfig {
+        redis_url: redis_url.clone(),
+        broadcast_interval_ms: env_f64("WS_BROADCAST_INTERVAL_MS", 100.0),
+        queue_size: env_usize("WS_OUTBOUND_QUEUE_SIZE", 500),
+        alert_slack: env_usize("WS_ALERT_OVERFLOW_SLACK", 64),
+        close_timeout_s: env_f64("WS_OUTBOUND_CLOSE_TIMEOUT_S", 60.0),
+        chan_stream_all: env_string("CHAN_STREAM_ALL", "robot:stream:all"),
+        chan_alerts: env_string("CHAN_ALERTS", "robot:alerts"),
+        chan_action_all: env_string("CHAN_ACTION_ALL", "robot:actions:all"),
+    };
+    let ws_metrics = Arc::new(WsMetrics::default());
+    let hub = Hub::new(hub_config, ws_metrics);
+    hub.clone().start();
+
+    let state = AppState {
+        pool,
+        redis,
+        hub: hub.clone(),
+        jwt_secret,
+    };
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/robots", get(list_robots))
@@ -935,6 +1076,7 @@ async fn main() {
         .route("/robots/:robot_id/history", get(history))
         .route("/alerts", get(list_alerts_handler))
         .route("/metrics", get(metrics))
+        .route("/ws/robots", get(ws::ws_handler))
         .with_state(state);
 
     let addr: std::net::SocketAddr = "0.0.0.0:8001".parse().expect("valid addr");
@@ -967,7 +1109,7 @@ mod tests {
             "text/plain; version=1.0.0; charset=utf-8"
         );
 
-        let body = render_metrics(42);
+        let body = render_metrics(42, &WsLive::default());
 
         // HELP + TYPE present for every declared metric.
         for m in METRICS {
