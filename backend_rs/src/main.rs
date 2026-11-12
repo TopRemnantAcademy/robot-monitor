@@ -27,7 +27,8 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, Query, State};
-use axum::{routing::get, Json, Router};
+use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
+use axum::{routing::{get, post}, Json, Router};
 use chrono::{DateTime, Utc};
 use hub::{Hub, HubConfig, WsMetrics};
 use redis::aio::ConnectionManager;
@@ -1063,6 +1064,163 @@ fn env_usize(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+// ----------------------------------------------------- /alerts/{id}/ack | /unack
+// Mirror of backend_ingestion/app/alerts/router.py:109 `ack_alert`/`unack_alert`
+// + repository.py:148 `set_ack`. Admin-only write with audit (order 17).
+//
+// DUAL-WRITER NOTE: the Rust replica writes the SAME shared `robot_alert` table the
+// Python backend writes. This is a single-row IDEMPOTENT UPDATE (`ack IS DISTINCT
+// FROM $2` guards the write; Postgres row-lock serializes concurrent writers and
+// both converge to the same final state), unlike the ingestion writer which holds
+// in-memory batch buffers + sequence — so dual-writer risk here is LOW. Keep the
+// idempotency logic byte-faithful with the Python source.
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AckRequestBody {} // body accepted but ignored; ack_by comes ONLY from the JWT sub.
+
+#[derive(Serialize)]
+struct AckResult {
+    alert_id: i64,
+    ack: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ack_at: Option<String>,
+    ack_by: Option<String>,
+    changed: bool,
+}
+
+/// Extract a Bearer token from the `Authorization` header (mirrors `_bearer`).
+fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    let h = headers.get(AUTHORIZATION)?.to_str().ok()?;
+    let t = h.strip_prefix("Bearer ").or_else(|| h.strip_prefix("Bearer\t"))?;
+    Some(t.trim().to_string())
+}
+
+/// Verify the JWT and resolve admin role from `robot_user`.
+/// `Err(StatusCode)` short-circuits: 401 (missing/invalid/inactive/unknown user),
+/// 403 (not admin), 503 (DB error). On success returns the audit subject
+/// (= JWT `sub` == `robot_user.id`).
+async fn require_admin(headers: &HeaderMap, state: &AppState) -> Result<String, StatusCode> {
+    let token = match bearer_token(headers) {
+        Some(t) => t,
+        None => return Err(StatusCode::UNAUTHORIZED),
+    };
+    // Reuse the WS JWT verifier: HS256, aud `fastapi-users:auth`, manual exp.
+    let sub = match ws::authenticate_ws_token(&token, &state.jwt_secret) {
+        Some(s) => s,
+        None => return Err(StatusCode::UNAUTHORIZED),
+    };
+    let user_id: i64 = match sub.parse() {
+        Ok(id) => id,
+        Err(_) => return Err(StatusCode::UNAUTHORIZED),
+    };
+    let row: Option<(bool, String)> = sqlx::query_as(
+        "SELECT is_active, role FROM robot_user WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    match row {
+        Some((is_active, role)) => {
+            if !is_active {
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+            if role != "admin" {
+                return Err(StatusCode::FORBIDDEN);
+            }
+            Ok(sub)
+        }
+        None => Err(StatusCode::UNAUTHORIZED),
+    }
+}
+
+async fn do_ack(
+    state: &AppState,
+    alert_id: i64,
+    headers: &HeaderMap,
+    ack: bool,
+) -> Result<Json<AckResult>, StatusCode> {
+    let subject = require_admin(headers, state).await?;
+
+    // Idempotent UPDATE (mirrors repository.set_ack): writes only when the row's
+    // state actually differs; RETURNING backfills the current value. Narrowing the
+    // RETURNING/SELECT to the 5 AckResult fields is wire-equivalent (AckResult only
+    // serializes these).
+    let updated = if ack {
+        sqlx::query(
+            "UPDATE robot_alert \
+               SET ack = TRUE, ack_at = NOW(), ack_by = $2 \
+             WHERE alert_id = $1 AND ack IS DISTINCT FROM TRUE \
+             RETURNING alert_id, ack, ack_at, ack_by",
+        )
+        .bind(alert_id)
+        .bind(&subject)
+        .fetch_optional(&state.pool)
+        .await
+    } else {
+        sqlx::query(
+            "UPDATE robot_alert \
+               SET ack = FALSE, ack_at = NULL, ack_by = NULL \
+             WHERE alert_id = $1 AND ack IS DISTINCT FROM FALSE \
+             RETURNING alert_id, ack, ack_at, ack_by",
+        )
+        .bind(alert_id)
+        .fetch_optional(&state.pool)
+        .await
+    }
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+
+    let changed = updated.is_some();
+    let row = match updated {
+        Some(r) => r,
+        None => {
+            // Idempotent hit or not found: one more SELECT distinguishes them.
+            sqlx::query(
+                "SELECT alert_id, ack, ack_at, ack_by FROM robot_alert WHERE alert_id = $1",
+            )
+            .bind(alert_id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+            .ok_or(StatusCode::NOT_FOUND)? // None -> 404
+        }
+    };
+
+    let alert_id_out: i64 = row
+        .try_get("alert_id")
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let ack_out: bool = row.try_get("ack").map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let ack_at_out: Option<DateTime<Utc>> = row.get("ack_at");
+    let ack_by_out: Option<String> = row.get("ack_by");
+    let ack_at = ack_at_out.map(iso_utc_z); // pydantic v2 UTC -> "Z" (matches /alerts)
+    Ok(Json(AckResult {
+        alert_id: alert_id_out,
+        ack: ack_out,
+        ack_at,
+        ack_by: ack_by_out,
+        changed,
+    }))
+}
+
+async fn ack_alert(
+    State(state): State<AppState>,
+    Path(alert_id): Path<i64>,
+    headers: HeaderMap,
+    _body: Option<Json<AckRequestBody>>,
+) -> Result<Json<AckResult>, StatusCode> {
+    do_ack(&state, alert_id, &headers, true).await
+}
+
+async fn unack_alert(
+    State(state): State<AppState>,
+    Path(alert_id): Path<i64>,
+    headers: HeaderMap,
+    _body: Option<Json<AckRequestBody>>,
+) -> Result<Json<AckResult>, StatusCode> {
+    do_ack(&state, alert_id, &headers, false).await
+}
+
 fn env_string(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.to_string())
 }
@@ -1118,6 +1276,8 @@ async fn main() {
         .route("/supported-robots", get(supported_robots))
         .route("/robots/:robot_id/history", get(history))
         .route("/alerts", get(list_alerts_handler))
+        .route("/alerts/:alert_id/ack", post(ack_alert))
+        .route("/alerts/:alert_id/unack", post(unack_alert))
         .route("/metrics", get(metrics))
         .route("/ws/robots", get(ws::ws_handler))
         .with_state(state);
