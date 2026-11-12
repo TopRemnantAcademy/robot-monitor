@@ -1,33 +1,51 @@
 #!/usr/bin/env python3
 """Live contract-parity check: Python backend (8000) vs Rust spike (8001).
 
-Uses the existing seeded admin account from .env to obtain a JWT (no temp user
-created — avoids mutating the DB for verification). The Rust spike is
-unauthenticated by design (auth is deferred; this validates data/contract parity).
+Registers a throwaway viewer account on the Python stack to obtain a JWT (the
+Rust spike's read endpoints are unauthenticated by design — this validates
+data/contract parity). The account is deleted from `robot_user` at process exit,
+including on failure, so verification leaves the real DB untouched.
 
 Exits non-zero on any mismatch so it can gate CI.
 """
+import atexit
 import json
+import subprocess
 import sys
 import urllib.parse
 import urllib.request
 import datetime as dt
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
 BASE_PY = "http://localhost:8000"
 BASE_RS = "http://localhost:8001"
 
-# --- read admin creds from .env (local only, gitignored) ---
-env = {}
-for line in (ROOT / ".env").read_text().splitlines():
-    line = line.strip()
-    if line and not line.startswith("#") and "=" in line:
-        k, v = line.split("=", 1)
-        env[k.strip()] = v.strip()
-
 EMAIL = "spike_verify_" + dt.datetime.now().strftime("%Y%m%d%H%M%S") + "@robomon.dev"
 PASSWORD = "SpikeVerify!2026"
+
+
+def cleanup_temp_user():
+    """Honour the no-DB-mutation promise in register_login()'s docstring.
+
+    The HTTP API has no viewer self-delete endpoint, so go through the local
+    TimescaleDB container. Failure is loud (stderr) but must not mask the
+    verification result.
+    """
+    sql = f"DELETE FROM robot_user WHERE email = '{EMAIL}';"
+    try:
+        out = subprocess.run(
+            ["docker", "exec", "robot-monitor-timescaledb", "psql",
+             "-U", "postgres", "-d", "robot_monitor", "-c", sql],
+            capture_output=True, text=True, timeout=30,
+        )
+        if out.returncode == 0:
+            print(f"[cleanup] removed temp viewer {EMAIL}")
+        else:
+            print(f"[cleanup] FAILED: {out.stderr.strip()[:200]}", file=sys.stderr)
+    except Exception as e:
+        print(f"[cleanup] FAILED: {e}", file=sys.stderr)
+
+
+atexit.register(cleanup_temp_user)
 
 
 def get(url, token=None):

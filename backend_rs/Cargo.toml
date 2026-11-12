@@ -11,7 +11,10 @@ license = "AGPL-3.0"
 axum = { version = "0.7", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` keeps JSON object keys in insertion order, matching Python's
+# json.loads/json.dumps (dict order). Without it serde_json uses a BTreeMap and
+# re-sorts keys alphabetically, which breaks byte-level WS envelope parity.
+serde_json = { version = "1", features = ["preserve_order"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

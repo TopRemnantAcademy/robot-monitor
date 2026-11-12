@@ -14,6 +14,13 @@
 //!      **once** and pushes the pre-serialized string into each connection's own
 //!      bounded backpressure queue (the per-connection sender serializes
 //!      `send_text`). The hub never awaits on any client.
+//!   4. **Wire canonicalization**: Python's `ws_hub._consume_loop` decodes every
+//!      pub/sub payload with `json.loads`, and `_envelope` re-serializes it with
+//!      `json.dumps(separators=(",", ":"), ensure_ascii=False)`. Forwarding the
+//!      publisher's raw text instead would leak `\uXXXX` escapes (Chinese alert
+//!      messages) and stray whitespace into the frame — JSON-equivalent, but NOT
+//!      byte-identical. Every payload is therefore parsed + re-serialized once
+//!      on ingest (serde_json with `preserve_order` keeps the original key order).
 //!
 //! The buffers are behind `std::sync::Mutex` (the critical sections contain **no
 //! await**, so there is no risk of holding a lock across an await — the same
@@ -326,39 +333,81 @@ impl Hub {
                 None => return Ok(()), // subscription ended -> reconnect
             };
             let channel = msg.get_channel_name();
-            let payload: String = match msg.get_payload() {
+            let raw: String = match msg.get_payload() {
                 Ok(p) => p,
                 Err(_) => continue,
+            };
+            // Python skips *every* channel's message when json.loads fails, and
+            // re-serializes the decoded dict canonically. Do the same here so
+            // the wire bytes match regardless of how the publisher formatted it.
+            let (v, payload) = match canonical_payload(&raw) {
+                Some(p) => p,
+                None => continue,
             };
             if channel == self.config.chan_alerts {
                 // Event stream — append verbatim, never merge, never drop.
                 self.alerts.lock().unwrap().push(payload);
-            } else if let Ok(v) = serde_json::from_str::<Value>(&payload) {
+            } else if let Some(rid) = v.get("robot_id").and_then(|x| x.as_str()) {
                 // Telemetry / action: keep only the latest frame per robot_id.
-                if let Some(rid) = v.get("robot_id").and_then(|x| x.as_str()) {
-                    let rid = rid.to_string();
-                    if channel == self.config.chan_action_all {
-                        let mut m = self.latest_action.lock().unwrap();
-                        if m.contains_key(&rid) {
-                            self.metrics.coalesced.fetch_add(1, Relaxed);
-                        }
-                        m.insert(rid, payload);
-                    } else {
-                        let mut m = self.latest.lock().unwrap();
-                        if m.contains_key(&rid) {
-                            self.metrics.coalesced.fetch_add(1, Relaxed);
-                        }
-                        m.insert(rid, payload);
+                let rid = rid.to_string();
+                if channel == self.config.chan_action_all {
+                    let mut m = self.latest_action.lock().unwrap();
+                    if m.contains_key(&rid) {
+                        self.metrics.coalesced.fetch_add(1, Relaxed);
                     }
+                    m.insert(rid, payload);
+                } else {
+                    let mut m = self.latest.lock().unwrap();
+                    if m.contains_key(&rid) {
+                        self.metrics.coalesced.fetch_add(1, Relaxed);
+                    }
+                    m.insert(rid, payload);
                 }
             }
         }
     }
 }
 
+/// Mirror of Python `json.loads` -> `json.dumps(separators=(",", ":"),
+/// ensure_ascii=False)` in `ws_hub._envelope`. serde_json emits compact JSON
+/// without escaping non-ASCII, and `preserve_order` keeps key insertion order.
+/// `None` means invalid JSON, which Python's `_consume_loop` silently skips.
+fn canonical_payload(raw: &str) -> Option<(Value, String)> {
+    let v: Value = serde_json::from_str(raw).ok()?;
+    let text = serde_json::to_string(&v).ok()?;
+    Some((v, text))
+}
+
 /// Build the unified envelope from spec/00 SS5.2, byte-for-byte matching Python
-/// `ws_hub._envelope`: `{"type":kind,"data":<raw>}`. `raw` is the publisher's
-/// own JSON text, forwarded verbatim (so inner `data` bytes are identical).
+/// `ws_hub._envelope`: `{"type":kind,"data":<raw>}`. `raw` must be the canonical
+/// text from `canonical_payload()`; concatenating it verbatim is what keeps the
+/// inner `data` bytes identical to Python's re-serialized dict.
 pub(crate) fn envelope(kind: &str, raw: &str) -> String {
     format!("{{\"type\":\"{kind}\",\"data\":{raw}}}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_payload_matches_python_json_dumps() {
+        // Chinese escaped by a publisher using json.dumps(default ensure_ascii=True)
+        // plus stray whitespace must become compact UTF-8 text, key order kept.
+        let raw = r#"{"robot_id": "humanoid-001", "message": "\u7535\u673a\u6e29\u5ea6\u8fc7\u9ad8"}"#;
+        let (_, out) = canonical_payload(raw).expect("valid JSON");
+        assert_eq!(
+            out,
+            r#"{"robot_id":"humanoid-001","message":"电机温度过高"}"#
+        );
+        assert_eq!(
+            envelope("alert", &out),
+            r#"{"type":"alert","data":{"robot_id":"humanoid-001","message":"电机温度过高"}}"#
+        );
+    }
+
+    #[test]
+    fn canonical_payload_rejects_invalid_json() {
+        assert!(canonical_payload("not json").is_none());
+    }
 }
