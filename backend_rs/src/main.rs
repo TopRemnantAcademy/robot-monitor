@@ -1282,7 +1282,15 @@ async fn main() {
         .route("/ws/robots", get(ws::ws_handler))
         .with_state(state);
 
-    let addr: std::net::SocketAddr = "0.0.0.0:8001".parse().expect("valid addr");
+    // Listen port is env-configurable so the replica can avoid colliding with
+    // other services in the real deployment topology. NOTE: infra/docker-compose.app.yml
+    // already binds Python `alert-engine` to host:8001, so in production set
+    // ROBOT_RS_PORT=8002 (or any free port). Default 8001 is kept for the spike/dev
+    // stack where alert-engine is not co-located on the same host port.
+    let port: u16 = env_string("ROBOT_RS_PORT", "8001")
+        .parse()
+        .unwrap_or(8001);
+    let addr: std::net::SocketAddr = format!("0.0.0.0:{port}").parse().expect("valid addr");
     tracing::info!("robot-monitor-backend-rs listening on http://{addr}");
     axum::serve(
         tokio::net::TcpListener::bind(addr).await.expect("bind"),
