@@ -1,7 +1,7 @@
 // spec/03 §5.1 —— 100-card wall
 // grid-cols-5 md:grid-cols-10 gap-2, each card aspect-[4/3], all colors from theme/tokens.
 
-import { memo, useMemo, useRef } from 'react';
+import { memo, useRef } from 'react';
 import {
   COLORS,
   DISPLAY_COLOR,
@@ -12,9 +12,10 @@ import {
   robotDisplayState,
   tempColor,
 } from '../theme/tokens';
-import { useRobotStore, buildRobotIds } from '../store/robotStore';
+import { useRobotStore } from '../store/robotStore';
 import { countCardRender } from '../lib/observability';
 import { useI18n } from '../i18n/I18nProvider';
+import RobotAvatar, { variantFromId } from './RobotAvatar';
 
 /** Cards only consume their own robotId, combined with memo + self-subscription so "cards unchanged this frame" don't re-render */
 interface RobotCardProps {
@@ -61,13 +62,25 @@ const RobotCard = memo(function RobotCard({ robotId, selected, onOpen }: RobotCa
       <div className="h-1 w-full shrink-0" style={{ backgroundColor: statusColor }} />
 
       <div className="flex flex-col flex-1 min-h-0 px-2 py-1 gap-0.5">
-        {/* 2. Robot ID (H-042 short name, 13px/600) */}
-        <span
-          className="truncate"
-          style={{ ...FONT.cardId, color: statusColor === COLORS.statusOffline ? COLORS.textSecondary : COLORS.textPrimary }}
-        >
-          H-{robot.robot_id.replace(/^humanoid-/, '')}
-        </span>
+        {/* 2. Robot ID (H-042 short name, 13px/600) + compact robot glyph */}
+        <div className="flex items-center gap-1 min-w-0">
+          <RobotAvatar
+            variant={variantFromId(robot.robot_id)}
+            state={state}
+            size={30}
+            animated={false}
+            glow={false}
+            className="shrink-0"
+          />
+          <span
+            className="truncate"
+            style={{ ...FONT.cardId, color: statusColor === COLORS.statusOffline ? COLORS.textSecondary : COLORS.textPrimary }}
+          >
+            {robot.robot_id.startsWith('humanoid-')
+              ? `H-${robot.robot_id.slice('humanoid-'.length)}`
+              : robot.robot_id}
+          </span>
+        </div>
 
         {/* 3. Battery bar (width = battery %) */}
         <div className="flex items-center gap-1">
@@ -94,14 +107,16 @@ const RobotCard = memo(function RobotCard({ robotId, selected, onOpen }: RobotCa
 });
 
 /**
- * 100-card grid body. Wrapped in one memo: when the parent App draws the Drawer (selected-state change),
- * this subtree's props are completely unchanged, memo hit skips the whole block —— no need to diff 100 cards individually.
+ * Full-fleet grid body. Wrapped in one memo: when the parent App draws the Drawer (selected-state change),
+ * this subtree's props are completely unchanged, memo hit skips the whole block —— no need to diff N cards individually.
  *
  * ISSUE #75 structural sharing (consumer side): the grid **no longer subscribes to the whole robots Map**.
  * The old form `useRobotStore((s) => s.robots)` made the grid body re-render every 100ms store-flush frame
- * and rebuild 100 card elements; now it subscribes to a constant ID list (`buildRobotIds(100)`,
- * content never changes → this component re-renders zero times except on selectedRobotId change), each card
- * fetches data via its own `s.robots.get(robotId)` self-subscription —— only cards with reference changes re-render.
+ * and rebuild 100 card elements; now it subscribes to `fleetIds` (the ordered roster recomputed from the store
+ * in applySnapshot). `sameFleetIds` keeps that reference stable when the set is unchanged, so this grid body
+ * only re-renders when the fleet membership actually changes (e.g. the REST /robots fetch bringing the real
+ * SEGWAY-S1 / Deliee units in) or on selectedRobotId change. Each card fetches data via its own
+ * `s.robots.get(robotId)` self-subscription —— only cards with reference changes re-render.
  */
 const RobotGrid = memo(function RobotGrid() {
   // Order 16 T2: card-wall render counter.
@@ -121,8 +136,10 @@ const RobotGrid = memo(function RobotGrid() {
   const selectedRobotId = useRobotStore((s) => s.selectedRobotId);
   const selectRobot = useRobotStore((s) => s.selectRobot);
 
-  // Constant list: content and reference both never change, useMemo is merely a contractual expression (hoping for compiler constant folding).
-  const ids = useMemo(() => buildRobotIds(100), []);
+  // B: the grid renders the **full fleet** — 100 demo humanoids plus the real SEGWAY-S1 / Deliee
+  // units. `fleetIds` is recomputed in applySnapshot from every robot present in the store, so this
+  // grid body re-renders only when the fleet set actually changes (sameFleetIds keeps it stable otherwise).
+  const ids = useRobotStore((s) => s.fleetIds);
 
   return (
     <div className="flex-1 min-h-0 overflow-y-auto px-3 py-2">

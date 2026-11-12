@@ -242,6 +242,25 @@ export interface AlertEnvelope {
   data: RobotAlert;
 }
 
-export type WsEnvelope = SnapshotEnvelope | TelemetryEnvelope | AlertEnvelope;
+/**
+ * VLA policy-action frame (R-VLA-EVAL Phase 1). Field-by-field aligned with the
+ * backend `app/schemas/telemetry.py:PolicyAction` — the WS hub forwards that
+ * model (dumped verbatim) as the `data` of the action envelope.
+ */
+export interface PolicyAction {
+  robot_id: string;
+  policy_version: string;
+  trial_id: string | null;
+  action: number[];
+  goal: string | null;
+  ts: number | null;
+}
+
+export interface ActionEnvelope {
+  type: 'action';
+  data: PolicyAction;
+}
+
+export type WsEnvelope = SnapshotEnvelope | TelemetryEnvelope | AlertEnvelope | ActionEnvelope;
 
 export type WsStatus = 'connecting' | 'open' | 'closed';

@@ -12,6 +12,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import ReactEChartsCore from 'echarts-for-react/lib/core';
 import echarts from '../lib/echartsCore';
 import JointHeatmap from './JointHeatmap';
+import RobotAvatar, { variantFromId } from './RobotAvatar';
 import {
   COLORS,
   DISPLAY_COLOR,
@@ -401,7 +402,7 @@ export default function RobotDetailDrawer() {
           style={{ borderBottom: `1px solid ${COLORS.border}` }}
         >
           <div className="flex items-baseline gap-2 min-w-0">
-            <span id="robot-detail-title" style={{ ...FONT.title, color: COLORS.textPrimary }}>{selectedRobotId}</span>
+            <span style={{ ...FONT.title, color: COLORS.textPrimary }}>{selectedRobotId}</span>
             <span style={{ ...FONT.metric, color: statusColor }}>{statusText}</span>
           </div>
           <button
@@ -417,6 +418,26 @@ export default function RobotDetailDrawer() {
         </div>
 
         <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 flex flex-col gap-4">
+          {/* Robot portrait — live form factor + state-colored glow (user request: robot looks in the UI). */}
+          <section className="flex items-center gap-4 shrink-0">
+            <div className="shrink-0" style={{ width: 96, height: 96 }}>
+              <RobotAvatar
+                variant={variantFromId(selectedRobotId ?? undefined)}
+                state={displayState}
+                size={96}
+                animated
+                glow
+              />
+            </div>
+            <div className="flex flex-col min-w-0">
+              <span id="robot-detail-title" style={{ ...FONT.title, color: COLORS.textPrimary }}>{selectedRobotId}</span>
+              <span style={{ ...FONT.metric, color: statusColor }}>{statusText}</span>
+              <span style={{ ...FONT.metric, color: COLORS.textSecondary, marginTop: 2 }}>
+                {t('info.frameAge')}: {frameAge(lastSeenMs(robot), t)}
+              </span>
+            </div>
+          </section>
+
           {/* Basic info */}
           <section>
             <h3 style={{ ...FONT.metric, color: COLORS.textSecondary }}>{t('info.title')}</h3>

@@ -5,7 +5,7 @@
 
 import { authHeaders, clearToken, getToken, setToken } from './session';
 import type { CurrentUser, LoginResult } from './types';
-import type { SupportedRobotsResponse } from '../types/robot';
+import type { RobotListResponse, SupportedRobotsResponse } from '../types/robot';
 
 /** REST base URL: Vite only exposes VITE_ prefix (orders/05 forbidden item). */
 export const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
@@ -91,6 +91,42 @@ export function hasToken(): boolean {
 }
 
 /**
+ * Self-service registration (POST /auth/register). The backend fixes the new user to the
+ * `viewer` role (on_after_register); this call only exchanges email + password for a created
+ * account and does NOT return a token, so the caller must log in separately afterward.
+ *
+ * fastapi-users error shapes:
+ *   - 400  `{"detail": "REGISTER_USER_ALREADY_EXISTS"}`  → email already taken
+ *   - 422  `{"detail": [ {msg, loc, type}, … ]}`         → schema/password validation
+ * We surface a friendly, localized-ready message either way.
+ */
+export async function register(email: string, password: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+
+  if (res.status === 400 || res.status === 422) {
+    let msg = 'Registration failed';
+    try {
+      const data = (await res.json()) as { detail?: unknown };
+      if (typeof data.detail === 'string') {
+        msg = data.detail === 'REGISTER_USER_ALREADY_EXISTS' ? 'This email is already registered' : data.detail;
+      } else if (Array.isArray(data.detail)) {
+        msg = data.detail
+          .map((x: unknown) => (typeof x === 'string' ? x : ((x as { msg?: string })?.msg ?? JSON.stringify(x))))
+          .join('; ');
+      }
+    } catch {
+      /* keep generic message */
+    }
+    throw new Error(msg);
+  }
+  if (!res.ok) throw new Error(`Registration failed (HTTP ${res.status})`);
+}
+
+/**
  * Fetch the "platform-supported robot models" catalog + registered fleet composition (GET /supported-robots).
  * Readable from viewer role up; used for the "supported models" display in both the UI and admin UI.
  */
@@ -102,4 +138,24 @@ export async function fetchSupportedRobots(): Promise<SupportedRobotsResponse> {
   }
   if (!res.ok) throw new Error(`Failed to fetch supported models (HTTP ${res.status})`);
   return (await res.json()) as SupportedRobotsResponse;
+}
+
+/**
+ * Fetch the full fleet roster (GET /robots): the 100 live demo humanoids plus every
+ * real registered unit (e.g. the SEGWAY-S1 delivery robots seeded from encosmart, the
+ * "Deliee" unit, etc.). Viewer-role readable; used once on dashboard mount to populate
+ * the grid with the complete fleet, including units that have no live WS feed.
+ *
+ * Because the WS first-frame snapshot only enumerates the 100 demo units, this REST call
+ * is what brings the real fleet into the store. `applySnapshot` keeps robots not present
+ * in either source intact, so neither side clobbers the other.
+ */
+export async function fetchRobots(): Promise<RobotListResponse> {
+  const res = await fetch(`${API_BASE}/robots`, { headers: authHeaders() });
+  if (res.status === 401) {
+    notifyUnauthorized();
+    throw new Error('Session expired, please log in again');
+  }
+  if (!res.ok) throw new Error(`Failed to fetch fleet roster (HTTP ${res.status})`);
+  return (await res.json()) as RobotListResponse;
 }

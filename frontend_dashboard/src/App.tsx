@@ -15,8 +15,10 @@ import FleetHealthAnalytics from './components/FleetHealthAnalytics';
 import SupportedRobotsPanel from './components/SupportedRobotsPanel';
 import AlertLogTable from './components/AlertLogTable';
 import RobotDetailDrawer from './components/RobotDetailDrawer';
+import PolicyActionStream from './components/PolicyActionStream';
+import FxBackdrop from './components/FxBackdrop';
 import LoginGate from './auth/LoginGate';
-import { setUnauthorizedHandler } from './auth/api';
+import { setUnauthorizedHandler, fetchRobots } from './auth/api';
 import { useAuthStore } from './auth/authStore';
 import { useRobotWebSocket } from './hooks/useRobotWebSocket';
 import { startObservabilityReport } from './lib/observability';
@@ -42,37 +44,64 @@ function Dashboard() {
   // so it won't start a timer that only prints all-zeros and pollutes the console.
   useEffect(() => startObservabilityReport(), []);
 
+  // B: bring the full registered fleet (100 demo humanoids + the real SEGWAY-S1 / Deliee units seeded
+  // from encosmart) into the store on mount. The WS first-frame snapshot only enumerates the 100 demo
+  // units, so this REST call is what makes the real fleet appear in the grid. `applySnapshot` keeps any
+  // robot absent from either source intact, so WS and REST never clobber each other regardless of order.
+  // Dashboard only mounts when authenticated (LoginGate), so the request is always authorized.
+  useEffect(() => {
+    let cancelled = false;
+    fetchRobots()
+      .then((resp) => {
+        if (cancelled) return;
+        useRobotStore.getState().applySnapshot(resp.robots);
+      })
+      .catch((err) => {
+        // Non-fatal: the WS snapshot still covers the 100 demo units, so the grid is never blank.
+        console.warn('[fleet] failed to fetch /robots roster:', err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <div
-      className="h-screen w-screen flex flex-col overflow-hidden"
-      style={{ backgroundColor: COLORS.bgBase, color: COLORS.textPrimary }}
+      className="relative h-screen w-screen flex flex-col overflow-hidden"
+      style={{ backgroundColor: 'transparent', color: COLORS.textPrimary }}
     >
-      <HealthSummaryHeader />
-      {wsStatus !== 'open' ? (
-        <div
-          role="alert"
-          className="shrink-0 flex items-center justify-center px-4 py-1"
-          style={{
-            backgroundColor: COLORS.statusWarning,
-            color: COLORS.bgBase,
-            fontSize: '12px',
-            fontWeight: 600,
-          }}
-        >
-          {wsStatus === 'connecting'
-            ? t('ws.connecting')
-            : t('ws.reconnecting')}
-          {' — '}
-          {t('ws.degradedHint')}
-        </div>
-      ) : null}
-      {/* UI enhancement: fleet-level distribution + trend layer (see FleetHealthAnalytics top comment).
-          fixed-height strip (shrink-0), card wall flex-1 auto-shrink, page still no scroll. */}
-      <FleetHealthAnalytics />
-      <SupportedRobotsPanel />
-      <FleetOverviewCards />
-      <AlertLogTable />
-      <RobotDetailDrawer />
+      {/* Animated cyber backdrop sits behind the dashboard surfaces. */}
+      <FxBackdrop variant="panel" />
+
+      <div className="relative z-10 flex flex-col flex-1 min-h-0">
+        <HealthSummaryHeader />
+        {wsStatus !== 'open' ? (
+          <div
+            role="alert"
+            className="shrink-0 flex items-center justify-center px-4 py-1"
+            style={{
+              backgroundColor: COLORS.statusWarning,
+              color: COLORS.bgBase,
+              fontSize: '12px',
+              fontWeight: 600,
+            }}
+          >
+            {wsStatus === 'connecting'
+              ? t('ws.connecting')
+              : t('ws.reconnecting')}
+            {' — '}
+            {t('ws.degradedHint')}
+          </div>
+        ) : null}
+        {/* UI enhancement: fleet-level distribution + trend layer (see FleetHealthAnalytics top comment).
+            fixed-height strip (shrink-0), card wall flex-1 auto-shrink, page still no scroll. */}
+        <FleetHealthAnalytics />
+        <SupportedRobotsPanel />
+        <FleetOverviewCards />
+        <PolicyActionStream />
+        <AlertLogTable />
+        <RobotDetailDrawer />
+      </div>
     </div>
   );
 }

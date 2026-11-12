@@ -16,6 +16,22 @@ import { fetchSupportedRobots } from '../auth/api';
 import { useIsAdmin } from '../auth/authStore';
 import { supportedRobotsKey, type SupportedRobot } from '../types/robot';
 import { useI18n } from '../i18n/I18nProvider';
+import RobotAvatar, { type RobotVariant } from './RobotAvatar';
+
+/** Pick the avatar form factor from the catalog model_type. */
+function variantForModel(modelType: string): RobotVariant {
+  if (modelType.startsWith('SEGWAY')) return 'delivery';
+  if (modelType.startsWith('HUMANOID')) return 'humanoid';
+  return 'humanoid';
+}
+
+/** Fleet health → avatar glow state. */
+function stateForModel(model: SupportedRobot): 'online' | 'warning' | 'offline' {
+  if (model.total === 0) return 'offline';
+  if (model.online === model.total) return 'online';
+  if (model.online > 0) return 'warning';
+  return 'offline';
+}
 
 export default function SupportedRobotsPanel() {
   const { t } = useI18n();
@@ -67,8 +83,8 @@ export default function SupportedRobotsPanel() {
         <span style={{ ...FONT.metric, color: COLORS.statusFault }}>{t('sr.loadFail')}</span>
       ) : (
         <div className="flex gap-2 overflow-x-auto pb-1">
-          {(data?.models ?? []).map((m) => (
-            <ModelCard key={m.model_type} model={m} isAdmin={isAdmin} />
+          {(data?.models ?? []).map((m, i) => (
+            <ModelCard key={m.model_type} model={m} isAdmin={isAdmin} index={i} />
           ))}
           {isLoading && !data && (
             <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>{t('sr.loading')}</span>
@@ -79,14 +95,16 @@ export default function SupportedRobotsPanel() {
   );
 }
 
-function ModelCard({ model, isAdmin }: { model: SupportedRobot; isAdmin: boolean }) {
+function ModelCard({ model, isAdmin, index }: { model: SupportedRobot; isAdmin: boolean; index: number }) {
   const { t } = useI18n();
   const allOnline = model.total > 0 && model.online === model.total;
   const onlineColor = allOnline ? COLORS.statusNormal : COLORS.statusWarning;
+  const enterClass = `fx-enter fx-enter-${(index % 8) + 1}`;
+  const state = stateForModel(model);
 
   return (
     <div
-      className="flex flex-col gap-1 px-3 py-2"
+      className={`flex flex-col gap-1 px-3 py-2 fx-lift ${enterClass}`}
       style={{
         flex: '1 1 240px',
         backgroundColor: COLORS.surface,
@@ -94,16 +112,29 @@ function ModelCard({ model, isAdmin }: { model: SupportedRobot; isAdmin: boolean
         borderRadius: RADIUS.card,
       }}
     >
-      <div className="flex items-center justify-between gap-2">
-        <span style={{ fontSize: '13px', fontWeight: 700, color: COLORS.textPrimary }}>
-          {model.display_name}
-        </span>
-        {model.generic && (
-          <span style={{ fontSize: '9px', color: COLORS.textSecondary }}>{t('sr.unregistered')}</span>
-        )}
+      <div className="flex items-center gap-3">
+        {/* Robot form-factor portrait with radar sweep + state glow. */}
+        <div className="shrink-0" style={{ width: 52, height: 52 }}>
+          <RobotAvatar
+            variant={variantForModel(model.model_type)}
+            state={state}
+            size={52}
+            animated={model.total > 0 && model.online > 0}
+            glow
+          />
+        </div>
+        <div className="flex flex-col min-w-0">
+          <div className="flex items-center justify-between gap-2">
+            <span style={{ fontSize: '13px', fontWeight: 700, color: COLORS.textPrimary }}>
+              {model.display_name}
+            </span>
+            {model.generic && (
+              <span style={{ fontSize: '9px', color: COLORS.textSecondary }}>{t('sr.unregistered')}</span>
+            )}
+          </div>
+          <span style={{ fontSize: '10px', color: COLORS.textSecondary }}>{model.model_type}</span>
+        </div>
       </div>
-
-      <span style={{ fontSize: '10px', color: COLORS.textSecondary }}>{model.model_type}</span>
 
       <div className="flex flex-wrap gap-1">
         <Tag label={model.form_factor === '—' ? t('sr.formFactorUndefined') : model.form_factor} />

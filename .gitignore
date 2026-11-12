@@ -69,3 +69,7 @@ frontend_dashboard/gen_seed.cjs
 **/enco-*.json
 **/enco-*.png
 **/gen_seed.cjs
+# Local verification screenshots (may depict the live dashboard with real fleet
+# data — not source, never committed, never pushed)
+frontend_dashboard/shot-*.png
+frontend_dashboard/*-verify.png

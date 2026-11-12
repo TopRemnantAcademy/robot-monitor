@@ -7,7 +7,7 @@
 // So WS messages are first buffered into a useRef<Map>, then flushed here uniformly at 10Hz.
 
 import { create } from 'zustand';
-import type { RobotAlert, RobotStatus, RobotTelemetry } from '../types/robot';
+import type { PolicyAction, RobotAlert, RobotStatus, RobotTelemetry } from '../types/robot';
 import { JOINT_NAMES, isRobotOnline } from '../types/robot';
 
 /** Alert-stream rolling cap, to prevent unbounded memory growth during long runs (~6 rows visible at 200px height). */
@@ -103,8 +103,13 @@ export function offlinePlaceholder(robotId: string): RobotTelemetry {
 interface RobotState {
   /** robot_id -> latest telemetry (100 robots resident; offline placeholder when not reported). */
   robots: Map<string, RobotTelemetry>;
+  /** Ordered list of every robot_id the grid should render (humanoid demo first, then the
+   * real registered fleet such as the SEGWAY-S1 delivery robots). */
+  fleetIds: string[];
   /** Alert stream, newest alert on top (prepend). */
   alerts: RobotAlert[];
+  /** R-VLA-EVAL Phase 1: latest policy-action frame per robot (coalesced in the WS hub). */
+  actions: Map<string, PolicyAction>;
   /** WS connection status, for the top-bar status dot. */
   wsStatus: 'connecting' | 'open' | 'closed';
   /** Currently opened Drawer target. */
@@ -118,6 +123,8 @@ interface RobotState {
   applyTelemetryBatch: (list: RobotTelemetry[]) => void;
   /** alert: prepend to the alert stream (spec/00 §5.2 ③). */
   pushAlert: (alert: RobotAlert) => void;
+  /** action: R-VLA-EVAL Phase 1 latest policy-action frame per robot (coalesced in the WS hub). */
+  applyActionBatch: (list: PolicyAction[]) => void;
   /**
    * Called after ack/withdraw (Order 17): update an alert's ack state in place.
    *
@@ -139,20 +146,55 @@ function initialRobots(): Map<string, RobotTelemetry> {
   return map;
 }
 
+/**
+ * Stable, human-readable ordering of every robot_id the grid renders:
+ * the 100 demo humanoids first (numeric suffix), then every other registered
+ * robot (e.g. the SEGWAY-S1 delivery fleet) in raw-id order.
+ */
+function computeFleetIds(ids: Iterable<string>): string[] {
+  const arr = Array.from(ids);
+  const isHumanoid = (id: string) => id.startsWith('humanoid-');
+  const numSuffix = (id: string) => {
+    const m = /(\d+)$/.exec(id);
+    return m ? parseInt(m[1], 10) : 0;
+  };
+  const humans = arr.filter(isHumanoid).sort((a, b) => numSuffix(a) - numSuffix(b));
+  const others = arr.filter((id) => !isHumanoid(id)).sort();
+  return [...humans, ...others];
+}
+
+/** Reference-stable compare so the grid body doesn't re-render when the fleet set is unchanged. */
+function sameFleetIds(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 export const useRobotStore = create<RobotState>((set) => ({
   robots: initialRobots(),
+  fleetIds: buildRobotIds(100),
   alerts: [],
+  actions: new Map(),
   wsStatus: 'connecting',
   selectedRobotId: null,
   fleetSamples: [],
 
   applySnapshot: (list) =>
     set((state) => {
-      // Full fill: keep the existing 100-ID skeleton, overwrite with the snapshot, missing ones fall back to offline placeholder.
       const next = new Map(state.robots);
-      for (const id of next.keys()) next.set(id, offlinePlaceholder(id));
+      // Only reset the IDs this snapshot actually covers. The WS first-frame snapshot
+      // enumerates just the 100 live demo units; the REST /robots call covers the full
+      // fleet. Robots NOT in `list` (e.g. the SEGWAY-S1 delivery robots seeded from
+      // encosmart, which have no live feed) must keep their prior state, otherwise the
+      // WS snapshot would wipe their real data every connect.
+      const provided = new Set(list.map((i) => i.robot_id));
+      for (const id of provided) next.set(id, offlinePlaceholder(id));
       for (const item of list) next.set(item.robot_id, item);
-      return { robots: next };
+      const fleetIds = computeFleetIds(next.keys());
+      return {
+        robots: next,
+        fleetIds: sameFleetIds(state.fleetIds, fleetIds) ? state.fleetIds : fleetIds,
+      };
     }),
 
   applyTelemetryBatch: (list) =>
@@ -174,6 +216,25 @@ export const useRobotStore = create<RobotState>((set) => ({
       const next = new Map(state.robots);
       for (const item of list) next.set(item.robot_id, item);
       return { robots: next };
+    }),
+
+  applyActionBatch: (list) =>
+    set((state) => {
+      if (list.length === 0) return state;
+      // Structural sharing (mirrors applyTelemetryBatch): skip the Map rebuild
+      // when nothing actually changed reference. Actions arrive as fresh parsed
+      // objects each flush, so a non-empty flush that changed something commits once.
+      let touched = false;
+      for (const item of list) {
+        if (state.actions.get(item.robot_id) !== item) {
+          touched = true;
+          break;
+        }
+      }
+      if (!touched) return state;
+      const next = new Map(state.actions);
+      for (const item of list) next.set(item.robot_id, item);
+      return { actions: next };
     }),
 
   pushAlert: (alert) =>

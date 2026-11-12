@@ -14,7 +14,7 @@ import { useRobotStore } from '../store/robotStore';
 import { getToken } from '../auth/session';
 import { useAuthStore } from '../auth/authStore';
 import { countStoreCommit, countWsMessage } from '../lib/observability';
-import type { RobotAlert, RobotTelemetry, WsEnvelope } from '../types/robot';
+import type { PolicyAction, RobotAlert, RobotTelemetry, WsEnvelope } from '../types/robot';
 // Order 18 T4: WS envelope dev-mode validation (no validation in production, see wsEnvelope.ts performance note)
 import { checkEnvelope, initWsValidator } from '../lib/wsEnvelope';
 
@@ -65,6 +65,8 @@ export function useRobotWebSocket(): void {
   const latestDataRef = useRef<Map<string, RobotTelemetry>>(new Map());
   // Alerts are low-frequency (not 10Hz), but still unified into the same flush, to avoid an extra render path.
   const alertBufferRef = useRef<RobotAlert[]>([]);
+  // R-VLA-EVAL Phase 1: latest policy-action frame per robot (overwrite semantics, same as telemetry).
+  const actionBufferRef = useRef<Map<string, PolicyAction>>(new Map());
   const socketRef = useRef<WebSocket | null>(null);
   const retryDelayRef = useRef<number>(RECONNECT_MIN_MS);
   const closedByUnmountRef = useRef<boolean>(false);
@@ -90,6 +92,12 @@ export function useRobotWebSocket(): void {
       if (alertBufferRef.current.length > 0) {
         for (const alert of alertBufferRef.current) store.pushAlert(alert);
         alertBufferRef.current = [];
+      }
+
+      // R-VLA-EVAL Phase 1: latest policy-action frame per robot → store (already coalesced in the hub).
+      if (actionBufferRef.current.size > 0) {
+        store.applyActionBatch(Array.from(actionBufferRef.current.values()));
+        actionBufferRef.current.clear();
       }
     }, FLUSH_INTERVAL_MS);
 
@@ -152,6 +160,14 @@ export function useRobotWebSocket(): void {
           const alert = envelope.data;
           if (alert && typeof alert.robot_id === 'string') {
             alertBufferRef.current.push(alert);
+          }
+          break;
+        }
+        // ④ R-VLA-EVAL Phase 1: VLA policy-action → buffer by robot_id, flush at the 100ms frame
+        case 'action': {
+          const item = envelope.data;
+          if (item && typeof item.robot_id === 'string') {
+            actionBufferRef.current.set(item.robot_id, item);
           }
           break;
         }

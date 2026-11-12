@@ -1,0 +1,213 @@
+/* =============================================================================
+ * RobotMonitor — Motion & Neon design layer (web-animation-design + ui-ux-pro-max)
+ *
+ * Goals (user request: "把机器人模样加进去，尽量弄得花哨一些"):
+ *   - Cyber / OLED dark aesthetic with neon accents and complex motion.
+ *   - Everything stays GPU-friendly (transform / opacity only) and respects
+ *     `prefers-reduced-motion` (the global reset in index.css already nukes
+ *     durations; this file adds an explicit opt-out too).
+ *
+ * Color discipline (spec/03 §3 + tokens.ts): status colors and the accent are the
+ * ONLY hues used. Decorative glows are translucent versions of the existing
+ * palette (accent blue #3B82F6, status green/yellow/red, offline gray) — no new
+ * semantic hue is introduced.
+ * ============================================================================= */
+
+/* ---- Font roles ---------------------------------------------------------- */
+.font-display {
+  font-family: 'Orbitron', 'Inter', system-ui, sans-serif;
+  letter-spacing: 0.02em;
+}
+.font-mono-x {
+  font-family: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', monospace;
+}
+
+/* ---- Animated background: aurora + cyber grid ---------------------------- */
+.fx-aurora {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+.fx-aurora::before,
+.fx-aurora::after {
+  content: '';
+  position: absolute;
+  inset: -35%;
+  will-change: transform;
+}
+/* Blue + green aurora blobs (palette colors only) */
+.fx-aurora::before {
+  background:
+    radial-gradient(38% 38% at 28% 32%, rgba(59, 130, 246, 0.22), transparent 70%),
+    radial-gradient(34% 34% at 72% 58%, rgba(46, 204, 113, 0.10), transparent 70%);
+  animation: fxDrift 19s ease-in-out infinite;
+}
+.fx-aurora::after {
+  background:
+    radial-gradient(30% 30% at 62% 38%, rgba(59, 130, 246, 0.16), transparent 70%),
+    radial-gradient(26% 26% at 40% 72%, rgba(241, 196, 15, 0.07), transparent 70%);
+  animation: fxDrift2 24s ease-in-out infinite;
+}
+
+/* Perspective-ish cyber grid (subtle, palette blue) */
+.fx-grid::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(59, 130, 246, 0.07) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(59, 130, 246, 0.07) 1px, transparent 1px);
+  background-size: 44px 44px;
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 18%, #000 62%, transparent);
+  mask-image: linear-gradient(to bottom, transparent, #000 18%, #000 62%, transparent);
+  animation: fxGrid 9s linear infinite;
+  will-change: background-position;
+}
+
+/* Stronger variant for the full landing page */
+.fx-aurora--page::before {
+  background:
+    radial-gradient(42% 42% at 26% 30%, rgba(59, 130, 246, 0.30), transparent 70%),
+    radial-gradient(36% 36% at 74% 60%, rgba(46, 204, 113, 0.14), transparent 70%);
+}
+.fx-aurora--page::after {
+  background:
+    radial-gradient(32% 32% at 64% 36%, rgba(59, 130, 246, 0.22), transparent 70%),
+    radial-gradient(28% 28% at 38% 74%, rgba(241, 196, 15, 0.10), transparent 70%);
+}
+
+/* ---- Robot / element motion ---------------------------------------------- */
+.fx-float {
+  animation: fxFloat 6s ease-in-out infinite;
+  will-change: transform;
+}
+.fx-spin-slow {
+  animation: fxSpin 9s linear infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.fx-scanline {
+  animation: fxScan 3.2s ease-in-out infinite;
+  will-change: transform;
+}
+/* Blinking antenna / sensor light */
+.fx-blink {
+  animation: fxBlink 1.8s steps(1, end) infinite;
+}
+/* Soft pulsing glow — apply via drop-shadow on an element; pass --fx-c color. */
+.fx-glow {
+  animation: fxGlow 2.6s ease-in-out infinite;
+}
+
+/* ---- Entrance stagger (fade + rise, ease-out per web-animation-design) ---- */
+.fx-enter {
+  opacity: 0;
+  transform: translateY(14px);
+  animation: fxEnter 0.55s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+.fx-enter-1 { animation-delay: 0.05s; }
+.fx-enter-2 { animation-delay: 0.12s; }
+.fx-enter-3 { animation-delay: 0.19s; }
+.fx-enter-4 { animation-delay: 0.26s; }
+.fx-enter-5 { animation-delay: 0.33s; }
+.fx-enter-6 { animation-delay: 0.40s; }
+.fx-enter-7 { animation-delay: 0.47s; }
+.fx-enter-8 { animation-delay: 0.54s; }
+
+/* ---- Neon / shimmer text ------------------------------------------------ */
+.fx-neon {
+  text-shadow:
+    0 0 6px var(--fx-c, rgba(59, 130, 246, 0.55)),
+    0 0 16px var(--fx-c, rgba(59, 130, 246, 0.35));
+}
+.fx-shimmer {
+  background-image: linear-gradient(
+    110deg,
+    currentColor 0%,
+    rgba(255, 255, 255, 0.85) 50%,
+    currentColor 100%
+  );
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: fxShimmer 3.4s linear infinite;
+}
+
+/* Hover lift for cards (transform-only, ease-out) */
+.fx-lift {
+  transition: transform 200ms ease-out, border-color 200ms ease-out, box-shadow 200ms ease-out;
+}
+@media (hover: hover) and (pointer: fine) {
+  .fx-lift:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 8px 24px rgba(59, 130, 246, 0.18);
+  }
+}
+
+/* =============================================================================
+ * Keyframes (transform / opacity only)
+ * ============================================================================= */
+@keyframes fxDrift {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  50% { transform: translate3d(4%, -3%, 0) scale(1.08); }
+}
+@keyframes fxDrift2 {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1.05); }
+  50% { transform: translate3d(-5%, 4%, 0) scale(1); }
+}
+@keyframes fxGrid {
+  from { background-position: 0 0; }
+  to { background-position: 0 44px; }
+}
+@keyframes fxFloat {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-12px); }
+}
+@keyframes fxSpin {
+  to { transform: rotate(360deg); }
+}
+@keyframes fxScan {
+  0%, 100% { transform: translateY(-46px); opacity: 0; }
+  10%, 90% { opacity: 0.9; }
+  50% { transform: translateY(46px); opacity: 0.9; }
+}
+@keyframes fxBlink {
+  0%, 60% { opacity: 1; }
+  61%, 100% { opacity: 0.25; }
+}
+@keyframes fxGlow {
+  0%, 100% { filter: drop-shadow(0 0 3px var(--fx-c)); }
+  50% { filter: drop-shadow(0 0 13px var(--fx-c)); }
+}
+@keyframes fxEnter {
+  to { opacity: 1; transform: none; }
+}
+@keyframes fxShimmer {
+  from { background-position: 200% 0; }
+  to { background-position: 0 0; }
+}
+
+/* =============================================================================
+ * Reduced motion — explicit opt-out (keep content visible, drop the movement)
+ * ============================================================================= */
+@media (prefers-reduced-motion: reduce) {
+  .fx-float,
+  .fx-spin-slow,
+  .fx-scanline,
+  .fx-blink,
+  .fx-glow,
+  .fx-shimmer,
+  .fx-enter,
+  .fx-aurora::before,
+  .fx-aurora::after,
+  .fx-grid::after {
+    animation: none !important;
+  }
+  .fx-enter {
+    opacity: 1 !important;
+    transform: none !important;
+  }
+}

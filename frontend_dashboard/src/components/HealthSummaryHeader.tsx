@@ -72,7 +72,12 @@ export default function HealthSummaryHeader() {
       style={{ backgroundColor: COLORS.surface, borderBottom: `1px solid ${COLORS.border}` }}
     >
       <div className="flex items-baseline gap-2">
-        <span style={{ ...FONT.title, color: COLORS.textPrimary }}>RobotMonitor</span>
+        <span
+          className="font-display fx-neon"
+          style={{ ...FONT.title, color: COLORS.textPrimary, ['--fx-c' as string]: COLORS.accent }}
+        >
+          RobotMonitor
+        </span>
         <span style={{ ...FONT.metric, color: COLORS.textSecondary }}>
           {t('header.subtitle')}
         </span>
