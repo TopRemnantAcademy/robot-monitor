@@ -4,7 +4,7 @@ uvicorn[standard]==0.28.0
 # CI's backend job installs both requirements files into **the same venv** to run tests; divergence causes
 # pip ResolutionImpossible (PR #25 / #20 went red for this reason). Changes here must be mirrored in alert_engine.
 pydantic==2.14.3
-pydantic-settings==2.16.2
+pydantic-settings==2.16.3
 asyncpg==0.32.0
 sqlalchemy[asyncio]==2.0.28
 redis[hiredis]==8.1.0
