@@ -2,6 +2,6 @@ asyncpg==0.32.0
 redis[hiredis]==8.1.0
 # ⚠️ pydantic / pydantic-settings MUST stay exactly identical to backend_ingestion/requirements.txt:
 # CI's backend job installs both requirements files into the same venv; divergence causes pip ResolutionImpossible.
-pydantic-settings==2.16.2
+pydantic-settings==2.16.3
 pydantic==2.14.3
 prometheus-client==0.26.0
